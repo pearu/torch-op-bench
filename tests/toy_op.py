@@ -61,6 +61,7 @@ def verify_flag(fn):
         raise AssertionError(
             f"TOB_TOY_FLAG not set before torch import ({TORCH_PREIMPORTED=}, {FLAG_AT_IMPORT=})"
         )
+    print("verify_flag: noise on stdout")
     fn()
     return {"flag": FLAG_AT_IMPORT}
 
