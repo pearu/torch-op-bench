@@ -1,0 +1,25 @@
+# The `liger` environment, Liger-Kernel at a pinned commit of its `main` branch.
+# Create it with `scripts/setup-env.sh liger-git` (prefix envs/.prefix/liger-git).
+# Every version is pinned: a results file names this definition, and a definition
+# that drifts would make the record lie. To move to a newer commit, replace the
+# hash and the date below (a full 40-hex hash: a branch name is not a pin).
+# envs/liger.yml is the same with the PyPI release.
+name: liger
+channels:
+  - conda-forge
+dependencies:
+  # The newest Python minor for which torch 2.14.1 and triton 3.8.0 both have
+  # wheels (cp310-cp314); it need not be pytorch-dev's.
+  - python=3.14.8
+  - pip=26.2.1
+  - pip:
+      # The latest stable torch, the PyPI default wheel (CUDA 13.0), which the
+      # sm_80+ GPUs and a recent driver accept. Its own torch and CUDA libraries:
+      # parity in this environment is against this torch (R2).
+      - torch==2.14.1
+      # Liger's kernels are Triton kernels; this is the triton torch 2.14.1 asks for.
+      - triton==3.8.0
+      # The counterpart under test, Liger-Kernel `main` on 2026-10-16 (28 commits
+      # after v0.8.4): pure Python plus Triton, no toolchain needed. Records carry
+      # this commit in env.packages["liger-kernel"].
+      - liger-kernel @ git+https://github.com/linkedin/Liger-Kernel@b49a7aa960362be2953b30f572693764db026385
