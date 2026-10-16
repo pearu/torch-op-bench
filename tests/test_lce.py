@@ -10,6 +10,7 @@ from torch_op_bench.spec import Case, resolve_op
 
 SPEC = lce.LCE
 IMPLS = ["torch_eager", "torch_compiled", "torch_lce", "torch_lce_no_override"]
+LIGER_IMPLS = ["liger", "liger_native_accum", "torch_eager_liger"]
 TINY = {"N": 64, "H": 32, "V": 96}
 
 
@@ -33,12 +34,23 @@ def restore_overrides():
 
 def test_registered():
     assert resolve_op("lce") is SPEC
-    assert [impl.name for impl in SPEC.implementations] == IMPLS
+    assert [impl.name for impl in SPEC.implementations] == IMPLS + LIGER_IMPLS
     assert SPEC.default_point == {"N": 4096, "H": 4096, "V": 131072, "ignore_frac": "0"}
     assert SPEC.default_dtypes == ["bfloat16"]
     for impl in [*SPEC.implementations, SPEC.reference]:
-        assert impl.env_name == "torch" and impl.modes == {"fwd", "fwd_bwd"}
         assert {k: impl.info[k] for k in lce.CONTRACT} == lce.CONTRACT
+        if impl.name in LIGER_IMPLS:
+            continue
+        assert impl.env_name == "torch" and impl.modes == {"fwd", "fwd_bwd"}
+    eager, control = SPEC.implementation("torch_eager"), SPEC.implementation("torch_eager_liger")
+    assert control.env_name == "liger" and control.run is eager.run
+    assert control.info == {**eager.info, "role": "control", "control_of": "torch_eager"}
+    assert control.modes == {"fwd", "fwd_bwd"}
+    for name, accum_dtype in [("liger", "float32"), ("liger_native_accum", None)]:
+        impl = SPEC.implementation(name)
+        assert impl.env_name == "liger" and impl.modes == {"fwd_bwd"}
+        assert impl.packages == ("liger-kernel", "triton")
+        assert impl.info == {**lce.CONTRACT, "accum_dtype": accum_dtype, "backend": "liger"}
 
 
 @pytest.mark.parametrize("ignore_frac, ignored", [("0", 0), ("0.25", 16), ("1", 64)])
@@ -301,7 +313,7 @@ def test_through_worker_and_runner(tmp_path):
     cases = runner.enumerate_cases(
         SPEC, device="cpu", dtypes=["float32"], cases=[{**TINY, "ignore_frac": "0.25"}]
     )
-    runs = runner.enumerate_runs(SPEC, cases)
+    runs = runner.enumerate_runs(SPEC, cases, IMPLS)
     assert len(runs) == 8
     written = runner.run_sweep(
         SPEC,
@@ -358,6 +370,182 @@ def test_list(capsys):
     for name in IMPLS:
         assert f"  {name}  modes=fwd,fwd_bwd  env=torch  available" in out
     assert "default dtypes: bfloat16" in out
+    not_checked = "not checked (environment 'liger')"
+    assert f"  liger  modes=fwd_bwd  env=liger  {not_checked}" in out
+    assert f"  liger_native_accum  modes=fwd_bwd  env=liger  {not_checked}" in out
+    assert (
+        f"  torch_eager_liger (control of torch_eager)  modes=fwd,fwd_bwd  env=liger  {not_checked}"
+    ) in out
+
+
+@pytest.mark.parametrize(
+    "N, H, V, expected",
+    [
+        (4096, 4096, 131072, (32, 128, 32)),  # the contract's default point
+        (1024, 1024, 32768, (32, 32, 32)),
+        (4096, 4096, 65536, (16, 256, 16)),
+        (1000, 4096, 2048, (1, 1000, 1)),  # V < H: one chunk of all tokens
+        (100, 64, 640, (10, 16, 7)),  # rounded up to a power of two
+        (100, 64, 192, (3, 64, 2)),  # the last chunk is shorter
+    ],
+)
+def test_liger_chunks(N, H, V, expected):
+    chunks = lce.liger_chunks(N, H, V)
+    assert (chunks["inc_factor"], chunks["chunk_size"], chunks["num_chunks"]) == expected
+
+
+def test_liger_chunks_mem_const():
+    assert lce.liger_chunks(4096, 4096, 131072, chunk_mem_const=4) == {
+        "inc_factor": 8,
+        "chunk_size": 512,
+        "num_chunks": 8,
+    }
+
+
+def test_liger_setup(monkeypatch):
+    monkeypatch.setattr(lce, "liger_version", lambda: "0.8.4")
+    c = case("bfloat16", N=4096, H=4096, V=131072)
+    expected = {
+        "chunk_mem_const": 1,
+        "inc_factor": 32,
+        "chunk_size": 128,
+        "num_chunks": 32,
+        "liger_kernel": "0.8.4",
+        "ce_impl": "triton",
+    }
+    assert SPEC.implementation("liger").setup(c) == {**expected, "accum_dtype": "float32"}
+    setup = SPEC.implementation("liger_native_accum").setup
+    assert setup(c) == {**expected, "accum_dtype": None}
+
+
+def test_liger_version(monkeypatch):
+    def missing(name):
+        raise lce.importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(lce.importlib.metadata, "version", missing)
+    assert lce.liger_version() is None
+    monkeypatch.setattr(lce.importlib.metadata, "version", lambda name: f"{name} 1.0")
+    assert lce.liger_version() == "liger-kernel 1.0"
+
+
+def _fake_liger(monkeypatch, fn):
+    import types
+
+    for name in ["liger_kernel", "liger_kernel.transformers"]:
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    functional = types.ModuleType("liger_kernel.transformers.functional")
+    functional.liger_fused_linear_cross_entropy = fn
+    monkeypatch.setitem(sys.modules, "liger_kernel.transformers.functional", functional)
+    return functional
+
+
+def test_liger_available(monkeypatch):
+    monkeypatch.setattr(lce, "liger_version", lambda: None)
+    monkeypatch.setitem(sys.modules, "liger_kernel", None)
+    reason = lce.liger_available()
+    assert reason.startswith(
+        f"liger_kernel.transformers.functional cannot be imported "
+        f"(liger-kernel None, torch {torch.__version__}): "
+    )
+
+    def with_accum(input, weight, target, ignore_index=-100, accum_dtype=None):
+        return None
+
+    def without_accum(input, weight, target, ignore_index=-100):
+        return None
+
+    monkeypatch.setattr(lce, "liger_version", lambda: "0.1.0")
+    _fake_liger(monkeypatch, without_accum)
+    assert lce.liger_available() == (
+        "liger-kernel 0.1.0: liger_fused_linear_cross_entropy takes no accum_dtype"
+    )
+    _fake_liger(monkeypatch, with_accum)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert lce.liger_available() == "liger-kernel needs a CUDA device"
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert lce.liger_available() is True
+
+
+def test_liger_run_passes_the_contract(monkeypatch):
+    calls = []
+
+    def fake(input, weight, target, ignore_index, reduction, accum_dtype):
+        calls.append((ignore_index, reduction, accum_dtype))
+        return lce._eager_loss(input, weight, target)
+
+    _fake_liger(monkeypatch, fake)
+    c = case("float32", "0.25")
+    x = inputs(c)
+    for name in ["liger", "liger_native_accum"]:
+        outputs = SPEC.implementation(name).run(x, "fwd_bwd")
+        reference = SPEC.reference.run(x, "fwd_bwd")
+        assert SPEC.compare(outputs, reference, c)["loss_rel_err"] < 1e-6
+        clear_grads(x)
+    assert calls == [(-100, "mean", torch.float32), (-100, "mean", None)]
+
+
+def test_liger_verify(monkeypatch):
+    seen = []
+
+    def fake_events(fn, keep, kernels_only):
+        assert kernels_only
+        fn()
+        names = [
+            "liger_cross_entropy_kernel",
+            "aten::mm",
+            "_liger_grad_kernel",
+            "element_mul_kernel",
+        ]
+        return sorted(name for name in names if keep(name))
+
+    monkeypatch.setattr(lce, "profiled_events", fake_events)
+    assert lce.verify_liger(lambda: seen.append(1)) == {
+        "liger_events": ["_liger_grad_kernel", "liger_cross_entropy_kernel"]
+    }
+    assert seen == [1]
+    monkeypatch.setattr(lce, "profiled_events", lambda fn, keep, kernels_only: [])
+    with pytest.raises(AssertionError, match="no Liger kernel .* ran"):
+        lce.verify_liger(lambda: None)
+
+
+def test_profiled_events_on_cpu():
+    c = case()
+    x = inputs(c)
+    events = lce.profiled_events(lambda: lce.run_eager(x, "fwd"), lambda name: "aten::" in name)
+    assert "aten::linear" in events or "aten::mm" in events
+    assert events == sorted(set(events))
+    assert lce.profiled_events(lambda: lce.run_eager(x, "fwd"), bool, kernels_only=True) == []
+
+
+def test_liger_entries_through_runner_on_cpu(tmp_path):
+    cases = runner.enumerate_cases(
+        SPEC, device="cpu", dtypes=["float32"], cases=[{**TINY, "ignore_frac": "0.25"}]
+    )
+    written = runner.run_sweep(
+        SPEC,
+        "lce",
+        runner.enumerate_runs(SPEC, cases, LIGER_IMPLS, ["fwd_bwd"]),
+        settings=runner.Settings(warmup=1, repeat=2, timeout=600),
+        results_dir=tmp_path,
+        slug="cpu",
+        env_map=runner.parse_env_map([f"liger={sys.executable}"]),
+    )
+    by_impl = {r["implementation"]: r for r in written}
+    assert list(by_impl) == LIGER_IMPLS
+    for name in ["liger", "liger_native_accum"]:
+        record = by_impl[name]
+        assert record["status"] == "unavailable" and record["env_name"] == "liger"
+        try:
+            import liger_kernel  # noqa: F401
+        except ImportError:
+            assert "liger_kernel.transformers.functional cannot be imported" in record["reason"]
+        else:  # a torch environment with Liger installed (§4.2)
+            assert record["reason"] == "liger-kernel needs a CUDA device"
+    control = by_impl["torch_eager_liger"]
+    assert control["status"] == "ok", control["reason"]
+    assert control["env_name"] == "liger" and control["parity"]["status"] == "ok"
+    assert control["info"]["role"] == "control"
+    assert control["info"]["control_of"] == "torch_eager"
 
 
 def test_parent_does_not_import_torch():
@@ -379,7 +567,7 @@ def test_cuda_small_case_through_runner(tmp_path):
     written = runner.run_sweep(
         SPEC,
         "lce",
-        runner.enumerate_runs(SPEC, cases),
+        runner.enumerate_runs(SPEC, cases, IMPLS),
         settings=runner.Settings(warmup=2, repeat=5, timeout=900),
         results_dir=tmp_path,
         slug="gpu",
@@ -424,3 +612,71 @@ def test_cuda_override_not_registered_is_named(monkeypatch):
     assert record["status"] == "error"
     assert "not registered: disabled by TORCH_DISABLE_NATIVE_JIT=1" in record["reason"]
     assert record["env"]["packages"]["nvidia-cutlass-dsl"]
+
+
+def _liger_environments():
+    """(id, python) of the Liger environments present: ``TOB_LIGER_PYTHON``, or
+    those scripts/setup-env.sh made under envs/.prefix of this checkout."""
+    import os
+    from pathlib import Path
+
+    from test_envs import ROOT
+
+    found = []
+    if os.environ.get("TOB_LIGER_PYTHON"):
+        found.append(pytest.param(os.environ["TOB_LIGER_PYTHON"], id="TOB_LIGER_PYTHON"))
+    for name in ["liger", "liger-git"]:
+        python = ROOT / "envs" / ".prefix" / name / "bin" / "python"
+        if Path(python).exists():
+            found.append(pytest.param(str(python), id=name))
+    if not found:
+        reason = "no Liger environment: TOB_LIGER_PYTHON unset, envs/.prefix/liger* absent"
+        found.append(pytest.param(None, id="none", marks=pytest.mark.skip(reason=reason)))
+    return found
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("liger_python", _liger_environments())
+def test_cuda_liger_through_runner(tmp_path, liger_python):
+    from test_envs import liger_git_commit
+
+    params = {"N": 1024, "H": 1024, "V": 32768, "ignore_frac": "0.1"}
+    cases = runner.enumerate_cases(SPEC, device="cuda", cases=[params])
+    names = ["liger", "liger_native_accum", "torch_eager_liger", "torch_eager"]
+    written = runner.run_sweep(
+        SPEC,
+        "lce",
+        runner.enumerate_runs(SPEC, cases, names),
+        settings=runner.Settings(warmup=2, repeat=5, timeout=900),
+        results_dir=tmp_path,
+        slug="gpu",
+        env_map=runner.parse_env_map([f"liger={liger_python}"]),
+    )
+    assert len(written) == 6
+    for record in written:
+        name = record["implementation"]
+        assert record["status"] == "ok", (name, record["reason"])
+        assert record["env_name"] == ("torch" if name == "torch_eager" else "liger")
+    fwd_bwd = {r["implementation"]: r for r in written if r["mode"] == "fwd_bwd"}
+    torch_build = fwd_bwd["torch_eager"]["env"]["torch"]["version"]
+    chunks = lce.liger_chunks(1024, 1024, 32768)
+    for name in ["liger", "liger_native_accum"]:
+        record = fwd_bwd[name]
+        assert "liger_cross_entropy_kernel" in record["verify"]["liger_events"]
+        assert record["env"]["torch"]["version"] != torch_build  # the PyPI wheel
+        assert {k: record["info"][k] for k in chunks} == chunks
+        package = record["env"]["packages"]["liger-kernel"]
+        if isinstance(package, dict):  # envs/liger-git.yml
+            assert package["commit"] == liger_git_commit()
+            assert "linkedin/Liger-Kernel" in package["url"]
+        else:  # envs/liger.yml
+            assert package == "0.8.4"
+    assert fwd_bwd["liger"]["parity"]["status"] == "ok", fwd_bwd["liger"]["parity"]
+    for record in written:
+        if record["implementation"] == "torch_eager_liger":
+            assert record["parity"]["status"] == "ok", record["parity"]
+            assert record["info"]["role"] == "control"
+    peak = {name: r["memory"]["peak_bytes"] for name, r in fwd_bwd.items()}
+    # At this small N, liger's float32 weight-gradient accumulator (V*H*4 bytes)
+    # outweighs eager's N*V logits; see Handoff I1-3. Its native accumulation does not.
+    assert peak["liger_native_accum"] < peak["torch_eager_liger"], peak
