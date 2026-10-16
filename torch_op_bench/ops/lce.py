@@ -423,10 +423,12 @@ def setup_liger_native_accum(case: Case) -> dict[str, Any]:
 # --- verify: did the intended code path run? ----------------------------------------------
 
 
-def profiled_events(fn: Any, keep: Any, kernels_only: bool = False) -> list[str]:
-    """Run ``fn`` once under the profiler; the sorted names of the events ``keep``s.
+def profile_run(fn: Any) -> list[tuple[str, bool]]:
+    """Run ``fn`` once under the profiler; its distinct events as sorted
+    ``(name, on_device)`` pairs, ``on_device`` for CUDA kernel and memcpy events.
 
-    With ``kernels_only``, only device (CUDA kernel and memcpy) events are seen.
+    One run serves several filters (``select``), so a verify that records more than
+    one kind of event still costs one profiled call.
     """
     import torch
     from torch.autograd import DeviceType
@@ -439,13 +441,24 @@ def profiled_events(fn: Any, keep: Any, kernels_only: bool = False) -> list[str]
         fn()
         if torch.cuda.is_available():
             torch.cuda.synchronize()
+    return sorted({(e.name, e.device_type == DeviceType.CUDA) for e in prof.events()})
+
+
+def select(events: list[tuple[str, bool]], keep: Any, kernels_only: bool = False) -> list[str]:
+    """The sorted distinct names of ``events`` that ``keep`` accepts; with
+    ``kernels_only``, of device events only."""
     return sorted(
-        {
-            e.name
-            for e in prof.events()
-            if keep(e.name) and (not kernels_only or e.device_type == DeviceType.CUDA)
-        }
+        {name for name, on_device in events if keep(name) and (on_device or not kernels_only)}
     )
+
+
+def profiled_events(fn: Any, keep: Any, kernels_only: bool = False) -> list[str]:
+    """Run ``fn`` once under the profiler; the sorted names of the events ``keep``s."""
+    return select(profile_run(fn), keep, kernels_only)
+
+
+def _is_native_event(name: str) -> bool:
+    return "_native::" in name
 
 
 def native_events(fn: Any) -> list[str]:
@@ -453,9 +466,15 @@ def native_events(fn: Any) -> list[str]:
 
     Not only LCE's: with the LCE override disabled, other torch._native overrides
     (e.g. ``_native::scatter_add__cutedsl_*`` in the backward) may still run, and
-    whoever reads "no override" numbers should see them.
+    whoever reads "no override" numbers should see them. Empty when none ran, or
+    when the torch has no torch._native: that is the fact, not an error.
     """
-    return profiled_events(fn, lambda name: "_native::" in name)
+    return profiled_events(fn, _is_native_event)
+
+
+def verify_native(fn: Any) -> dict[str, Any]:
+    """The torch._native overrides one run of a baseline (or its control) ran."""
+    return {"native_events": native_events(fn)}
 
 
 def override_eligible(case: Case, options: dict[str, Any]) -> bool:
@@ -512,14 +531,15 @@ def verify_liger(fn: Any) -> dict[str, Any]:
     """The Liger (Triton) kernels of one run; none means the fused path did not run.
 
     Kernels only: the names of Liger's autograd function appear on the CPU side
-    whether or not its kernels ran.
+    whether or not its kernels ran. The torch._native events come from the same run.
     """
-    events = profiled_events(fn, _is_liger_event, kernels_only=True)
-    if not events:
+    events = profile_run(fn)
+    liger = select(events, _is_liger_event, kernels_only=True)
+    if not liger:
         raise AssertionError(
             "no Liger kernel (a name containing 'liger') ran; the timing would be mislabelled"
         )
-    return {"liger_events": events}
+    return {"liger_events": liger, "native_events": select(events, _is_native_event)}
 
 
 # --- the spec -------------------------------------------------------------------
@@ -531,6 +551,7 @@ TORCH_EAGER = Implementation(
     run_eager,
     modes=BOTH,
     setup=setup_eager,
+    verify=verify_native,
     info={**CONTRACT, "role": "baseline"},
 )
 
@@ -570,6 +591,7 @@ LCE = OpSpec(
             run_compiled,
             modes=BOTH,
             setup=setup_compiled,
+            verify=verify_native,
             available=compile_available,
             info={**CONTRACT, "compile": "torch.compile(fullgraph=True)"},
         ),

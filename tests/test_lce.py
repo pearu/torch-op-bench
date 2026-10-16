@@ -486,34 +486,67 @@ def test_liger_run_passes_the_contract(monkeypatch):
 
 def test_liger_verify(monkeypatch):
     seen = []
+    events = [
+        ("liger_cross_entropy_kernel", True),
+        ("aten::mm", False),
+        ("_liger_grad_kernel", True),
+        ("LigerFusedLinearCrossEntropyFunction", False),  # CPU side: not a kernel
+        ("element_mul_kernel", True),
+        ("cross_entropy_loss_forward_kernel", True),
+        ("_native::scatter_add__cutedsl_10", False),
+    ]
 
-    def fake_events(fn, keep, kernels_only):
-        assert kernels_only
+    def fake_run(fn):
+        seen.append("profiled")
         fn()
-        names = [
-            "liger_cross_entropy_kernel",
-            "aten::mm",
-            "_liger_grad_kernel",
-            "element_mul_kernel",
-            "cross_entropy_loss_forward_kernel",
-        ]
-        return sorted(name for name in names if keep(name))
+        return events
 
-    monkeypatch.setattr(lce, "profiled_events", fake_events)
-    assert lce.verify_liger(lambda: seen.append(1)) == {
-        "liger_events": ["_liger_grad_kernel", "liger_cross_entropy_kernel"]
+    monkeypatch.setattr(lce, "profile_run", fake_run)
+    assert lce.verify_liger(lambda: seen.append("ran")) == {
+        "liger_events": ["_liger_grad_kernel", "liger_cross_entropy_kernel"],
+        "native_events": ["_native::scatter_add__cutedsl_10"],
     }
-    assert seen == [1]
+    assert seen == ["profiled", "ran"]  # one profiled run serves both filters
     # A non-Liger cross_entropy kernel alone does not pass.
-    other = ["cross_entropy_loss_forward_kernel", "nll_loss_forward_reduce_cuda_kernel_2d"]
-    monkeypatch.setattr(
-        lce, "profiled_events", lambda fn, keep, kernels_only: [n for n in other if keep(n)]
+    other = [("cross_entropy_loss_forward_kernel", True), ("nll_loss_forward_kernel_2d", True)]
+    monkeypatch.setattr(lce, "profile_run", lambda fn: other)
+    with pytest.raises(AssertionError, match="no Liger kernel .* ran"):
+        lce.verify_liger(lambda: None)
+    monkeypatch.setattr(lce, "profile_run", lambda fn: [])
+    with pytest.raises(AssertionError, match="no Liger kernel .* ran"):
+        lce.verify_liger(lambda: None)
+
+
+def test_select():
+    events = [("a::x", False), ("b_kernel", True), ("a::y", True), ("a::x", True)]
+    assert lce.select(events, lambda name: name.startswith("a::")) == ["a::x", "a::y"]
+    assert lce.select(events, lambda name: name.startswith("a::"), kernels_only=True) == [
+        "a::x",
+        "a::y",
+    ]
+    assert lce.select(events, lambda name: "kernel" in name, kernels_only=True) == ["b_kernel"]
+    assert lce.select(events[:1], bool, kernels_only=True) == []
+
+
+def test_verify_native(monkeypatch):
+    monkeypatch.setattr(lce, "profile_run", lambda fn: [("_native::op_cutedsl_1", False)])
+    assert lce.verify_native(lambda: None) == {"native_events": ["_native::op_cutedsl_1"]}
+    monkeypatch.setattr(lce, "profile_run", lambda fn: [("aten::mm", False)])
+    assert lce.verify_native(lambda: None) == {"native_events": []}  # empty is no error
+
+
+@pytest.mark.parametrize("name", ["torch_eager", "torch_compiled", "torch_eager_liger"])
+def test_baselines_verify_native_events(name):
+    impl = SPEC.implementation(name)
+    assert impl.verify is lce.verify_native
+    c = case("float32", "0.25")
+    payload = runner.make_payload(
+        SPEC, "lce", c, impl, "fwd_bwd", runner.Settings(1, 2), slug="cpu"
     )
-    with pytest.raises(AssertionError, match="no Liger kernel .* ran"):
-        lce.verify_liger(lambda: None)
-    monkeypatch.setattr(lce, "profiled_events", lambda fn, keep, kernels_only: [])
-    with pytest.raises(AssertionError, match="no Liger kernel .* ran"):
-        lce.verify_liger(lambda: None)
+    record = worker.run_payload(payload)
+    assert record["status"] == "ok", record["traceback"]
+    native = record["verify"]["native_events"]
+    assert isinstance(native, list) and all(e.startswith("_native::") for e in native)
 
 
 def test_profiled_events_on_cpu():
