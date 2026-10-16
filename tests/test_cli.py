@@ -87,6 +87,9 @@ def test_list(tests_dir, capsys):
     assert "dtypes: float32 float64" in out
     assert "  plain  modes=fwd,fwd_bwd  env=torch  available" in out
     assert "  missing  modes=fwd,fwd_bwd  env=torch  unavailable: toy package not installed" in out
+    assert (
+        "  flagged  modes=fwd,fwd_bwd  env=torch  available (checked without TOB_TOY_FLAG)" in out
+    )
     assert "  elsewhere  modes=fwd  env=other  not checked (environment 'other')" in out
     assert "  reference (reference)  modes=fwd,fwd_bwd" in out
     assert "tolerances: y_rel_err<=0.0001" in out

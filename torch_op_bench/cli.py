@@ -111,6 +111,9 @@ def cmd_list(args: argparse.Namespace) -> int:
         else:
             available = impl.available()
             status = "available" if available is True else f"unavailable: {available}"
+            if impl.env_vars:
+                # The worker sets them before importing torch; here they are not set.
+                status += f" (checked without {', '.join(sorted(impl.env_vars))})"
         role = " (reference)" if impl is spec.reference else ""
         modes = ",".join(m for m in MODES if m in impl.modes)
         print(f"  {impl.name}{role}  modes={modes}  env={impl.env_name}  {status}")

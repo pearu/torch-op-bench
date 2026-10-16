@@ -52,6 +52,10 @@ An interrupted run resumes: rerunning the same command skips every
 
 An op is an `OpSpec` (see `torch_op_bench/spec.py`), addressed either by a short name
 registered in `torch_op_bench/ops/__init__.py` or by a dotted path `module:OBJECT`.
+The parent process (`run`, `list`) imports the op's module to enumerate cases, so the
+module should import torch and any counterpart lazily, inside its callables: then the
+parent needs neither, and each worker imports torch only after its environment
+variables are set.
 
 - `axes`: a list of `Axis(name, values, kind="int"|"str")` (names and `str` values
   must not contain `,`, `=` or `|`, which structure case keys); `defaults` gives the
