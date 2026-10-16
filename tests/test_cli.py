@@ -107,6 +107,7 @@ def test_list(tests_dir, capsys):
         "  flagged  modes=fwd,fwd_bwd  env=torch  available (checked without TOB_TOY_FLAG)" in out
     )
     assert "  elsewhere  modes=fwd  env=other  not checked (environment 'other')" in out
+    assert "  plain_other (control of plain)  modes=fwd,fwd_bwd  env=other  not checked" in out
     assert "  reference (reference)  modes=fwd,fwd_bwd" in out
     assert "tolerances: y_rel_err<=0.0001" in out
 

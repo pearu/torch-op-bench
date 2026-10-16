@@ -105,6 +105,8 @@ def compare(outputs, ref_outputs, case):
     return metrics
 
 
+PLAIN = Implementation("plain", run_plain)
+
 TOY = OpSpec(
     name="toy",
     axes=[
@@ -116,7 +118,8 @@ TOY = OpSpec(
     dtypes=["float32", "float64"],
     make_inputs=make_inputs,
     implementations=[
-        Implementation("plain", run_plain),
+        PLAIN,
+        PLAIN.as_control("other"),
         Implementation("chunked", run_chunked),
         Implementation(
             "described", run_plain, modes={"fwd"}, setup=setup_info, info={"chunk": "rows of 4"}

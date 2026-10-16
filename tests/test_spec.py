@@ -32,6 +32,46 @@ def test_implementation_defaults_and_modes():
         Implementation("x", lambda inputs, mode: None, modes={"bwd"})
 
 
+def test_as_control():
+    def setup(case):
+        return None
+
+    def verify(fn):
+        return None
+
+    def available():
+        return True
+
+    impl = Implementation(
+        "base",
+        toy_op.run_plain,
+        modes={"fwd"},
+        env_vars={"V": "1"},
+        setup=setup,
+        verify=verify,
+        available=available,
+        packages=("p",),
+        info={"role": "baseline", "k": 1},
+    )
+    control = impl.as_control("other")
+    assert control.name == "base_other" and control.env_name == "other"
+    assert control.info == {"role": "control", "k": 1, "control_of": "base"}
+    assert impl.info == {"role": "baseline", "k": 1} and impl.env_name == "torch"
+    assert control.run is impl.run and control.setup is setup and control.verify is verify
+    assert control.available is available and control.packages == ("p",)
+    assert control.modes == {"fwd"} and control.env_vars == {"V": "1"}
+    with pytest.raises(ValueError, match="duplicate"):
+        OpSpec(
+            name="op",
+            axes=[Axis("M", [1])],
+            dtypes=["float32"],
+            make_inputs=None,
+            implementations=[control, impl.as_control("other")],
+            reference=impl,
+            compare=None,
+        )
+
+
 def test_opspec_lookup_and_defaults():
     spec = toy_op.TOY
     assert spec.axis("K").values == [4, 8]

@@ -96,7 +96,7 @@ def test_enumerate_runs_respects_modes():
     runs = runner.enumerate_runs(SPEC, [case])
     pairs = [(impl.name, mode) for _, impl, mode in runs]
     assert ("broken", "fwd") in pairs and ("broken", "fwd_bwd") not in pairs
-    assert len(pairs) == 14
+    assert len(pairs) == 16
     runs = runner.enumerate_runs(SPEC, [case], ["plain", "broken"], ["fwd_bwd"])
     assert [(impl.name, mode) for _, impl, mode in runs] == [("plain", "fwd_bwd")]
     with pytest.raises(KeyError):
@@ -158,6 +158,15 @@ def test_run_sweep_environments(tmp_path, tests_dir):
     assert [r["status"] for r in written] == ["ok", "ok"]
     assert written[0]["env_name"] == "other" and written[0]["python"] == sys.executable
     assert written[0]["env_from"] == "worker"
+
+
+def test_run_sweep_control(tmp_path, tests_dir):
+    env_map = runner.parse_env_map([f"other={sys.executable}"])
+    written, lines = sweep(tmp_path, tests_dir, ["plain_other"], env_map=env_map)
+    assert [r["status"] for r in written] == ["ok", "ok"]
+    assert [r["implementation"] for r in written] == ["plain_other"] * 2
+    assert written[0]["env_name"] == "other"
+    assert written[0]["info"] == {"role": "control", "control_of": "plain"}
 
 
 def test_run_sweep_error_and_parity_lines(tmp_path, tests_dir, monkeypatch):

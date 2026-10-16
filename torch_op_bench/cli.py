@@ -116,6 +116,8 @@ def cmd_list(args: argparse.Namespace) -> int:
                 # The worker sets them before importing torch; here they are not set.
                 status += f" (checked without {', '.join(sorted(impl.env_vars))})"
         role = " (reference)" if impl is spec.reference else ""
+        if impl.info.get("role") == "control":
+            role = f" (control of {impl.info['control_of']})"
         modes = ",".join(m for m in MODES if m in impl.modes)
         print(f"  {impl.name}{role}  modes={modes}  env={impl.env_name}  {status}")
     tolerances = ", ".join(f"{k}<={v:g}" for k, v in spec.tolerances.items()) or "none"
