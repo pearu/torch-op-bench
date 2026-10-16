@@ -495,6 +495,7 @@ def test_liger_verify(monkeypatch):
             "aten::mm",
             "_liger_grad_kernel",
             "element_mul_kernel",
+            "cross_entropy_loss_forward_kernel",
         ]
         return sorted(name for name in names if keep(name))
 
@@ -503,6 +504,13 @@ def test_liger_verify(monkeypatch):
         "liger_events": ["_liger_grad_kernel", "liger_cross_entropy_kernel"]
     }
     assert seen == [1]
+    # A non-Liger cross_entropy kernel alone does not pass.
+    other = ["cross_entropy_loss_forward_kernel", "nll_loss_forward_reduce_cuda_kernel_2d"]
+    monkeypatch.setattr(
+        lce, "profiled_events", lambda fn, keep, kernels_only: [n for n in other if keep(n)]
+    )
+    with pytest.raises(AssertionError, match="no Liger kernel .* ran"):
+        lce.verify_liger(lambda: None)
     monkeypatch.setattr(lce, "profiled_events", lambda fn, keep, kernels_only: [])
     with pytest.raises(AssertionError, match="no Liger kernel .* ran"):
         lce.verify_liger(lambda: None)

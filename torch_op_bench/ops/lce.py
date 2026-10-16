@@ -504,7 +504,8 @@ def verify_lce_no_override(fn: Any) -> dict[str, Any]:
 
 
 def _is_liger_event(name: str) -> bool:
-    return "liger" in name.lower() or "cross_entropy" in name
+    # Liger's own kernels only: a non-Liger cross_entropy kernel does not count.
+    return "liger" in name.lower()
 
 
 def verify_liger(fn: Any) -> dict[str, Any]:
@@ -516,8 +517,7 @@ def verify_liger(fn: Any) -> dict[str, Any]:
     events = profiled_events(fn, _is_liger_event, kernels_only=True)
     if not events:
         raise AssertionError(
-            "no Liger kernel (a name containing 'liger' or 'cross_entropy') ran; "
-            "the timing would be mislabelled"
+            "no Liger kernel (a name containing 'liger') ran; the timing would be mislabelled"
         )
     return {"liger_events": events}
 
