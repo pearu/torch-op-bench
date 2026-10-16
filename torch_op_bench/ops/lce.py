@@ -52,6 +52,12 @@ DSL_PACKAGES = ("nvidia-cutlass-dsl", "apache-tvm-ffi")
 # Liger's fused LCE runs Triton kernels: the versions of both are recorded.
 LIGER_PACKAGES = ("liger-kernel", "triton")
 
+# torchtitan's losses import spmd_types, which torchtitan pins: both are recorded.
+TORCHTITAN_PACKAGES = ("torchtitan", "spmd_types")
+
+# ChunkedLossWrapper.Config's default number of chunks, which torchtitan trains with.
+TORCHTITAN_CHUNKS = 8
+
 # What setup learnt about the case this worker runs; verify reads it. A worker
 # runs one case, so module state is per case.
 _STATE: dict[str, Any] = {}
@@ -152,6 +158,73 @@ def run_liger(inputs: Any, mode: str) -> tuple:
 
 def run_liger_native_accum(inputs: Any, mode: str) -> tuple:
     return _call(functools.partial(_liger_loss, accum_dtype=None), inputs, mode)
+
+
+def _titan_layout(pred: Any, labels: Any) -> tuple[Any, Any]:
+    """``pred[N, ...]`` and ``labels[N]`` in the layout the torchtitan losses take:
+    ``[1, N, ...]`` and ``[1, N]`` (0.3.0, chunked along dim 1), as they are for
+    ``main``'s ``[T, ...]`` and ``[T]`` (chunked along dim 0)."""
+    if _STATE["titan_api"] == "compile_config":
+        return pred.unsqueeze(0), labels.unsqueeze(0)
+    return pred, labels
+
+
+def _lm_head(weight: Any) -> Any:
+    """A module computing ``F.linear(x, weight)`` over the case's own ``weight``.
+
+    ``weight`` is a plain attribute, not an ``nn.Parameter`` copy, so the chunk
+    backwards accumulate into the benchmark's ``weight.grad``. Cached per inputs:
+    the module is remade only for another ``weight`` tensor.
+    """
+    cached = _STATE.get("lm_head")
+    if cached is not None and cached.weight is weight:
+        return cached
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    class LMHead(nn.Module):
+        def __init__(self, weight: Any) -> None:
+            super().__init__()
+            self.weight = weight  # a Tensor, not a Parameter: a plain attribute
+
+        def forward(self, x: Any) -> Any:
+            return F.linear(x, self.weight)
+
+    _STATE["lm_head"] = LMHead(weight)
+    return _STATE["lm_head"]
+
+
+def _valid_tokens(labels: Any) -> Any:
+    # The divisor torchtitan's losses take for the mean over non-ignored tokens.
+    return (labels != IGNORE_INDEX).sum()
+
+
+def _torchtitan_chunked_loss(hidden: Any, weight: Any, labels: Any) -> Any:
+    """torchtitan's ChunkedLossWrapper: with ``hidden`` requiring grad, its call has
+    already run the chunk backwards; ``loss.backward()`` hands the accumulated
+    gradient to ``hidden``."""
+    wrapper = _STATE["titan_loss"]
+    wrapper.set_lm_head(_lm_head(weight))
+    pred, target = _titan_layout(hidden, labels)
+    # Positional: 0.3.0 names it global_valid_tokens, main global_loss_token_counts.
+    loss, _ = wrapper(pred, target, _valid_tokens(labels))
+    return loss
+
+
+def _torchtitan_ce_loss(hidden: Any, weight: Any, labels: Any) -> Any:
+    import torch.nn.functional as F
+
+    pred, target = _titan_layout(F.linear(hidden, weight), labels)
+    loss, _ = _STATE["titan_loss"](pred, target, _valid_tokens(labels))
+    return loss
+
+
+def run_torchtitan_chunked(inputs: Any, mode: str) -> tuple:
+    return _call(_torchtitan_chunked_loss, inputs, mode)
+
+
+def run_torchtitan_ce(inputs: Any, mode: str) -> tuple:
+    return _call(_torchtitan_ce_loss, inputs, mode)
 
 
 def run_reference(inputs: Any, mode: str) -> tuple:
@@ -279,6 +352,31 @@ def liger_available() -> bool | str:
     if not torch.cuda.is_available():
         return "liger-kernel needs a CUDA device"
     return True
+
+
+def torchtitan_version() -> str | None:
+    try:
+        return importlib.metadata.version("torchtitan")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def torchtitan_available() -> bool | str:
+    """Whether torchtitan's losses import here. No CUDA requirement: with no mesh
+    they are plain torch, which runs on CPU."""
+    try:
+        import torchtitan.components.loss  # noqa: F401
+    except ImportError as exc:
+        return (
+            f"torchtitan.components.loss cannot be imported "
+            f"(torchtitan {torchtitan_version()}, torch {_torch_version()}): {exc}"
+        )
+    return True
+
+
+def torchtitan_compiled_available() -> bool | str:
+    available = torchtitan_available()
+    return compile_available() if available is True else available
 
 
 # --- setup: what is only known at run time --------------------------------------
@@ -420,6 +518,93 @@ def setup_liger_native_accum(case: Case) -> dict[str, Any]:
     return _setup_liger(case, None)
 
 
+def torchtitan_api() -> str:
+    """How this torchtitan compiles its loss: ``compile_config`` (0.3.0, a
+    ``CompileConfig`` passed to the loss's constructor; ``[B, L, ...]`` inputs) or
+    ``local_compile`` (``main`` since 0.3.0: the process-wide
+    ``apply_local_compile(["loss"])``; ``[T, ...]`` inputs)."""
+    from torchtitan.components.loss import ChunkedLossWrapper
+
+    params = inspect.signature(ChunkedLossWrapper.__init__).parameters
+    return "compile_config" if "compile_config" in params else "local_compile"
+
+
+def _spmd_backend() -> str | None:
+    """torchtitan's SPMD backend; ``None`` for a torchtitan without the choice."""
+    try:
+        from torchtitan.distributed.utils import get_spmd_backend
+    except ImportError:
+        return None
+    return get_spmd_backend()
+
+
+def _build_torchtitan(chunked: bool, compiled: bool) -> tuple[Any, str]:
+    """torchtitan's loss as its trainer builds it, and how it is compiled."""
+    from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
+
+    api = torchtitan_api()
+    cls = ChunkedLossWrapper if chunked else CrossEntropyLoss
+    config = cls.Config(num_chunks=TORCHTITAN_CHUNKS) if chunked else cls.Config()
+    if api == "compile_config":
+        if not compiled:
+            return cls(config), ""
+        from torchtitan.config import CompileConfig
+
+        compile_config = CompileConfig(enable=True, components=["loss"])
+        compile = f"torch.compile(backend={compile_config.backend!r})"
+        return cls(config, compile_config=compile_config), compile
+    from torchtitan.distributed.local_compile import apply_local_compile
+
+    # Process-wide; a worker runs one implementation, so it is this entry's.
+    apply_local_compile(["loss"] if compiled else [])
+    return cls(config), "torch.compile(fullgraph=True)" if compiled else ""
+
+
+def _setup_torchtitan(case: Case, chunked: bool, compiled: bool) -> dict[str, Any]:
+    n = case.params["N"]
+    if chunked and n % TORCHTITAN_CHUNKS:
+        raise ValueError(
+            f"N={n} is not divisible by num_chunks={TORCHTITAN_CHUNKS}: torchtitan's "
+            "ChunkedLossWrapper splits the tokens into equal chunks"
+        )
+    loss, compile = _build_torchtitan(chunked, compiled)
+    api = torchtitan_api()
+    _STATE.update(titan_loss=loss, titan_api=api, lm_head=None)
+    info: dict[str, Any] = {
+        "torchtitan": torchtitan_version(),
+        "torchtitan_api": api,
+        "spmd_backend": _spmd_backend(),
+        # Upcast with .float() before the cross-entropy: per chunk for the
+        # wrapper (chunk_tokens x V x 4 bytes), the full logits for the plain loss.
+        "logits_dtype": "float32",
+        "loss_dtype": "float32",
+        "compiled": compiled,
+    }
+    if chunked:
+        info.update(
+            num_chunks=TORCHTITAN_CHUNKS,
+            chunk_tokens=n // TORCHTITAN_CHUNKS,
+            # The GradAccumulator buffer of grad_hidden; grad_weight accumulates
+            # in weight's dtype across the chunk backwards.
+            grad_accum_dtype="float32",
+        )
+    if compiled:
+        info.update(compile_scope="inner loss_fn", compile=compile)
+    return info
+
+
+def setup_torchtitan_chunked(case: Case) -> dict[str, Any]:
+    return _setup_torchtitan(case, chunked=True, compiled=False)
+
+
+def setup_torchtitan_chunked_compiled(case: Case) -> dict[str, Any]:
+    return _setup_torchtitan(case, chunked=True, compiled=True)
+
+
+def setup_torchtitan_ce(case: Case) -> dict[str, Any]:
+    return _setup_torchtitan(case, chunked=False, compiled=False)
+
+
 # --- verify: did the intended code path run? ----------------------------------------------
 
 
@@ -542,6 +727,25 @@ def verify_liger(fn: Any) -> dict[str, Any]:
     return {"liger_events": liger, "native_events": select(events, _is_native_event)}
 
 
+def verify_torchtitan_compiled(fn: Any) -> dict[str, Any]:
+    """The events showing the compiled loss ran: its ``CompiledFunction`` (the
+    autograd function of a compiled graph) or, on CUDA, an Inductor ``triton_``
+    kernel. None means torchtitan ran its loss eagerly."""
+    events = profile_run(fn)
+    compiled = sorted(
+        {
+            *select(events, lambda name: "CompiledFunction" in name),
+            *select(events, lambda name: name.startswith("triton_"), kernels_only=True),
+        }
+    )
+    if not compiled:
+        raise AssertionError(
+            "no event shows the compiled loss ran (no 'CompiledFunction', no triton_ "
+            "kernel); the timing would be mislabelled"
+        )
+    return {"compiled_events": compiled, "native_events": select(events, _is_native_event)}
+
+
 # --- the spec -------------------------------------------------------------------
 
 BOTH = {"fwd", "fwd_bwd"}
@@ -570,6 +774,45 @@ def _liger(name: str, run: Any, setup: Any, accum_dtype: str | None) -> Implemen
         packages=LIGER_PACKAGES,
         info={**CONTRACT, "accum_dtype": accum_dtype, "backend": "liger"},
     )
+
+
+def _torchtitan(
+    name: str, run: Any, setup: Any, modes: set[str], verify: Any = verify_native
+) -> Implementation:
+    return Implementation(
+        name,
+        run,
+        modes=modes,
+        env_name="torchtitan",
+        setup=setup,
+        verify=verify,
+        available=(
+            torchtitan_compiled_available
+            if verify is verify_torchtitan_compiled
+            else torchtitan_available
+        ),
+        packages=TORCHTITAN_PACKAGES,
+        info={**CONTRACT, "backend": "torchtitan"},
+    )
+
+
+# fwd_bwd only for the chunked wrapper: it runs the chunk backwards whenever the
+# hidden states require grad, which a leaf keeps under no_grad, so a fwd number
+# would include the backward work.
+TORCHTITAN = [
+    _torchtitan(
+        "torchtitan_chunked", run_torchtitan_chunked, setup_torchtitan_chunked, {"fwd_bwd"}
+    ),
+    _torchtitan(
+        "torchtitan_chunked_compiled",
+        run_torchtitan_chunked,
+        setup_torchtitan_chunked_compiled,
+        {"fwd_bwd"},
+        verify=verify_torchtitan_compiled,
+    ),
+    _torchtitan("torchtitan_ce", run_torchtitan_ce, setup_torchtitan_ce, BOTH),
+    TORCH_EAGER.as_control("torchtitan"),
+]
 
 
 LCE = OpSpec(
@@ -618,6 +861,7 @@ LCE = OpSpec(
         _liger("liger", run_liger, setup_liger, "float32"),
         _liger("liger_native_accum", run_liger_native_accum, setup_liger_native_accum, None),
         TORCH_EAGER.as_control("liger"),
+        *TORCHTITAN,
     ],
     reference=Implementation(
         "reference_fp32", run_reference, modes=BOTH, info={**CONTRACT, "dtype": "float32"}
