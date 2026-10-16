@@ -30,7 +30,10 @@ def test_settings_and_env_map():
 
 def test_device_slug(monkeypatch):
     assert runner.device_slug("cpu") == "cpu"
-    assert runner.device_slug("cuda:1", python="/no/such/python") == "cuda-1"
+    with pytest.raises(ValueError, match="cannot get the name of cuda:1 .*--device-slug"):
+        runner.device_slug("cuda:1", python="/no/such/python")
+    with pytest.raises(ValueError, match=r"\(exit code 1\); pass --device-slug"):
+        runner.device_slug("cuda", python="false")
 
     def fake_run(cmd, **kwargs):
         assert "get_device_name(1)" in cmd[-1]

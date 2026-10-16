@@ -47,19 +47,25 @@ def device_slug(device: str, python: str = sys.executable) -> str:
     """``cpu``, or the slugified name of the CUDA device as ``python``'s torch sees it.
 
     The name is asked of a separate interpreter so that this process never holds a
-    CUDA context while workers measure.
+    CUDA context while workers measure. When it cannot be had, this fails rather than
+    file results of different GPUs under one directory; ``--device-slug`` overrides.
     """
     if device == "cpu":
         return "cpu"
     index = int(device.partition(":")[2] or 0)
     code = f"import torch; print(torch.cuda.get_device_name({index}))"
     try:
-        proc = subprocess.run(
-            [python, "-c", code], capture_output=True, text=True, timeout=120, check=True
-        )
-    except (OSError, subprocess.SubprocessError):
-        return records.slugify(device)
-    return records.slugify(proc.stdout.strip().splitlines()[-1])
+        proc = subprocess.run([python, "-c", code], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        detail = str(exc)
+    else:
+        lines = proc.stdout.strip().splitlines()
+        if proc.returncode == 0 and lines:
+            return records.slugify(lines[-1])
+        detail = (proc.stderr.strip().splitlines() or [f"exit code {proc.returncode}"])[-1]
+    raise ValueError(
+        f"cannot get the name of {device} from {python} ({detail}); pass --device-slug"
+    )
 
 
 def enumerate_cases(
