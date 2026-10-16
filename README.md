@@ -23,7 +23,8 @@ pip install -e .[dev,plot]  # plus tests, lint and plotting dependencies
 Install torch-op-bench from the same checkout into every environment a benchmark
 runs in. When `torch-op-bench run` itself runs from a checkout, its workers import
 torch-op-bench from that checkout in every environment, whatever the working
-directory, so the parent and the workers always run the same code. A counterpart can also be installed into the torch environment itself, e.g.
+directory, so the parent and the workers always run the same code. A counterpart
+can also be installed into the torch environment itself, e.g.
 `pip install -e .[liger]`; it then runs there instead of in its own environment.
 
 ## Environments
