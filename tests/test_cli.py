@@ -47,7 +47,15 @@ def test_run_cases_values_env(tests_dir, tmp_path, capsys):
 
 @pytest.mark.parametrize(
     "bad",
-    [["--case", "M"], ["--values", "M"], ["--impl", "nope"], ["--env", "x"], ["--dtype", "int8"]],
+    [
+        ["--case", "M"],
+        ["--values", "M"],
+        ["--impl", "nope"],
+        ["--env", "x"],
+        ["--dtype", "int8"],
+        ["--mode", "bwd"],
+        ["--sweep", "M", "--values", "K=99"],
+    ],
 )
 def test_run_bad_arguments(tests_dir, tmp_path, bad, capsys):
     with pytest.raises(SystemExit) as exc:

@@ -37,7 +37,7 @@ torch-op-bench env          # the provenance record this interpreter would write
 ```
 
 `run` varies one axis at a time around the op's default point (`--sweep AXIS` limits
-the axes, `--values AXIS=V1,V2` overrides an axis' values), or runs the given points
+the axes, `--values AXIS=V1,V2` overrides a swept axis' values), or runs the given points
 (`--case AXIS=V,AXIS=V`, repeatable, completed from the default point). Further
 flags: `--dtype`, `--impl`, `--mode fwd|fwd_bwd`, `--warmup`, `--repeat`,
 `--flush-l2`, `--seed`, `--timeout` (seconds per worker), `--results DIR` (default

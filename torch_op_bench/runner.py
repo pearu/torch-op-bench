@@ -76,7 +76,8 @@ def enumerate_cases(
     With ``cases``, each given point (completed from the op's default point) is one
     case. Otherwise each axis in ``sweep`` (default: all) is varied over its values
     (or ``values[axis]``) one at a time, the other axes held at the default point;
-    the default point appears once.
+    the default point appears once. Values for an axis that is not swept, or
+    together with ``cases``, are an error rather than silently ignored.
     """
     dtypes = list(dtypes or spec.dtypes)
     unknown = set(dtypes) - set(spec.dtypes)
@@ -85,10 +86,16 @@ def enumerate_cases(
     values = dict(values or {})
     default = spec.default_point
     if cases:
+        if values:
+            raise ValueError("axis values apply to a sweep, not to explicit cases")
         points = [{**default, **case} for case in cases]
     else:
+        swept = list(sweep or [axis.name for axis in spec.axes])
+        unswept = sorted(set(values) - set(swept))
+        if unswept:
+            raise ValueError(f"values given for axes that are not swept: {unswept}")
         points = []
-        for name in sweep or [axis.name for axis in spec.axes]:
+        for name in swept:
             for value in values.get(name, spec.axis(name).values):
                 points.append({**default, name: value})
     for point in points:
@@ -118,6 +125,9 @@ def enumerate_runs(
         else list(spec.implementations)
     )
     modes = list(modes or MODES)
+    unknown = sorted(set(modes) - set(MODES))
+    if unknown:
+        raise ValueError(f"unknown modes {unknown} (known: {', '.join(MODES)})")
     return [
         (case, impl, mode)
         for case in cases

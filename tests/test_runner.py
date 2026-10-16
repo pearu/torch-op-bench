@@ -74,6 +74,10 @@ def test_enumerate_sweep_values_dtypes_and_explicit_cases():
         runner.enumerate_cases(SPEC, device="cpu", cases=[{"Z": 1}])
     with pytest.raises(KeyError):
         runner.enumerate_cases(SPEC, device="cpu", sweep=["Z"])
+    with pytest.raises(ValueError, match=r"not swept: \['K'\]"):
+        runner.enumerate_cases(SPEC, device="cpu", sweep=["M"], values={"K": [99]})
+    with pytest.raises(ValueError, match="not to explicit cases"):
+        runner.enumerate_cases(SPEC, device="cpu", cases=[{"M": 5}], values={"M": [1]})
 
 
 def test_enumerate_runs_respects_modes():
@@ -86,6 +90,8 @@ def test_enumerate_runs_respects_modes():
     assert [(impl.name, mode) for _, impl, mode in runs] == [("plain", "fwd_bwd")]
     with pytest.raises(KeyError):
         runner.enumerate_runs(SPEC, [case], ["nope"])
+    with pytest.raises(ValueError, match="unknown modes \\['bwd'\\]"):
+        runner.enumerate_runs(SPEC, [case], modes=["bwd"])
 
 
 def sweep(tmp_path, tests_dir, impls, modes=("fwd",), env_map=None, settings=FAST, **kw):
