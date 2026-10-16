@@ -337,8 +337,13 @@ def setup_lce_no_override(case: Case) -> dict[str, Any]:
 # --- verify: did the override run? ----------------------------------------------
 
 
-def override_events(fn: Any) -> list[str]:
-    """Run ``fn`` once under the profiler; the names of torch._native LCE events."""
+def native_events(fn: Any) -> list[str]:
+    """Run ``fn`` once under the profiler; the names of all torch._native events.
+
+    Not only LCE's: with the LCE override disabled, other torch._native overrides
+    (e.g. ``_native::scatter_add__cutedsl_*`` in the backward) may still run, and
+    whoever reads "no override" numbers should see them.
+    """
     import torch
     from torch.profiler import ProfilerActivity, profile
 
@@ -349,13 +354,7 @@ def override_events(fn: Any) -> list[str]:
         fn()
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-    return sorted(
-        {
-            e.name
-            for e in prof.events()
-            if "_native::" in e.name and "linear_cross_entropy" in e.name
-        }
-    )
+    return sorted({e.name for e in prof.events() if "_native::" in e.name})
 
 
 def override_eligible(case: Case, options: dict[str, Any]) -> bool:
@@ -371,8 +370,13 @@ def override_eligible(case: Case, options: dict[str, Any]) -> bool:
     return options.get("acc_policy") == "compact" and options.get("acc_dtype") == "float32"
 
 
+def _lce_events(names: list[str]) -> list[str]:
+    return [name for name in names if "linear_cross_entropy" in name]
+
+
 def verify_lce(fn: Any) -> dict[str, Any]:
-    events = override_events(fn)
+    native = native_events(fn)
+    events = _lce_events(native)
     case, options = _STATE["case"], _STATE["options"]
     if not events and override_eligible(case, options):
         registration = _STATE["registration"]
@@ -386,14 +390,15 @@ def verify_lce(fn: Any) -> dict[str, Any]:
             f"({case.device}, {case.dtype}, acc_policy={options['acc_policy']}, "
             f"acc_dtype={options['acc_dtype']}); {cause}; the timing would be mislabelled"
         )
-    return {"override_ran": bool(events), "override_events": events}
+    return {"override_ran": bool(events), "override_events": events, "native_events": native}
 
 
 def verify_lce_no_override(fn: Any) -> dict[str, Any]:
-    events = override_events(fn)
+    native = native_events(fn)
+    events = _lce_events(native)
     if events:
         raise AssertionError(f"the torch._native LCE override ran although disabled: {events}")
-    return {"override_ran": False, "override_events": []}
+    return {"override_ran": False, "override_events": [], "native_events": native}
 
 
 # --- the spec -------------------------------------------------------------------

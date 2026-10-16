@@ -161,7 +161,7 @@ def test_verify_on_cpu_records_no_override():
         impl.setup(c)
         x = inputs(c)
         result = impl.verify(lambda impl=impl, x=x: outputs.append(impl.run(x, "fwd_bwd")))
-        assert result == {"override_ran": False, "override_events": []}
+        assert result == {"override_ran": False, "override_events": [], "native_events": []}
     assert len(outputs) == 2
 
 
@@ -171,7 +171,8 @@ def test_verify_raises_when_eligible_but_absent(monkeypatch):
     monkeypatch.setitem(lce._STATE, "options", {"acc_policy": "compact", "acc_dtype": "float32"})
     monkeypatch.setitem(lce._STATE, "registration", {"registered": True, "reason": None})
     monkeypatch.setattr(lce, "override_eligible", lambda case, options: True)
-    monkeypatch.setattr(lce, "override_events", lambda fn: [])
+    scatter = "_native::scatter_add__cutedsl_10"
+    monkeypatch.setattr(lce, "native_events", lambda fn: [scatter])
     with pytest.raises(AssertionError, match="although eligible .*; it is registered, yet did not"):
         lce.verify_lce(lambda: None)
     reason = "disabled by TORCH_DISABLE_NATIVE_JIT=1"
@@ -179,10 +180,21 @@ def test_verify_raises_when_eligible_but_absent(monkeypatch):
     with pytest.raises(AssertionError, match=f"; not registered: {reason}; the timing"):
         lce.verify_lce(lambda: None)
     names = ["_native::_linear_cross_entropy_batch_chunked_cutedsl_2"]
-    monkeypatch.setattr(lce, "override_events", lambda fn: names)
-    assert lce.verify_lce(lambda: None) == {"override_ran": True, "override_events": names}
+    monkeypatch.setattr(lce, "native_events", lambda fn: [*names, scatter])
+    assert lce.verify_lce(lambda: None) == {
+        "override_ran": True,
+        "override_events": names,
+        "native_events": [*names, scatter],
+    }
     with pytest.raises(AssertionError, match="ran although disabled"):
         lce.verify_lce_no_override(lambda: None)
+    # Other torch._native overrides are recorded, not mistaken for LCE's.
+    monkeypatch.setattr(lce, "native_events", lambda fn: [scatter])
+    assert lce.verify_lce_no_override(lambda: None) == {
+        "override_ran": False,
+        "override_events": [],
+        "native_events": [scatter],
+    }
 
 
 def test_override_registration(monkeypatch):
@@ -306,7 +318,11 @@ def test_through_worker_and_runner(tmp_path):
         assert record["info"]["ignore_index"] == -100
     by_impl = {r["implementation"]: r for r in written if r["mode"] == "fwd_bwd"}
     assert by_impl["torch_compiled"]["info"]["compiled"] is True
-    assert by_impl["torch_lce"]["verify"] == {"override_ran": False, "override_events": []}
+    assert by_impl["torch_lce"]["verify"] == {
+        "override_ran": False,
+        "override_events": [],
+        "native_events": [],
+    }
     assert len(by_impl["torch_lce"]["info"]["lce_source_md5"]) == 32
     assert by_impl["torch_lce_no_override"]["info"]["override_disabled"] == list(lce.OVERRIDE_OPS)
     for name in ["torch_lce", "torch_lce_no_override"]:
@@ -381,6 +397,10 @@ def test_cuda_small_case_through_runner(tmp_path):
     fwd_bwd = {r["implementation"]: r for r in written if r["mode"] == "fwd_bwd"}
     assert fwd_bwd["torch_lce"]["verify"]["override_ran"] is eligible
     assert fwd_bwd["torch_lce_no_override"]["verify"]["override_ran"] is False
+    for name in ["torch_lce", "torch_lce_no_override"]:
+        verify = fwd_bwd[name]["verify"]
+        assert set(verify["override_events"]) <= set(verify["native_events"])
+        assert all(event.startswith("_native::") for event in verify["native_events"])
     peak = {name: r["memory"]["peak_bytes"] for name, r in fwd_bwd.items()}
     assert peak["torch_lce"] < peak["torch_eager"], peak
 

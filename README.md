@@ -143,6 +143,9 @@ What the records say:
   the `nvidia-cutlass-dsl` version is not known-good. `info.override_registration`
   records the same, and `env.packages` the versions of `nvidia-cutlass-dsl` and
   `apache-tvm-ffi`.
+- `verify.native_events`: every `torch._native` event seen, not only LCE's. With the
+  LCE override disabled, or in fp32, the backward still runs
+  `_native::scatter_add__cutedsl_*`, so "no override" means no *LCE* override.
 - `parity`: errors against the fp32 reference. The tolerances are 4× the bf16 error
   of `torch_eager` (see `ops/lce.py`). A failure is a finding for the report, not a
   failure of the run.
