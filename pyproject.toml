@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torch-op-bench"
+version = "0.1.0.dev0"
+description = "Benchmark torch ops and their counterparts: throughput, peak memory and parity"
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [{ name = "Pearu Peterson" }]
+requires-python = ">=3.10"
+# torch is taken from the environment under test and is deliberately not declared.
+dependencies = []
+
+[project.optional-dependencies]
+plot = ["matplotlib", "pandas"]
+dev = ["pytest", "pytest-cov", "ruff"]
+
+[project.scripts]
+torch-op-bench = "torch_op_bench.cli:main"
+
+[project.urls]
+Repository = "https://github.com/pearu/torch-op-bench"
+
+[tool.setuptools.packages.find]
+include = ["torch_op_bench*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["cuda: needs a CUDA device; skipped without one"]

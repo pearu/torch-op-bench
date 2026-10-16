@@ -1,0 +1,25 @@
+# Roles' private files (agent-sandbox); never committed.
+.asb/
+
+# Environments created by scripts/setup-env.sh.
+envs/.prefix/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+
+# Tools
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# results/ is tracked: benchmark results are committed.
