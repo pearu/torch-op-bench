@@ -178,7 +178,7 @@ concatenation; `torch_op_bench.records.read(directory)` reads a tree and
 | `memory` | `peak_bytes`, `baseline_bytes` (inputs allocated); `null` on CPU |
 | `parity` | `status` (`ok`, `fail`, `skipped`), `reason`, `metrics`, `tolerances`, `failed` |
 | `verify`, `work`, `info` | what `verify` returned; work units; the implementation's info |
-| `env`, `env_from`, `env_error` | provenance of the worker's interpreter (`worker`), or of the parent's when the worker produced no record (`runner`, without torch); why `env` is `null` if collecting it failed |
+| `env`, `env_from`, `env_error` | provenance of the worker's interpreter (`worker`), or of the parent's when the worker produced no record (`runner`, without torch); why `env` is `null` if collecting it failed; `env.packages` maps each of the implementation's `packages` to its version (`null` if not installed), or, for a package installed from a VCS URL, to `{version, url, commit, requested}` from its `direct_url.json` |
 
 The resume and merge key is (op, device slug, case key, implementation, mode).
 
