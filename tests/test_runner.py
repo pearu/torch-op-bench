@@ -293,3 +293,48 @@ def test_alive_helper():
 
     assert _alive(os.getpid())
     assert not _alive(2**22 + 12345)
+
+
+def _plain_payload(tests_dir):
+    case = Case(SPEC.default_point, "float32", "cpu")
+    return runner.make_payload(
+        SPEC,
+        "toy_op:TOY",
+        case,
+        SPEC.implementation("plain"),
+        "fwd",
+        FAST,
+        slug="cpu",
+        pythonpath=[str(tests_dir)],
+    )
+
+
+def test_launch_runs_the_parents_package(tests_dir, tmp_path, monkeypatch):
+    # A second copy of the package in the working directory, as when a run starts
+    # from another checkout's root: the worker must not import it.
+    shadow = tmp_path / "torch_op_bench"
+    shadow.mkdir()
+    (shadow / "__init__.py").write_text("raise RuntimeError('the shadow copy was imported')\n")
+    (shadow / "worker.py").write_text("")
+    monkeypatch.chdir(tmp_path)
+    plain = subprocess.run(
+        [sys.executable, "-m", "torch_op_bench.worker"], capture_output=True, text=True, input=""
+    )
+    assert "the shadow copy was imported" in plain.stderr  # the hazard is real
+
+    root = runner.env.package_root()
+    assert runner.worker_command(sys.executable)[:2] == [sys.executable, "-c"]
+    record = runner.launch(_plain_payload(tests_dir), sys.executable, 120)
+    assert record["status"] == "ok", record.get("stderr")
+    assert record["env"]["package_root"] == str(root)
+    assert (root / "pyproject.toml").is_file()
+
+
+def test_launch_from_a_non_checkout_root(tests_dir, tmp_path, monkeypatch):
+    # An installed (non-editable) package's root is a site-packages: never put it
+    # first on the worker's path; the worker's own install serves.
+    monkeypatch.setattr(runner.env, "package_root", lambda: tmp_path)
+    assert runner.worker_command("py") == ["py", "-m", "torch_op_bench.worker"]
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    record = runner.launch(_plain_payload(tests_dir), sys.executable, 120)
+    assert record["status"] == "ok", record.get("stderr")

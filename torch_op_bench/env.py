@@ -42,10 +42,20 @@ def driver_version() -> str | None:
     return out.splitlines()[0].strip() if out else None
 
 
+def package_root() -> Path:
+    """The directory this process imported ``torch_op_bench`` from: a checkout, or a
+    ``site-packages`` when the package is installed non-editable."""
+    return Path(torch_op_bench.__file__).resolve().parent.parent
+
+
+def is_checkout(root: Path) -> bool:
+    return (root / "pyproject.toml").is_file()
+
+
 def git_info(root: Path | None = None) -> dict[str, Any]:
     """The git hash and dirty flag of the checkout the package is imported from."""
     if root is None:
-        root = Path(torch_op_bench.__file__).resolve().parent.parent
+        root = package_root()
     if not (root / ".git").exists() or shutil.which("git") is None:
         return {"hash": None, "dirty": None}
     commit = _run(["git", "rev-parse", "HEAD"], cwd=root)
@@ -141,5 +151,6 @@ def collect(packages: Iterable[str] = (), *, include_torch: bool = True) -> dict
         "torch": torch_info() if include_torch else None,
         "driver": driver_version(),
         "torch_op_bench": {"version": torch_op_bench.__version__, **git_info()},
+        "package_root": str(package_root()),
         "packages": package_versions(packages),
     }

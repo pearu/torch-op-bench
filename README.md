@@ -21,7 +21,9 @@ pip install -e .[dev,plot]  # plus tests, lint and plotting dependencies
 ```
 
 Install torch-op-bench from the same checkout into every environment a benchmark
-runs in. A counterpart can also be installed into the torch environment itself, e.g.
+runs in. When `torch-op-bench run` itself runs from a checkout, its workers import
+torch-op-bench from that checkout in every environment, whatever the working
+directory, so the parent and the workers always run the same code. A counterpart can also be installed into the torch environment itself, e.g.
 `pip install -e .[liger]`; it then runs there instead of in its own environment.
 
 ## Environments
@@ -242,7 +244,7 @@ concatenation; `torch_op_bench.records.read(directory)` reads a tree and
 | `memory` | `peak_bytes`, `baseline_bytes` (inputs allocated); `null` on CPU |
 | `parity` | `status` (`ok`, `fail`, `skipped`), `reason`, `metrics`, `tolerances`, `failed` |
 | `verify`, `work`, `info` | what `verify` returned; work units; the implementation's info |
-| `env`, `env_from`, `env_error` | provenance of the worker's interpreter (`worker`), or of the parent's when the worker produced no record (`runner`, without torch); why `env` is `null` if collecting it failed; `env.packages` maps each of the implementation's `packages` to its version (`null` if not installed), or, for a package installed from a VCS URL, to `{version, url, commit, requested}` from its `direct_url.json` |
+| `env`, `env_from`, `env_error` | provenance of the worker's interpreter (`worker`), or of the parent's when the worker produced no record (`runner`, without torch); why `env` is `null` if collecting it failed; `env.packages` maps each of the implementation's `packages` to its version (`null` if not installed), or, for a package installed from a VCS URL, to `{version, url, commit, requested}` from its `direct_url.json`; `env.package_root` the directory the worker imported torch-op-bench from |
 
 The resume and merge key is (op, device slug, case key, implementation, mode).
 

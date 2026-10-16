@@ -18,6 +18,8 @@ def test_collect_is_json_and_complete():
     assert record["packages"]["pytest"]
     assert record["timestamp"].endswith("+00:00")
     assert set(record["torch_op_bench"]) == {"version", "hash", "dirty"}
+    assert record["package_root"] == str(env.package_root())
+    assert env.is_checkout(env.package_root())  # the tests run from a checkout
 
 
 def test_torch_without_cuda(monkeypatch):
