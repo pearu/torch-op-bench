@@ -78,7 +78,9 @@ class Implementation:
     """One way of computing an op.
 
     ``run(inputs, mode)`` computes the op on the inputs from ``OpSpec.make_inputs``
-    in ``mode`` (one of ``modes``) and returns its outputs. ``available()`` returns
+    in ``mode`` (one of ``modes``) and returns its outputs; it is called many times
+    on the same inputs, and the worker clears the inputs' ``.grad`` before each call
+    (outside what is measured). ``available()`` returns
     ``True`` or a string saying why the implementation cannot run; it must import
     what it needs itself, so that the spec stays importable without it.
     ``env_vars`` are set in the worker before torch is imported; ``env_name`` names

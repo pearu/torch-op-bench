@@ -61,3 +61,60 @@ def test_peak_memory_cuda():
     result = peak_memory(lambda: x * 2, "cuda")
     assert result["baseline_bytes"] >= x.nbytes
     assert result["peak_bytes"] >= result["baseline_bytes"] + x.nbytes
+
+
+def test_clear_grads_walks_containers():
+    from torch_op_bench.measure import clear_grads
+
+    tensors = [torch.ones(2, requires_grad=True) for _ in range(4)]
+    for t in tensors:
+        t.sum().backward()
+    clear_grads((tensors[0], [tensors[1], {"x": tensors[2]}], "not a tensor", 3))
+    assert [t.grad is None for t in tensors] == [True, True, True, False]
+
+
+def test_reset_runs_before_every_call_outside_timing():
+    events = []
+    samples = time_callable(
+        lambda: events.append("fn"),
+        device="cpu",
+        warmup=1,
+        repeat=2,
+        flush_l2=False,
+        reset=lambda: events.append("reset"),
+    )
+    assert len(samples) == 2
+    assert events == ["reset", "fn"] * 3
+
+
+def test_backward_style_does_not_accumulate():
+    import toy_op
+
+    a = torch.randn(4, 3, dtype=torch.float64, requires_grad=True)
+    b = torch.randn(3, 2, dtype=torch.float64, requires_grad=True)
+    _, ga, gb = toy_op.run_plain((a, b), "fwd_bwd")
+    from torch_op_bench.measure import clear_grads
+
+    time_callable(
+        lambda: toy_op.run_backward((a, b), "fwd_bwd"),
+        device="cpu",
+        warmup=2,
+        repeat=3,
+        flush_l2=False,
+        reset=lambda: clear_grads((a, b)),
+    )
+    torch.testing.assert_close(a.grad, ga)
+    torch.testing.assert_close(b.grad, gb)
+
+
+@pytest.mark.cuda
+def test_peak_memory_cuda_reset_first():
+    x = torch.ones(1024, 1024, device="cuda", requires_grad=True)
+    x.grad = torch.ones_like(x)
+
+    def reset():
+        x.grad = None
+
+    result = peak_memory(lambda: x * 2, "cuda", reset=reset)
+    assert x.grad is None
+    assert result["baseline_bytes"] < 2 * x.nbytes

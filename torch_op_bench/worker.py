@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import traceback
+from collections.abc import Callable
 from typing import Any
 
 from . import env, records
@@ -92,7 +93,7 @@ def _measure(
 ) -> dict[str, Any]:
     import torch
 
-    from .measure import peak_memory, time_callable
+    from .measure import clear_grads, peak_memory, time_callable
 
     device = torch.device(case.device)
     generator = torch.Generator(device=device)
@@ -101,26 +102,43 @@ def _measure(
     if impl.setup is not None:
         impl.setup(case)
 
+    # Every call starts from the inputs' first state: gradients a ``backward()``
+    # left on them are cleared before each call, outside what is measured.
+    def reset() -> None:
+        clear_grads(inputs)
+
     def fn() -> Any:
         return impl.run(inputs, mode)
 
-    parity = _parity(spec, impl, case, inputs, mode)
+    def fresh_fn() -> Any:
+        reset()
+        return fn()
+
+    parity = _parity(spec, impl, case, inputs, mode, reset)
     gc.collect()
     if device.type == "cuda":
         torch.cuda.empty_cache()
-    verify = impl.verify(fn) if impl.verify is not None else None
-    memory = peak_memory(fn, device)
+    verify = impl.verify(fresh_fn) if impl.verify is not None else None
+    memory = peak_memory(fn, device, reset=reset)
     times = time_callable(
         fn,
         device=device,
         warmup=settings["warmup"],
         repeat=settings["repeat"],
         flush_l2=settings["flush_l2"],
+        reset=reset,
     )
     return {"parity": parity, "verify": verify, "memory": memory, "times_ms": times}
 
 
-def _parity(spec: OpSpec, impl: Implementation, case: Case, inputs: Any, mode: str) -> dict:
+def _parity(
+    spec: OpSpec,
+    impl: Implementation,
+    case: Case,
+    inputs: Any,
+    mode: str,
+    reset: Callable[[], None],
+) -> dict:
     parity: dict[str, Any] = {
         "status": None,
         "reason": None,
@@ -137,7 +155,9 @@ def _parity(spec: OpSpec, impl: Implementation, case: Case, inputs: Any, mode: s
         parity["status"] = "skipped"
         parity["reason"] = f"reference does not support mode {mode!r}"
         return parity
+    reset()
     ref_outputs = spec.reference.run(inputs, mode)
+    reset()
     outputs = impl.run(inputs, mode)
     metrics = {
         name: float(value) for name, value in spec.compare(outputs, ref_outputs, case).items()

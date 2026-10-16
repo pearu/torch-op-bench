@@ -44,7 +44,7 @@ def run_subprocess(data, env=None):
 
 
 @pytest.mark.parametrize("mode", ["fwd", "fwd_bwd"])
-@pytest.mark.parametrize("impl", ["plain", "chunked"])
+@pytest.mark.parametrize("impl", ["plain", "chunked", "backward"])
 def test_run_payload_ok(tests_dir, impl, mode):
     record = worker.run_payload(payload(tests_dir, impl, mode, layout="transposed"))
     assert record["status"] == "ok", record["traceback"]
@@ -100,6 +100,22 @@ def test_parity_fail_and_skips(tests_dir, monkeypatch):
     assert record["parity"]["status"] == "skipped" and "mode 'fwd'" in record["parity"]["reason"]
 
 
+def test_backward_style_parity_against_backward_style_reference(tests_dir, monkeypatch):
+    # A reference that also calls backward() on the shared inputs (and keeps copies of
+    # its results): without clearing gradients between calls, the implementation's
+    # would include the reference's.
+    import toy_op
+
+    def reference(inputs, mode):
+        return tuple(t.detach().clone() for t in toy_op.run_backward(inputs, mode))
+
+    monkeypatch.setattr(toy_op.TOY.reference, "run", reference)
+    record = worker.run_payload(payload(tests_dir, "backward", "fwd_bwd", dtype="float64"))
+    assert record["status"] == "ok", record["traceback"]
+    assert record["parity"]["status"] == "ok"
+    assert record["parity"]["metrics"]["grad_a_rel_l2"] < 1e-12
+
+
 def test_unavailable_without_reason(tests_dir, monkeypatch):
     import toy_op
 
@@ -140,6 +156,15 @@ def test_flag_missing_fails_verify(tests_dir):
     env = {k: v for k, v in os.environ.items() if k != "TOB_TOY_FLAG"}
     record, _ = run_subprocess(data, env=env)
     assert record["status"] == "error" and "TOB_TOY_FLAG not set" in record["reason"]
+
+
+@pytest.mark.cuda
+def test_subprocess_cuda_memory_backward_style_matches(tests_dir):
+    plain, _ = run_subprocess(payload(tests_dir, "plain", "fwd_bwd", device="cuda", M=256, K=256))
+    back, _ = run_subprocess(payload(tests_dir, "backward", "fwd_bwd", device="cuda", M=256, K=256))
+    assert back["status"] == "ok", back["traceback"]
+    assert back["memory"]["baseline_bytes"] == plain["memory"]["baseline_bytes"]
+    assert back["parity"]["status"] == "ok"
 
 
 @pytest.mark.cuda

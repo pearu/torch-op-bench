@@ -61,7 +61,11 @@ registered in `torch_op_bench/ops/__init__.py` or by a dotted path `module:OBJEC
   `case.dtype`, `case.device`), seeded by the `torch.Generator`.
 - `implementations`: a list of `Implementation`:
   - `run(inputs, mode)`: the timed computation, for `mode` in `modes` (`fwd`,
-    `fwd_bwd`);
+    `fwd_bwd`). It is called many times on the same inputs; before every call the
+    core sets `.grad` to `None` on each tensor in the inputs (walking tuples, lists
+    and dicts), outside the measured region, so `loss.backward()` and
+    `torch.autograd.grad` styles both start from the same state. Any other state a
+    `run` leaves behind is its own to undo;
   - `available()`: `True`, or a string saying why not; import optional dependencies
     here, not at module level, so that the spec imports without them;
   - `env_name` (default `torch`): the environment its worker runs in;
