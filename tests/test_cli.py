@@ -85,6 +85,7 @@ def test_list(tests_dir, capsys):
     assert "  M (int): 8 16 32  [default 16]" in out
     assert "  layout (str): contiguous transposed  [default contiguous]" in out
     assert "dtypes: float32 float64" in out
+    assert "default dtypes: float32 float64" in out
     assert "  plain  modes=fwd,fwd_bwd  env=torch  available" in out
     assert "  missing  modes=fwd,fwd_bwd  env=torch  unavailable: toy package not installed" in out
     assert (
@@ -93,6 +94,15 @@ def test_list(tests_dir, capsys):
     assert "  elsewhere  modes=fwd  env=other  not checked (environment 'other')" in out
     assert "  reference (reference)  modes=fwd,fwd_bwd" in out
     assert "tolerances: y_rel_err<=0.0001" in out
+
+
+def test_list_default_dtypes(tests_dir, capsys, monkeypatch):
+    import toy_op
+
+    monkeypatch.setattr(toy_op.TOY, "default_dtypes", ["float64"])
+    assert cli.main(["list", "toy_op:TOY", "--pythonpath", str(tests_dir)]) == 0
+    out = capsys.readouterr().out
+    assert "dtypes: float32 float64\ndefault dtypes: float64\n" in out
 
 
 def test_module_entry_point(tests_dir):

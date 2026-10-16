@@ -77,7 +77,7 @@ def enumerate_cases(
     values: Mapping[str, Sequence[Any]] | None = None,
     cases: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[Case]:
-    """The cases of a sweep, for each dtype.
+    """The cases of a sweep, for each dtype (default: the op's default dtypes).
 
     With ``cases``, each given point (completed from the op's default point) is one
     case. Otherwise each axis in ``sweep`` (default: all) is varied over its values
@@ -85,7 +85,7 @@ def enumerate_cases(
     the default point appears once. Values for an axis that is not swept, or
     together with ``cases``, are an error rather than silently ignored.
     """
-    dtypes = list(dtypes or spec.dtypes)
+    dtypes = list(dtypes or spec.default_dtypes or spec.dtypes)
     unknown = set(dtypes) - set(spec.dtypes)
     if unknown:
         raise ValueError(f"op {spec.name!r} does not accept dtypes {sorted(unknown)}")

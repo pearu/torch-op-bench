@@ -104,6 +104,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         values = " ".join(str(v) for v in axis.values)
         print(f"  {axis.name} ({axis.kind}): {values}  [default {default[axis.name]}]")
     print(f"dtypes: {' '.join(spec.dtypes)}")
+    print(f"default dtypes: {' '.join(spec.default_dtypes or spec.dtypes)}")
     print("implementations (availability checked in this interpreter, environment 'torch'):")
     for impl in [*spec.implementations, spec.reference]:
         if impl.env_name != "torch":
@@ -135,7 +136,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("op", help=op_help)
     run.add_argument("--device", default="cpu", help="cpu, cuda or cuda:N (default: cpu)")
     run.add_argument("--device-slug", help="results subdirectory (default: from the device name)")
-    run.add_argument("--dtype", action="append", help="dtype(s), comma-separated (default: all)")
+    run.add_argument(
+        "--dtype",
+        action="append",
+        help="dtype(s), comma-separated (default: the op's default dtypes)",
+    )
     run.add_argument("--sweep", action="append", help="axes to vary one at a time (default: all)")
     run.add_argument(
         "--values", action="append", default=[], metavar="AXIS=V1,V2", help="override axis values"

@@ -60,6 +60,10 @@ def test_opspec_validation():
         OpSpec(implementations=[impl, impl], **kwargs)
     with pytest.raises(ValueError, match="unknown axes"):
         OpSpec(implementations=[impl], defaults={"Q": 1}, **kwargs)
+    for bad in [["float16"], []]:
+        with pytest.raises(ValueError, match="default_dtypes must be a non-empty subset"):
+            OpSpec(implementations=[impl], default_dtypes=bad, **kwargs)
+    assert OpSpec(implementations=[impl], default_dtypes=["float32"], **kwargs).default_dtypes
     assert OpSpec(implementations=[impl], **kwargs).work(None) == {}
 
 

@@ -153,7 +153,8 @@ class OpSpec:
     ``{"flops": ...}``) for throughput. ``defaults`` is the point a sweep varies one
     axis around (an axis missing from it defaults to its first value).
     ``reference_fits(case)`` is the memory guard of the parity check: ``True``, or a
-    string saying why the reference is skipped.
+    string saying why the reference is skipped. ``default_dtypes`` are the dtypes a
+    run uses when none are given (``None``: all of ``dtypes``).
     """
 
     name: str
@@ -167,6 +168,7 @@ class OpSpec:
     work: Callable[[Case], dict[str, float]] = lambda case: {}
     defaults: dict[str, Any] = field(default_factory=dict)
     reference_fits: Callable[[Case], bool | str] = _always_fits
+    default_dtypes: list[str] | None = None
 
     def __post_init__(self) -> None:
         names = [impl.name for impl in self.implementations]
@@ -176,6 +178,13 @@ class OpSpec:
         unknown = set(self.defaults) - {axis.name for axis in self.axes}
         if unknown:
             raise ValueError(f"op {self.name!r}: defaults for unknown axes {sorted(unknown)}")
+        if self.default_dtypes is not None:
+            unknown = sorted(set(self.default_dtypes) - set(self.dtypes))
+            if unknown or not self.default_dtypes:
+                raise ValueError(
+                    f"op {self.name!r}: default_dtypes must be a non-empty subset of "
+                    f"dtypes, got {self.default_dtypes}"
+                )
 
     def axis(self, name: str) -> Axis:
         for axis in self.axes:

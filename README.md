@@ -61,7 +61,8 @@ variables are set.
   must not contain `,`, `=` or `|`, which structure case keys); `defaults` gives the
   point a sweep varies one axis around (an axis missing from it defaults to its
   first value).
-- `dtypes`: dtype names (`"float32"`, `"bfloat16"`, ...).
+- `dtypes`: dtype names (`"float32"`, `"bfloat16"`, ...); `default_dtypes`: those a
+  `run` uses without `--dtype` (default: all of `dtypes`).
 - `make_inputs(case, device, generator)`: the inputs of a `Case` (`case.params`,
   `case.dtype`, `case.device`), seeded by the `torch.Generator`.
 - `implementations`: a list of `Implementation`:

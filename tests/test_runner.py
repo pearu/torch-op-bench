@@ -83,6 +83,14 @@ def test_enumerate_sweep_values_dtypes_and_explicit_cases():
         runner.enumerate_cases(SPEC, device="cpu", cases=[{"M": 5}], values={"M": [1]})
 
 
+def test_enumerate_uses_default_dtypes(monkeypatch):
+    monkeypatch.setattr(SPEC, "default_dtypes", ["float64"])
+    cases = runner.enumerate_cases(SPEC, device="cpu", sweep=["K"])
+    assert {c.dtype for c in cases} == {"float64"}
+    cases = runner.enumerate_cases(SPEC, device="cpu", sweep=["K"], dtypes=["float32"])
+    assert {c.dtype for c in cases} == {"float32"}
+
+
 def test_enumerate_runs_respects_modes():
     case = Case(SPEC.default_point, "float32", "cpu")
     runs = runner.enumerate_runs(SPEC, [case])
