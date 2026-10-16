@@ -96,7 +96,7 @@ def test_enumerate_runs_respects_modes():
     runs = runner.enumerate_runs(SPEC, [case])
     pairs = [(impl.name, mode) for _, impl, mode in runs]
     assert ("broken", "fwd") in pairs and ("broken", "fwd_bwd") not in pairs
-    assert len(pairs) == 14
+    assert len(pairs) == 16
     runs = runner.enumerate_runs(SPEC, [case], ["plain", "broken"], ["fwd_bwd"])
     assert [(impl.name, mode) for _, impl, mode in runs] == [("plain", "fwd_bwd")]
     with pytest.raises(KeyError):
@@ -158,6 +158,15 @@ def test_run_sweep_environments(tmp_path, tests_dir):
     assert [r["status"] for r in written] == ["ok", "ok"]
     assert written[0]["env_name"] == "other" and written[0]["python"] == sys.executable
     assert written[0]["env_from"] == "worker"
+
+
+def test_run_sweep_control(tmp_path, tests_dir):
+    env_map = runner.parse_env_map([f"other={sys.executable}"])
+    written, lines = sweep(tmp_path, tests_dir, ["plain_other"], env_map=env_map)
+    assert [r["status"] for r in written] == ["ok", "ok"]
+    assert [r["implementation"] for r in written] == ["plain_other"] * 2
+    assert written[0]["env_name"] == "other"
+    assert written[0]["info"] == {"role": "control", "control_of": "plain"}
 
 
 def test_run_sweep_error_and_parity_lines(tmp_path, tests_dir, monkeypatch):
@@ -227,7 +236,7 @@ def _alive(pid: int) -> bool:
     try:
         with open(f"/proc/{pid}/stat") as f:
             return f.read().rsplit(")", 1)[1].split()[0] != "Z"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):  # reaped before or while reading
         return False
 
 
@@ -284,3 +293,48 @@ def test_alive_helper():
 
     assert _alive(os.getpid())
     assert not _alive(2**22 + 12345)
+
+
+def _plain_payload(tests_dir):
+    case = Case(SPEC.default_point, "float32", "cpu")
+    return runner.make_payload(
+        SPEC,
+        "toy_op:TOY",
+        case,
+        SPEC.implementation("plain"),
+        "fwd",
+        FAST,
+        slug="cpu",
+        pythonpath=[str(tests_dir)],
+    )
+
+
+def test_launch_runs_the_parents_package(tests_dir, tmp_path, monkeypatch):
+    # A second copy of the package in the working directory, as when a run starts
+    # from another checkout's root: the worker must not import it.
+    shadow = tmp_path / "torch_op_bench"
+    shadow.mkdir()
+    (shadow / "__init__.py").write_text("raise RuntimeError('the shadow copy was imported')\n")
+    (shadow / "worker.py").write_text("")
+    monkeypatch.chdir(tmp_path)
+    plain = subprocess.run(
+        [sys.executable, "-m", "torch_op_bench.worker"], capture_output=True, text=True, input=""
+    )
+    assert "the shadow copy was imported" in plain.stderr  # the hazard is real
+
+    root = runner.env.package_root()
+    assert runner.worker_command(sys.executable)[:2] == [sys.executable, "-c"]
+    record = runner.launch(_plain_payload(tests_dir), sys.executable, 120)
+    assert record["status"] == "ok", record.get("stderr")
+    assert record["env"]["package_root"] == str(root)
+    assert (root / "pyproject.toml").is_file()
+
+
+def test_launch_from_a_non_checkout_root(tests_dir, tmp_path, monkeypatch):
+    # An installed (non-editable) package's root is a site-packages: never put it
+    # first on the worker's path; the worker's own install serves.
+    monkeypatch.setattr(runner.env, "package_root", lambda: tmp_path)
+    assert runner.worker_command("py") == ["py", "-m", "torch_op_bench.worker"]
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    record = runner.launch(_plain_payload(tests_dir), sys.executable, 120)
+    assert record["status"] == "ok", record.get("stderr")

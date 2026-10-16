@@ -6,6 +6,7 @@ only the worker process touches tensors.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import json
 import re
@@ -140,6 +141,21 @@ class Implementation:
         unknown = set(self.modes) - set(MODES)
         if unknown:
             raise ValueError(f"implementation {self.name!r}: unknown modes {sorted(unknown)}")
+
+    def as_control(self, env_name: str) -> Implementation:
+        """This implementation run in environment ``env_name``, as a control.
+
+        The copy is named ``<name>_<env_name>`` and shares everything but its name,
+        environment and ``info`` (``role: "control"``, ``control_of: <name>``). It
+        is how a baseline enters a counterpart's environment, so that a comparison
+        across environments can tell the counterpart from the torch build.
+        """
+        return dataclasses.replace(
+            self,
+            name=f"{self.name}_{env_name}",
+            env_name=env_name,
+            info={**self.info, "role": "control", "control_of": self.name},
+        )
 
 
 @dataclass

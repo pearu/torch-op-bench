@@ -21,7 +21,62 @@ pip install -e .[dev,plot]  # plus tests, lint and plotting dependencies
 ```
 
 Install torch-op-bench from the same checkout into every environment a benchmark
-runs in.
+runs in. When `torch-op-bench run` itself runs from a checkout, its workers import
+torch-op-bench from that checkout in every environment, whatever the working
+directory, so the parent and the workers always run the same code. A counterpart
+can also be installed into the torch environment itself, e.g.
+`pip install -e .[liger]`; it then runs there instead of in its own environment.
+
+## Environments
+
+A counterpart usually runs in an environment of its own, with its own Python, torch
+and packages. `envs/NAME.yml` defines one: a conda environment file with every
+version pinned, since a results file names the definition and a definition that
+drifts would make the records lie. One script creates it:
+
+```sh
+scripts/setup-env.sh liger            # creates envs/.prefix/liger, or updates it
+scripts/setup-env.sh liger --prefix /scratch/envs
+```
+
+It uses mamba if it is on `PATH`, conda otherwise, installs this checkout into the
+environment (`pip install -e .`, no extras), and prints the provenance its records
+will carry (`torch-op-bench env` with the packages the definition's `pip:` section
+names). The last line of its output is the environment's interpreter, which a run
+takes as `--env NAME=PYTHON`:
+
+```sh
+torch-op-bench run lce --device cuda --env liger=$(scripts/setup-env.sh liger | tail -1)
+torch-op-bench run lce --device cuda --env liger=envs/.prefix/liger/bin/python
+```
+
+Each counterpart has two definitions, and both make an environment its
+implementations address by the same name:
+
+- `envs/NAME.yml`: the PyPI release;
+- `envs/NAME-git.yml`: a commit of the counterpart's repository, for what is under
+  development and has no nightly wheels, as `name @ git+https://...@<40-hex hash>`.
+  To bump it, replace the hash (a branch name is not a pin) and the date next to it,
+  and rerun the script.
+
+Rerunning the script on an existing prefix runs `env update`, which adds and changes
+packages but does not remove one dropped from the definition. After removing a
+package from a definition, recreate the prefix instead:
+`rm -rf envs/.prefix/NAME && scripts/setup-env.sh NAME`.
+
+The implementations do not know which definition they run in; the record does. For
+a package installed from a VCS URL, `env.packages` holds
+`{"version", "url", "commit", "requested"}` (read from the `direct_url.json` that pip
+writes) instead of a version string, so `env.packages["liger-kernel"]` is `"0.8.4"`
+for `envs/liger.yml` and carries the pinned commit for `envs/liger-git.yml`.
+
+**Controls.** A comparison across environments includes the torch build: the PyPI
+wheel in `liger` is not the torch of the `torch` environment. So the baseline also
+runs in each counterpart's environment, as `torch_eager_<env>`
+(`Implementation.as_control(env)`), with `info.role: "control"` and
+`info.control_of: "torch_eager"`. Compare a counterpart with the control of its own
+environment; `torch_eager` against `torch_eager_<env>` is the difference the
+environment makes.
 
 ## Run the toy example
 
@@ -116,6 +171,16 @@ counterpart:
 | `torch_compiled` | the same under `torch.compile(fullgraph=True)` |
 | `torch_lce` | `F.linear_cross_entropy(..., options=LinearCrossEntropyOptions())`, with the `torch._native` (CuTeDSL) override where eligible |
 | `torch_lce_no_override` | the same with the override ops disabled: the eager accumulator |
+| `liger` (env `liger`) | Liger-Kernel's `liger_fused_linear_cross_entropy(hidden, weight, labels, ignore_index=-100, reduction="mean", accum_dtype=torch.float32)`, `fwd_bwd` only |
+| `liger_native_accum` (env `liger`) | the same with `accum_dtype=None`, Liger's default: the weight gradient accumulated in the parameter dtype; `fwd_bwd` only |
+| `torch_eager_liger` (env `liger`) | `torch_eager` in the `liger` environment, the control |
+
+The Liger entries run `fwd_bwd` only: Liger computes the gradients inside its forward
+whenever the inputs require grad, so a `fwd` number would include the backward work.
+They are `unavailable` without `liger_kernel` or without a CUDA device. Their `info`
+records Liger's chunking for the case (`chunk_size`, `num_chunks`), the
+`liger_kernel` version and `ce_impl: "triton"`, and `verify.liger_events` the Liger
+kernels that ran (an `error` record if none did).
 
 The default sweep (CUDA, bf16) varies one axis at a time around
 (N, H, V) = (4096, 4096, 131072): N 1K–16K, H 1K–8K, V 32K–256K, `ignore_frac` 0
@@ -130,6 +195,13 @@ records with an out-of-memory traceback):
 
 ```sh
 torch-op-bench run lce --device cuda --case N=1024,V=32768 --case N=4096,V=65536
+```
+
+With Liger (see "Environments"):
+
+```sh
+scripts/setup-env.sh liger
+torch-op-bench run lce --device cuda --env liger=envs/.prefix/liger/bin/python
 ```
 
 What the records say:
@@ -178,7 +250,7 @@ concatenation; `torch_op_bench.records.read(directory)` reads a tree and
 | `memory` | `peak_bytes`, `baseline_bytes` (inputs allocated); `null` on CPU |
 | `parity` | `status` (`ok`, `fail`, `skipped`), `reason`, `metrics`, `tolerances`, `failed` |
 | `verify`, `work`, `info` | what `verify` returned; work units; the implementation's info |
-| `env`, `env_from`, `env_error` | provenance of the worker's interpreter (`worker`), or of the parent's when the worker produced no record (`runner`, without torch); why `env` is `null` if collecting it failed |
+| `env`, `env_from`, `env_error` | provenance of the worker's interpreter (`worker`), or of the parent's when the worker produced no record (`runner`, without torch); why `env` is `null` if collecting it failed; `env.packages` maps each of the implementation's `packages` to its version (`null` if not installed), or, for a package installed from a VCS URL, to `{version, url, commit, requested}` from its `direct_url.json`; `env.package_root` the directory the worker imported torch-op-bench from |
 
 The resume and merge key is (op, device slug, case key, implementation, mode).
 
@@ -192,7 +264,9 @@ pytest --cov=torch_op_bench --cov-report=term-missing
 ```
 
 Tests marked `cuda` run when a CUDA device is present and are skipped otherwise. CI
-runs the CPU tests with a coverage floor.
+runs the CPU tests with a coverage floor. The CUDA test of the Liger entries runs
+once per Liger environment present (`envs/.prefix/liger`, `envs/.prefix/liger-git`,
+or the interpreter in `TOB_LIGER_PYTHON`) and is skipped without one.
 
 ## Licence
 

@@ -79,6 +79,21 @@ def test_env(capsys):
     assert record["packages"]["nonexistent-xyz"] is None and record["packages"]["pytest"]
 
 
+def test_env_vcs_package(tmp_path, monkeypatch, capsys):
+    from test_env import COMMIT, _fake_dist
+
+    vcs = {"url": "https://github.com/org/pkg-git", "vcs_info": {"commit_id": COMMIT}}
+    _fake_dist(tmp_path, "pkg-git", vcs)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    assert cli.main(["env", "--package", "pkg-git"]) == 0
+    assert json.loads(capsys.readouterr().out)["packages"]["pkg-git"] == {
+        "version": "1.2.3",
+        "url": "https://github.com/org/pkg-git",
+        "commit": COMMIT,
+        "requested": None,
+    }
+
+
 def test_list(tests_dir, capsys):
     assert cli.main(["list", "toy_op:TOY", "--pythonpath", str(tests_dir)]) == 0
     out = capsys.readouterr().out
@@ -92,6 +107,7 @@ def test_list(tests_dir, capsys):
         "  flagged  modes=fwd,fwd_bwd  env=torch  available (checked without TOB_TOY_FLAG)" in out
     )
     assert "  elsewhere  modes=fwd  env=other  not checked (environment 'other')" in out
+    assert "  plain_other (control of plain)  modes=fwd,fwd_bwd  env=other  not checked" in out
     assert "  reference (reference)  modes=fwd,fwd_bwd" in out
     assert "tolerances: y_rel_err<=0.0001" in out
 

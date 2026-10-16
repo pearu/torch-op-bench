@@ -19,6 +19,29 @@ from .worker import base_record
 
 STDERR_LIMIT = 20_000
 
+# Runs the worker module with the parent's package root first on sys.path. Not
+# PYTHONPATH: under ``python -m`` the working directory precedes PYTHONPATH, so a
+# torch_op_bench in the working directory would still shadow the parent's.
+_BOOTSTRAP = (
+    "import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); "
+    "runpy.run_module('torch_op_bench.worker', run_name='__main__', alter_sys=True)"
+)
+
+
+def worker_command(python: str) -> list[str]:
+    """The command that runs a worker under ``python``.
+
+    When the parent runs from a checkout, the worker imports torch_op_bench from that
+    same checkout, whatever the working directory or the checkout an environment was
+    installed from, so parent and worker run the same code. A non-checkout root (a
+    ``site-packages``) is never put on the worker's path: it would shadow the worker
+    environment's own packages, torch among them; the worker's install serves then.
+    """
+    root = env.package_root()
+    if env.is_checkout(root):
+        return [python, "-c", _BOOTSTRAP, str(root)]
+    return [python, "-m", "torch_op_bench.worker"]
+
 
 @dataclass
 class Settings:
@@ -214,7 +237,7 @@ def launch(payload: dict[str, Any], python: str, timeout: float) -> dict[str, An
     with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
         try:
             proc = subprocess.Popen(
-                [python, "-m", "torch_op_bench.worker"],
+                worker_command(python),
                 stdin=subprocess.PIPE,
                 stdout=out,
                 stderr=err,

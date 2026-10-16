@@ -18,6 +18,8 @@ def test_collect_is_json_and_complete():
     assert record["packages"]["pytest"]
     assert record["timestamp"].endswith("+00:00")
     assert set(record["torch_op_bench"]) == {"version", "hash", "dirty"}
+    assert record["package_root"] == str(env.package_root())
+    assert env.is_checkout(env.package_root())  # the tests run from a checkout
 
 
 def test_torch_without_cuda(monkeypatch):
@@ -83,3 +85,62 @@ def test_run_failures():
 
 def test_collect_without_torch_info():
     assert env.collect(include_torch=False)["torch"] is None
+
+
+def _fake_dist(root, name, direct_url=None):
+    """A ``NAME-1.2.3.dist-info`` directory under ``root``, as pip installs it."""
+    info = root / f"{name.replace('-', '_')}-1.2.3.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.2.3\n")
+    if direct_url is not None:
+        text = direct_url if isinstance(direct_url, str) else json.dumps(direct_url)
+        (info / "direct_url.json").write_text(text)
+
+
+COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_package_versions_vcs_origin(tmp_path, monkeypatch):
+    vcs = {
+        "url": "https://user:token@github.com/org/pkg-git",
+        "vcs_info": {"vcs": "git", "commit_id": COMMIT, "requested_revision": "main"},
+    }
+    _fake_dist(tmp_path, "pkg-git", vcs)
+    no_request = {"url": "https://github.com/org/pkg-pin", "vcs_info": {"commit_id": COMMIT}}
+    _fake_dist(tmp_path, "pkg-pin", no_request)
+    _fake_dist(tmp_path, "pkg-plain")
+    _fake_dist(tmp_path, "pkg-dir", {"url": "file:///src/pkg", "dir_info": {"editable": True}})
+    archive = {"url": "https://x.org/pkg.tar.gz", "archive_info": {"hashes": {}}}
+    _fake_dist(tmp_path, "pkg-archive", archive)
+    _fake_dist(tmp_path, "pkg-broken", "{not json")
+    _fake_dist(tmp_path, "pkg-odd", {"url": 1, "vcs_info": {"commit_id": COMMIT}})
+    monkeypatch.syspath_prepend(str(tmp_path))
+    versions = env.package_versions(
+        ["pkg-git", "pkg-pin", "pkg-plain", "pkg-dir", "pkg-archive", "pkg-broken", "pkg-odd"]
+    )
+    assert versions == {
+        "pkg-git": {
+            "version": "1.2.3",
+            "url": "https://github.com/org/pkg-git",
+            "commit": COMMIT,
+            "requested": "main",
+        },
+        "pkg-pin": {
+            "version": "1.2.3",
+            "url": "https://github.com/org/pkg-pin",
+            "commit": COMMIT,
+            "requested": None,
+        },
+        "pkg-plain": "1.2.3",
+        "pkg-dir": "1.2.3",
+        "pkg-archive": "1.2.3",
+        "pkg-broken": "1.2.3",
+        "pkg-odd": "1.2.3",
+    }
+    assert json.loads(json.dumps(versions)) == versions
+
+
+def test_without_credentials():
+    assert env._without_credentials("https://github.com/a/b") == "https://github.com/a/b"
+    assert env._without_credentials("https://u:p@h.org:8443/a") == "https://h.org:8443/a"
+    assert env._without_credentials("ssh://git@h.org/a.git") == "ssh://h.org/a.git"

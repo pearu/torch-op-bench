@@ -1,7 +1,8 @@
 """The worker: one (case, implementation, mode) per process (R2).
 
-``python -m torch_op_bench.worker`` reads one JSON payload on stdin and prints
-exactly one JSON record on stdout. Whatever the op prints goes to stderr. The
+``python -m torch_op_bench.worker`` (or the runner's bootstrap of it, see
+``runner.worker_command``) reads one JSON payload on stdin and prints exactly one
+JSON record on stdout. Whatever the op prints goes to stderr. The
 payload carries everything the record describes, so the parent and the worker need
 not share a Python or a torch version; the module imports torch only after it has
 applied the implementation's environment variables.
