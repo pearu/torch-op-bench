@@ -81,7 +81,7 @@ def test_enumerate_runs_respects_modes():
     runs = runner.enumerate_runs(SPEC, [case])
     pairs = [(impl.name, mode) for _, impl, mode in runs]
     assert ("broken", "fwd") in pairs and ("broken", "fwd_bwd") not in pairs
-    assert len(pairs) == 12
+    assert len(pairs) == 13
     runs = runner.enumerate_runs(SPEC, [case], ["plain", "broken"], ["fwd_bwd"])
     assert [(impl.name, mode) for _, impl, mode in runs] == [("plain", "fwd_bwd")]
     with pytest.raises(KeyError):
@@ -203,3 +203,67 @@ def test_tail():
     assert runner._tail(None) is None
     assert runner._tail(b"x\xff") == "x�"
     assert len(runner._tail("y" * (runner.STDERR_LIMIT + 5))) == runner.STDERR_LIMIT
+
+
+def _alive(pid: int) -> bool:
+    # A killed orphan may linger as a zombie until it is reaped: that counts as dead.
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
+
+
+def _wait_dead(pid: int, seconds: float = 5.0) -> bool:
+    import time
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not _alive(pid):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _spawner_payload(tests_dir):
+    case = Case(SPEC.default_point, "float32", "cpu")
+    return runner.make_payload(
+        SPEC,
+        "toy_op:TOY",
+        case,
+        SPEC.implementation("spawner"),
+        "fwd",
+        FAST,
+        slug="cpu",
+        pythonpath=[str(tests_dir)],
+    )
+
+
+def test_launch_kills_children_of_a_finished_worker(tests_dir, tmp_path, monkeypatch):
+    import time
+
+    pidfile = tmp_path / "pid"
+    monkeypatch.setenv("TOB_TOY_PIDFILE", str(pidfile))
+    begin = time.monotonic()
+    record = runner.launch(_spawner_payload(tests_dir), sys.executable, 60)
+    # The surviving child keeps the worker's stdout and stderr open: the runner must
+    # not wait for them, and must not turn a finished run into a timeout.
+    assert record["status"] == "ok", record["reason"]
+    assert time.monotonic() - begin < 30
+    assert _wait_dead(int(pidfile.read_text()))
+
+
+def test_launch_timeout_kills_the_process_group(tests_dir, tmp_path, monkeypatch):
+    pidfile = tmp_path / "pid"
+    monkeypatch.setenv("TOB_TOY_PIDFILE", str(pidfile))
+    monkeypatch.setenv("TOB_TOY_HANG", "1")
+    record = runner.launch(_spawner_payload(tests_dir), sys.executable, 8)
+    assert record["status"] == "error" and record["reason"] == "timeout after 8 s"
+    assert _wait_dead(int(pidfile.read_text()))
+
+
+def test_alive_helper():
+    import os
+
+    assert _alive(os.getpid())
+    assert not _alive(2**22 + 12345)

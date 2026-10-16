@@ -4,7 +4,8 @@ Lives in the tests, not in the package. Each implementation exercises one path o
 the worker: ``plain`` and ``chunked`` run, ``backward`` leaves its gradients on
 the inputs, ``missing`` is unavailable, ``broken``
 raises, ``flagged`` checks that its ``env_vars`` were set before torch was imported,
-``elsewhere`` runs in the environment named ``other``.
+``elsewhere`` runs in the environment named ``other``, ``spawner`` leaves a child
+process behind.
 """
 
 import os
@@ -78,6 +79,19 @@ def verify_flag(fn):
     return {"flag": FLAG_AT_IMPORT}
 
 
+def setup_spawner(case):
+    # Leaves a child process behind; TOB_TOY_PIDFILE receives its pid. With
+    # TOB_TOY_HANG set, the worker then hangs until it is killed.
+    import subprocess
+    import time
+
+    child = subprocess.Popen(["sleep", "60"])
+    with open(os.environ["TOB_TOY_PIDFILE"], "w") as f:
+        f.write(str(child.pid))
+    if os.environ.get("TOB_TOY_HANG"):
+        time.sleep(60)
+
+
 def compare(outputs, ref_outputs, case):
     y, y_ref = outputs[0].double(), ref_outputs[0]
     metrics = {"y_abs_err": (y - y_ref).abs().item()}
@@ -105,6 +119,7 @@ TOY = OpSpec(
         Implementation("broken", run_broken, modes={"fwd"}),
         Implementation("flagged", run_plain, env_vars={"TOB_TOY_FLAG": "on"}, verify=verify_flag),
         Implementation("elsewhere", run_plain, modes={"fwd"}, env_name="other"),
+        Implementation("spawner", run_plain, modes={"fwd"}, setup=setup_spawner),
     ],
     reference=Implementation("reference", run_reference),
     compare=compare,

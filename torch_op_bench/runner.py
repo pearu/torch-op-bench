@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -183,31 +185,63 @@ def _tail(text: str | bytes | None) -> str | None:
 
 
 def launch(payload: dict[str, Any], python: str, timeout: float) -> dict[str, Any]:
-    """Run one worker under ``python`` and return its record."""
+    """Run one worker under ``python`` and return its record.
+
+    The worker runs in a session (process group) of its own, and the whole group is
+    killed when the worker exits or times out, so a process it spawned cannot outlive
+    it to hold GPU memory during later measurements. Its output goes to temporary
+    files, not pipes: the runner waits for the worker, not for the end of a stream
+    that a surviving child may keep open.
+    """
     child_env = dict(os.environ)
     child_env.update(payload["env_vars"])
-    try:
-        proc = subprocess.run(
-            [python, "-m", "torch_op_bench.worker"],
-            input=json.dumps(payload),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=child_env,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return failure_record(payload, python, f"timeout after {timeout:g} s", exc.stderr)
-    except OSError as exc:
-        return failure_record(payload, python, f"cannot launch {python!r}: {exc}")
-    lines = proc.stdout.strip().splitlines()
+    with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
+        try:
+            proc = subprocess.Popen(
+                [python, "-m", "torch_op_bench.worker"],
+                stdin=subprocess.PIPE,
+                stdout=out,
+                stderr=err,
+                text=True,
+                env=child_env,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            return failure_record(payload, python, f"cannot launch {python!r}: {exc}")
+        timed_out = False
+        try:
+            try:
+                proc.stdin.write(json.dumps(payload))
+                proc.stdin.close()
+            except BrokenPipeError:  # the worker died before reading its payload
+                pass
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        finally:
+            _kill_group(proc.pid)
+            proc.wait()
+        out.seek(0)
+        err.seek(0)
+        stdout, stderr = out.read(), err.read()
+    if timed_out:
+        return failure_record(payload, python, f"timeout after {timeout:g} s", stderr)
+    lines = stdout.strip().splitlines()
     try:
         record = json.loads(lines[-1])
     except (IndexError, json.JSONDecodeError):
         reason = f"worker exited with code {proc.returncode} without a record"
-        return failure_record(payload, python, reason, proc.stderr)
+        return failure_record(payload, python, reason, stderr)
     if record["status"] == "error":
-        record["stderr"] = _tail(proc.stderr)
+        record["stderr"] = _tail(stderr)
     return record
+
+
+def _kill_group(pgid: int) -> None:
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):  # the group is already gone
+        pass
 
 
 def _describe(record: dict[str, Any]) -> str:
