@@ -58,6 +58,11 @@ implementations address by the same name:
   To bump it, replace the hash (a branch name is not a pin) and the date next to it,
   and rerun the script.
 
+Rerunning the script on an existing prefix runs `env update`, which adds and changes
+packages but does not remove one dropped from the definition. After removing a
+package from a definition, recreate the prefix instead:
+`rm -rf envs/.prefix/NAME && scripts/setup-env.sh NAME`.
+
 The implementations do not know which definition they run in; the record does. For
 a package installed from a VCS URL, `env.packages` holds
 `{"version", "url", "commit", "requested"}` (read from the `direct_url.json` that pip
