@@ -79,3 +79,7 @@ def test_run_failures():
     assert env._run(["no-such-command-xyz"]) is None
     assert env._run(["false"]) is None
     assert env._run(["echo", " hi "]) == "hi"
+
+
+def test_collect_without_torch_info():
+    assert env.collect(include_torch=False)["torch"] is None

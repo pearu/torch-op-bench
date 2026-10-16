@@ -53,6 +53,7 @@ def run_reference(inputs, mode):
 
 
 def run_broken(inputs, mode):
+    print("toy: about to fail", file=sys.stderr)
     raise RuntimeError("toy failure")
 
 

@@ -93,15 +93,19 @@ def torch_info() -> dict[str, Any]:
     return info
 
 
-def collect(packages: Iterable[str] = ()) -> dict[str, Any]:
-    """The provenance record of this Python process."""
+def collect(packages: Iterable[str] = (), *, include_torch: bool = True) -> dict[str, Any]:
+    """The provenance record of this Python process.
+
+    With ``include_torch=False`` the ``torch`` field is ``None`` and torch is not
+    touched (no CUDA context is created).
+    """
     return {
         "hostname": socket.gethostname(),
         "timestamp": utc_timestamp(),
         "python": platform.python_version(),
         "executable": sys.executable,
         "platform": platform.platform(),
-        "torch": torch_info(),
+        "torch": torch_info() if include_torch else None,
         "driver": driver_version(),
         "torch_op_bench": {"version": torch_op_bench.__version__, **git_info()},
         "packages": package_versions(packages),
