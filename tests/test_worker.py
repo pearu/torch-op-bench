@@ -116,6 +116,19 @@ def test_backward_style_parity_against_backward_style_reference(tests_dir, monke
     assert record["parity"]["metrics"]["grad_a_rel_l2"] < 1e-12
 
 
+def test_env_failure_keeps_the_record(tests_dir, monkeypatch):
+    def broken(packages=()):
+        raise RuntimeError("CUDA error: an illegal memory access was encountered")
+
+    monkeypatch.setattr(worker.env, "collect", broken)
+    record = worker.run_payload(payload(tests_dir))
+    assert record["status"] == "ok" and len(record["times_ms"]) == SETTINGS["repeat"]
+    assert record["env"] is None
+    assert (
+        record["env_error"] == "RuntimeError: CUDA error: an illegal memory access was encountered"
+    )
+
+
 def test_unavailable_without_reason(tests_dir, monkeypatch):
     import toy_op
 

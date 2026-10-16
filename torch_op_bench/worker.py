@@ -55,6 +55,7 @@ def base_record(payload: dict[str, Any], python: str) -> dict[str, Any]:
         "verify": None,
         "env": None,
         "env_from": None,
+        "env_error": None,
     }
 
 
@@ -83,8 +84,11 @@ def run_payload(payload: dict[str, Any]) -> dict[str, Any]:
         record["status"] = "error"
         record["reason"] = f"{type(exc).__name__}: {exc}"
         record["traceback"] = traceback.format_exc()
-    record["env"] = env.collect(payload.get("packages", ()))
     record["env_from"] = "worker"
+    try:
+        record["env"] = env.collect(payload.get("packages", ()))
+    except Exception as exc:  # e.g. CUDA in a bad state: keep the measurement anyway
+        record["env_error"] = f"{type(exc).__name__}: {exc}"
     return to_json(record)
 
 
