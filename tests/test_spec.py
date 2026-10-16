@@ -76,7 +76,9 @@ def test_resolve_dotted_path():
 
 
 def test_resolve_by_name(monkeypatch):
-    assert ops.REGISTRY == {}
+    with pytest.raises(KeyError, match="in-package ops: lce;"):
+        resolve_op("toy")
+    monkeypatch.setattr(ops, "REGISTRY", {})
     with pytest.raises(KeyError, match="in-package ops: none"):
         resolve_op("toy")
     monkeypatch.setitem(ops.REGISTRY, "toy", "toy_op:TOY")
