@@ -1,0 +1,27 @@
+# The `torchtitan` environment, torchtitan at a pinned commit of its `main` branch.
+# Create it with `scripts/setup-env.sh torchtitan-git` (prefix envs/.prefix/torchtitan-git).
+# Every version on the measured path is pinned: a results file names this
+# definition, and a definition that drifts would make the record lie. To move to a
+# newer commit, replace the hashes and the date below (a full 40-hex hash: a branch
+# name is not a pin). envs/torchtitan.yml is the same with the PyPI release.
+name: torchtitan
+channels:
+  - conda-forge
+dependencies:
+  # The newest Python minor for which torch 2.14.1 and triton 3.8.0 both have
+  # wheels (cp310-cp314); torchtitan needs >= 3.11. It need not be pytorch-dev's.
+  - python=3.14.8
+  - pip=26.2.1
+  - pip:
+      # torchtitan's main tracks PyTorch nightly; the loss path imports and the
+      # tests pass with the latest stable torch, the PyPI default wheel (CUDA 13.0).
+      - torch==2.14.1
+      # The triton torch 2.14.1 asks for; the compiled entry's Inductor kernels use it.
+      - triton==3.8.0
+      # torchtitan main's own pin (its requirements.txt): spmd_types from git.
+      - spmd_types @ git+https://github.com/meta-pytorch/spmd_types.git@fce1acb1e9bbce66f398893ff7836346f4cf03cd
+      # The counterpart under test, torchtitan `main` on 2026-10-16. Its other
+      # declared dependencies are not on the measured path and are left to pip's
+      # resolver; Handoff I1-4 lists what it picked. Records carry this commit in
+      # env.packages["torchtitan"].
+      - torchtitan @ git+https://github.com/pytorch/torchtitan@215ddfe4af1e1c97d17693327ec0801ab9f40a92
