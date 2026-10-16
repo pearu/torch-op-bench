@@ -81,3 +81,32 @@ def test_resolve_by_name(monkeypatch):
 
 def test_to_json():
     assert to_json({"a": {3, 1}, "b": object}) == {"a": [1, 3], "b": str(object)}
+
+
+def test_device_normalized_in_case_key():
+    from torch_op_bench.spec import normalize_device
+
+    assert normalize_device("cpu") == "cpu"
+    assert normalize_device("cuda") == "cuda:0"
+    assert normalize_device("cuda:1") == "cuda:1"
+    for bad in ["CUDA", "cuda:x", "cuda:0:1", ""]:
+        with pytest.raises(ValueError, match="invalid device"):
+            normalize_device(bad)
+    a = Case({"M": 1}, "float32", "cuda")
+    assert a.device == "cuda:0"
+    assert a.key == Case({"M": 1}, "float32", "cuda:0").key == "M=1|float32|cuda:0"
+    assert Case.from_dict(a.to_dict()) == a
+
+
+@pytest.mark.parametrize("bad", ["a,b", "a=b", "a|b"])
+def test_key_separators_rejected(bad):
+    with pytest.raises(ValueError, match="reserved for case keys"):
+        Axis("layout", ["ok", bad], kind="str")
+    with pytest.raises(ValueError, match="reserved for case keys"):
+        Axis(bad, [1])
+    with pytest.raises(ValueError, match="reserved for case keys"):
+        Axis("layout", ["ok"], kind="str").parse(bad)
+    with pytest.raises(ValueError, match="reserved for case keys"):
+        Case({"layout": bad}, "float32", "cpu")
+    with pytest.raises(ValueError, match="reserved for case keys"):
+        Case({bad: 1}, "float32", "cpu")

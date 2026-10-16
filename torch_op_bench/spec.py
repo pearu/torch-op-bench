@@ -15,6 +15,23 @@ from typing import Any
 
 MODES = ("fwd", "fwd_bwd")
 AXIS_KINDS = ("int", "str")
+# Characters that structure ``Case.key``; axis names and str values must not hold them.
+KEY_SEPARATORS = ",=|"
+
+
+def _check_key_text(text: str, what: str) -> None:
+    bad = sorted(set(text) & set(KEY_SEPARATORS))
+    if bad:
+        raise ValueError(f"{what} {text!r} contains {''.join(bad)!r}, reserved for case keys")
+
+
+def normalize_device(device: str) -> str:
+    """``cpu`` stays; ``cuda`` becomes ``cuda:0``, so both name the same case."""
+    if not re.fullmatch(r"[a-z]+(:[0-9]+)?", device):
+        raise ValueError(f"invalid device {device!r} (expected e.g. cpu, cuda, cuda:1)")
+    if device == "cpu" or ":" in device:
+        return device
+    return f"{device}:0"
 
 
 @dataclass(frozen=True)
@@ -30,10 +47,17 @@ class Axis:
             raise ValueError(f"axis {self.name!r}: kind must be one of {AXIS_KINDS}")
         if not self.values:
             raise ValueError(f"axis {self.name!r}: no values")
+        _check_key_text(self.name, "axis name")
+        if self.kind == "str":
+            for value in self.values:
+                _check_key_text(value, f"axis {self.name!r} value")
 
     def parse(self, text: str) -> int | str:
         """Convert a command-line value to this axis' kind."""
-        return int(text) if self.kind == "int" else text
+        if self.kind == "int":
+            return int(text)
+        _check_key_text(text, f"axis {self.name!r} value")
+        return text
 
 
 @dataclass(frozen=True)
@@ -43,6 +67,13 @@ class Case:
     params: Mapping[str, Any]
     dtype: str
     device: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "device", normalize_device(self.device))
+        for name, value in self.params.items():
+            _check_key_text(name, "axis name")
+            if isinstance(value, str):
+                _check_key_text(value, f"axis {name!r} value")
 
     @property
     def key(self) -> str:

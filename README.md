@@ -53,7 +53,8 @@ An interrupted run resumes: rerunning the same command skips every
 An op is an `OpSpec` (see `torch_op_bench/spec.py`), addressed either by a short name
 registered in `torch_op_bench/ops/__init__.py` or by a dotted path `module:OBJECT`.
 
-- `axes`: a list of `Axis(name, values, kind="int"|"str")`; `defaults` gives the
+- `axes`: a list of `Axis(name, values, kind="int"|"str")` (names and `str` values
+  must not contain `,`, `=` or `|`, which structure case keys); `defaults` gives the
   point a sweep varies one axis around (an axis missing from it defaults to its
   first value).
 - `dtypes`: dtype names (`"float32"`, `"bfloat16"`, ...).
@@ -104,7 +105,7 @@ concatenation; `torch_op_bench.records.read(directory)` reads a tree and
 |---|---|
 | `schema`, `timestamp` | record format version; UTC time the record was made |
 | `op`, `op_ref` | op name; how it was resolved |
-| `case`, `case_key`, `device_slug` | `{params, dtype, device}`; its stable key; results subdirectory |
+| `case`, `case_key`, `device_slug` | `{params, dtype, device}` (device normalised: `cuda` is `cuda:0`); its stable key; results subdirectory |
 | `implementation`, `mode`, `env_name`, `python` | what ran, where |
 | `settings` | `warmup`, `repeat`, `flush_l2`, `seed`, `timeout` |
 | `status`, `reason`, `traceback`, `stderr` | `ok`, `unavailable` or `error`, and why |

@@ -56,6 +56,8 @@ def test_run_cases_values_env(tests_dir, tmp_path, capsys):
         ["--mode", "bwd"],
         ["--sweep", "M", "--values", "K=99"],
         ["--device", "cuda", "--env", "torch=false"],
+        ["--device", "gpu0"],
+        ["--case", "layout=a|b"],
     ],
 )
 def test_run_bad_arguments(tests_dir, tmp_path, bad, capsys):
