@@ -75,7 +75,7 @@ def run_payload(payload: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"implementation {impl.name!r} does not support mode {mode!r}")
         available = impl.available()
         if available is True:
-            record.update(_measure(spec, impl, case, mode, payload["settings"]))
+            record.update(_measure(spec, impl, case, mode, payload["settings"], record["info"]))
             record["status"] = "ok"
         else:
             record["status"] = "unavailable"
@@ -93,7 +93,12 @@ def run_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _measure(
-    spec: OpSpec, impl: Implementation, case: Case, mode: str, settings: dict[str, Any]
+    spec: OpSpec,
+    impl: Implementation,
+    case: Case,
+    mode: str,
+    settings: dict[str, Any],
+    info: dict[str, Any],
 ) -> dict[str, Any]:
     import torch
 
@@ -103,8 +108,10 @@ def _measure(
     generator = torch.Generator(device=device)
     generator.manual_seed(settings["seed"])
     inputs = spec.make_inputs(case, device, generator)
-    if impl.setup is not None:
-        impl.setup(case)
+    setup_info = impl.setup(case) if impl.setup is not None else None
+    if setup_info is not None and not isinstance(setup_info, dict):
+        raise TypeError(f"setup returned a {type(setup_info).__name__}, not a dict or None")
+    info = {**info, **(setup_info or {})}
 
     # Every call starts from the inputs' first state: gradients a ``backward()``
     # left on them are cleared before each call, outside what is measured.
@@ -132,7 +139,13 @@ def _measure(
         flush_l2=settings["flush_l2"],
         reset=reset,
     )
-    return {"parity": parity, "verify": verify, "memory": memory, "times_ms": times}
+    return {
+        "info": info,
+        "parity": parity,
+        "verify": verify,
+        "memory": memory,
+        "times_ms": times,
+    }
 
 
 def _parity(

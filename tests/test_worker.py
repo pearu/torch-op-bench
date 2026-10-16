@@ -129,6 +129,22 @@ def test_env_failure_keeps_the_record(tests_dir, monkeypatch):
     )
 
 
+def test_setup_dict_merged_into_info(tests_dir, monkeypatch):
+    data = payload(tests_dir, "described")
+    data["info"] = {"chunk": "rows of 4", "resolved_chunk": None}
+    record = worker.run_payload(data)
+    assert record["status"] == "ok", record["traceback"]
+    assert record["info"] == {"chunk": "rows of 4", "resolved_chunk": 4, "M_seen": 8}
+
+    import toy_op
+
+    monkeypatch.setattr(toy_op.TOY.implementation("described"), "setup", lambda case: [1])
+    record = worker.run_payload(data)
+    assert record["status"] == "error"
+    assert record["reason"] == "TypeError: setup returned a list, not a dict or None"
+    assert record["info"] == data["info"]
+
+
 def test_unavailable_without_reason(tests_dir, monkeypatch):
     import toy_op
 

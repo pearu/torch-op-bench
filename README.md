@@ -75,7 +75,9 @@ variables are set.
     here, not at module level, so that the spec imports without them;
   - `env_name` (default `torch`): the environment its worker runs in;
     `env_vars`: set in the worker before torch is imported;
-  - `setup(case)`: run once in the worker before anything is measured;
+  - `setup(case)`: run once in the worker before anything is measured; it may
+    return a dict of facts known only at run time (resolved options, a source hash,
+    whether it compiled), merged over `info` into the record's `info`;
   - `verify(fn)`: given the timed callable, check (e.g. with a profiler) that the
     intended code path runs; raise if not; return a JSON-serialisable dict or `None`;
   - `packages`: distributions whose versions the record carries; `info`: free-form

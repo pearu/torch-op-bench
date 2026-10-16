@@ -116,7 +116,9 @@ class Implementation:
     what it needs itself, so that the spec stays importable without it.
     ``env_vars`` are set in the worker before torch is imported; ``env_name`` names
     the environment (interpreter) the worker runs in. ``setup(case)`` runs once in
-    the worker before anything is measured. ``verify(fn)`` receives the timed
+    the worker before anything is measured; it may return a dict of what the
+    implementation only knows at run time (resolved options, a source hash, whether
+    it compiled), merged over ``info`` into the record's ``info``. ``verify(fn)`` receives the timed
     zero-argument callable, may run it (e.g. under a profiler) and returns a
     JSON-serialisable dict for the record or ``None``; it raises if the intended
     code path did not run. ``packages`` are the distributions whose versions the
@@ -128,7 +130,7 @@ class Implementation:
     modes: set[str] = field(default_factory=lambda: set(MODES))
     env_name: str = "torch"
     env_vars: dict[str, str] = field(default_factory=dict)
-    setup: Callable[[Case], None] | None = None
+    setup: Callable[[Case], dict[str, Any] | None] | None = None
     verify: Callable[[Callable[[], Any]], dict | None] | None = None
     available: Callable[[], bool | str] = _always_available
     packages: tuple[str, ...] = ()

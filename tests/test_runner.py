@@ -88,7 +88,7 @@ def test_enumerate_runs_respects_modes():
     runs = runner.enumerate_runs(SPEC, [case])
     pairs = [(impl.name, mode) for _, impl, mode in runs]
     assert ("broken", "fwd") in pairs and ("broken", "fwd_bwd") not in pairs
-    assert len(pairs) == 13
+    assert len(pairs) == 14
     runs = runner.enumerate_runs(SPEC, [case], ["plain", "broken"], ["fwd_bwd"])
     assert [(impl.name, mode) for _, impl, mode in runs] == [("plain", "fwd_bwd")]
     with pytest.raises(KeyError):
