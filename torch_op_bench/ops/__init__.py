@@ -3,4 +3,6 @@
 Modules are imported only when their op is resolved.
 """
 
-REGISTRY: dict[str, str] = {}
+REGISTRY: dict[str, str] = {
+    "lce": "torch_op_bench.ops.lce:LCE",
+}

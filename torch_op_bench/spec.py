@@ -116,7 +116,9 @@ class Implementation:
     what it needs itself, so that the spec stays importable without it.
     ``env_vars`` are set in the worker before torch is imported; ``env_name`` names
     the environment (interpreter) the worker runs in. ``setup(case)`` runs once in
-    the worker before anything is measured. ``verify(fn)`` receives the timed
+    the worker before anything is measured; it may return a dict of what the
+    implementation only knows at run time (resolved options, a source hash, whether
+    it compiled), merged over ``info`` into the record's ``info``. ``verify(fn)`` receives the timed
     zero-argument callable, may run it (e.g. under a profiler) and returns a
     JSON-serialisable dict for the record or ``None``; it raises if the intended
     code path did not run. ``packages`` are the distributions whose versions the
@@ -128,7 +130,7 @@ class Implementation:
     modes: set[str] = field(default_factory=lambda: set(MODES))
     env_name: str = "torch"
     env_vars: dict[str, str] = field(default_factory=dict)
-    setup: Callable[[Case], None] | None = None
+    setup: Callable[[Case], dict[str, Any] | None] | None = None
     verify: Callable[[Callable[[], Any]], dict | None] | None = None
     available: Callable[[], bool | str] = _always_available
     packages: tuple[str, ...] = ()
@@ -151,7 +153,8 @@ class OpSpec:
     ``{"flops": ...}``) for throughput. ``defaults`` is the point a sweep varies one
     axis around (an axis missing from it defaults to its first value).
     ``reference_fits(case)`` is the memory guard of the parity check: ``True``, or a
-    string saying why the reference is skipped.
+    string saying why the reference is skipped. ``default_dtypes`` are the dtypes a
+    run uses when none are given (``None``: all of ``dtypes``).
     """
 
     name: str
@@ -165,6 +168,7 @@ class OpSpec:
     work: Callable[[Case], dict[str, float]] = lambda case: {}
     defaults: dict[str, Any] = field(default_factory=dict)
     reference_fits: Callable[[Case], bool | str] = _always_fits
+    default_dtypes: list[str] | None = None
 
     def __post_init__(self) -> None:
         names = [impl.name for impl in self.implementations]
@@ -174,6 +178,13 @@ class OpSpec:
         unknown = set(self.defaults) - {axis.name for axis in self.axes}
         if unknown:
             raise ValueError(f"op {self.name!r}: defaults for unknown axes {sorted(unknown)}")
+        if self.default_dtypes is not None:
+            unknown = sorted(set(self.default_dtypes) - set(self.dtypes))
+            if unknown or not self.default_dtypes:
+                raise ValueError(
+                    f"op {self.name!r}: default_dtypes must be a non-empty subset of "
+                    f"dtypes, got {self.default_dtypes}"
+                )
 
     def axis(self, name: str) -> Axis:
         for axis in self.axes:

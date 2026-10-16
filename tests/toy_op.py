@@ -5,7 +5,7 @@ the worker: ``plain`` and ``chunked`` run, ``backward`` leaves its gradients on
 the inputs, ``missing`` is unavailable, ``broken``
 raises, ``flagged`` checks that its ``env_vars`` were set before torch was imported,
 ``elsewhere`` runs in the environment named ``other``, ``spawner`` leaves a child
-process behind.
+process behind, ``described`` adds run-time facts to its ``info`` from ``setup``.
 """
 
 import os
@@ -92,6 +92,10 @@ def setup_spawner(case):
         time.sleep(60)
 
 
+def setup_info(case):
+    return {"resolved_chunk": 4, "M_seen": case.params["M"]}
+
+
 def compare(outputs, ref_outputs, case):
     y, y_ref = outputs[0].double(), ref_outputs[0]
     metrics = {"y_abs_err": (y - y_ref).abs().item()}
@@ -114,6 +118,9 @@ TOY = OpSpec(
     implementations=[
         Implementation("plain", run_plain),
         Implementation("chunked", run_chunked),
+        Implementation(
+            "described", run_plain, modes={"fwd"}, setup=setup_info, info={"chunk": "rows of 4"}
+        ),
         Implementation("backward", run_backward),
         Implementation("missing", run_plain, available=lambda: "toy package not installed"),
         Implementation("broken", run_broken, modes={"fwd"}),
