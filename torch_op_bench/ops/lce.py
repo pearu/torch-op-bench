@@ -403,11 +403,17 @@ LCE = OpSpec(
         "reference_fp32", run_reference, modes=BOTH, info={**CONTRACT, "dtype": "float32"}
     ),
     compare=compare,
-    # Placeholder until measured on CUDA in bfloat16; see the Handoff.
+    # 4x the largest error of torch_eager in bfloat16 against the fp32 reference,
+    # measured on CUDA (RTX 5060 Ti, sm_120, torch 2.16.0a0, 2026-10-16) at
+    # (N, H, V) = (4096, 4096, 131072) and (1024, 1024, 32768), ignore_frac 0 and 0.1:
+    #   loss_rel_err       max 2.964e-03 -> 1.2e-02
+    #   grad_hidden_rel_l2 max 2.450e-03 -> 9.8e-03
+    #   grad_weight_rel_l2 max 2.373e-03 -> 9.5e-03
+    # loss_abs_err is recorded, not checked: it scales with the loss.
     tolerances={
-        "loss_rel_err": 2e-2,
-        "grad_hidden_rel_l2": 2e-2,
-        "grad_weight_rel_l2": 2e-2,
+        "loss_rel_err": 1.2e-2,
+        "grad_hidden_rel_l2": 9.8e-3,
+        "grad_weight_rel_l2": 9.5e-3,
     },
     work=work,
     reference_fits=reference_fits,

@@ -293,3 +293,38 @@ def test_parent_does_not_import_torch():
         "assert 'torch' not in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+@pytest.mark.cuda
+def test_cuda_small_case_through_runner(tmp_path):
+    cases = runner.enumerate_cases(
+        SPEC, device="cuda", cases=[{"N": 1024, "H": 1024, "V": 32768, "ignore_frac": "0"}]
+    )
+    assert [c.dtype for c in cases] == ["bfloat16"]
+    written = runner.run_sweep(
+        SPEC,
+        "lce",
+        runner.enumerate_runs(SPEC, cases),
+        settings=runner.Settings(warmup=2, repeat=5, timeout=900),
+        results_dir=tmp_path,
+        slug="gpu",
+        env_map=runner.parse_env_map(),
+    )
+    assert len(written) == 8
+    eligible = torch.cuda.get_device_capability() >= (8, 0)
+    for record in written:
+        name, parity = record["implementation"], record["parity"]
+        assert record["status"] == "ok", (name, record["reason"])
+        if name == "torch_lce_no_override":
+            # A finding, not a defect of the spec: with the override disabled, the eager
+            # accumulator's bf16 loss is ~2e-2 off the fp32 reference on CUDA (its
+            # gradients are not); see Handoff I1-2. Only the loss may fail.
+            assert parity["failed"] in ([], ["loss_rel_err"]), parity
+        else:
+            assert parity["status"] == "ok", (name, parity)
+        assert record["memory"]["peak_bytes"] > record["memory"]["baseline_bytes"]
+    fwd_bwd = {r["implementation"]: r for r in written if r["mode"] == "fwd_bwd"}
+    assert fwd_bwd["torch_lce"]["verify"]["override_ran"] is eligible
+    assert fwd_bwd["torch_lce_no_override"]["verify"]["override_ran"] is False
+    peak = {name: r["memory"]["peak_bytes"] for name, r in fwd_bwd.items()}
+    assert peak["torch_lce"] < peak["torch_eager"], peak
