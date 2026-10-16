@@ -17,6 +17,8 @@ dependencies = []
 [project.optional-dependencies]
 plot = ["matplotlib", "pandas"]
 dev = ["pytest", "pytest-cov", "ruff"]
+# Liger in the torch environment itself (§4.2); envs/liger.yml is its own environment.
+liger = ["liger-kernel==0.8.4"]
 
 [project.scripts]
 torch-op-bench = "torch_op_bench.cli:main"
