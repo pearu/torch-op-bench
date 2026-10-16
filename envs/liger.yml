@@ -18,5 +18,7 @@ dependencies:
       - torch==2.14.1
       # Liger's kernels are Triton kernels; this is the triton torch 2.14.1 asks for.
       - triton==3.8.0
+      # liger_kernel imports packaging but does not declare it (0.8.4 and b49a7aa).
+      - packaging==26.3
       # The counterpart under test: pure Python plus Triton, no toolchain needed.
       - liger-kernel==0.8.4
