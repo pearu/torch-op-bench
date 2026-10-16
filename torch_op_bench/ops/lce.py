@@ -380,11 +380,12 @@ def verify_lce(fn: Any) -> dict[str, Any]:
     case, options = _STATE["case"], _STATE["options"]
     if not events and override_eligible(case, options):
         registration = _STATE["registration"]
-        cause = (
-            "it is registered, yet did not run"
-            if registration["registered"]
-            else f"not registered: {registration['reason']}"
-        )
+        if registration["registered"]:
+            cause = "it is registered, yet did not run"
+        elif registration["registered"] is None:
+            cause = f"registration unknown: {registration['reason'].removeprefix('cannot tell: ')}"
+        else:
+            cause = f"not registered: {registration['reason']}"
         raise AssertionError(
             f"the torch._native LCE override did not run although eligible "
             f"({case.device}, {case.dtype}, acc_policy={options['acc_policy']}, "

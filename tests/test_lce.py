@@ -179,6 +179,10 @@ def test_verify_raises_when_eligible_but_absent(monkeypatch):
     monkeypatch.setitem(lce._STATE, "registration", {"registered": False, "reason": reason})
     with pytest.raises(AssertionError, match=f"; not registered: {reason}; the timing"):
         lce.verify_lce(lambda: None)
+    unknown = {"registered": None, "reason": "cannot tell: RuntimeError: boom"}
+    monkeypatch.setitem(lce._STATE, "registration", unknown)
+    with pytest.raises(AssertionError, match="; registration unknown: RuntimeError: boom; the"):
+        lce.verify_lce(lambda: None)
     names = ["_native::_linear_cross_entropy_batch_chunked_cutedsl_2"]
     monkeypatch.setattr(lce, "native_events", lambda fn: [*names, scatter])
     assert lce.verify_lce(lambda: None) == {
