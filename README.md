@@ -138,7 +138,11 @@ What the records say:
   `torch_lce` fails with an `error` record if the override was eligible (CUDA sm_80+,
   bf16 or fp16, options resolved to `compact` with fp32 accumulation) and did not
   run, and `torch_lce_no_override` fails if it ran. On CPU, below sm_80 or in fp32,
-  `override_ran: false` is simply recorded.
+  `override_ran: false` is simply recorded. The error names why the override was not
+  registered: the CuTeDSL runtime is missing, `TORCH_DISABLE_NATIVE_JIT=1` is set, or
+  the `nvidia-cutlass-dsl` version is not known-good. `info.override_registration`
+  records the same, and `env.packages` the versions of `nvidia-cutlass-dsl` and
+  `apache-tvm-ffi`.
 - `parity`: errors against the fp32 reference. The tolerances are 4× the bf16 error
   of `torch_eager` (see `ops/lce.py`). A failure is a finding for the report, not a
   failure of the run.

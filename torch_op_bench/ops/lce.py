@@ -43,6 +43,10 @@ LCE_SOURCES = (
     "_native/ops/linear_cross_entropy/*.py",
 )
 
+# The distributions the override runs on (R4: versions of what an implementation
+# uses); torch._native checks both before registering the override.
+DSL_PACKAGES = ("nvidia-cutlass-dsl", "apache-tvm-ffi")
+
 # What setup learnt about the case this worker runs; verify reads it. A worker
 # runs one case, so module state is per case.
 _STATE: dict[str, Any] = {}
@@ -279,10 +283,48 @@ def setup_compiled(case: Case) -> dict[str, Any]:
     return {"compiled": True}
 
 
+def override_registration() -> dict[str, Any]:
+    """Whether this build registers the torch._native LCE override, and if not why.
+
+    Mirrors the checks of ``register_linear_cross_entropy_overrides``, through
+    ``torch._native.cutedsl_utils``, a private module: ``registered`` is ``None``
+    when it cannot be asked.
+    """
+    try:
+        from torch._native import cutedsl_utils as cu
+    except Exception as exc:
+        reason = f"cannot tell: torch._native.cutedsl_utils: {type(exc).__name__}: {exc}"
+        return {"registered": None, "reason": reason}
+    try:
+        if not cu.runtime_available():
+            reason = (
+                "CuTeDSL runtime not available (nvidia-cutlass-dsl or apache-tvm-ffi "
+                "missing, or a build without CUDA)"
+            )
+        elif cu.check_native_jit_disabled():
+            reason = "disabled by TORCH_DISABLE_NATIVE_JIT=1"
+        elif not cu._version_is_ok():
+            reason = (
+                f"nvidia-cutlass-dsl {cu.runtime_version()} is not a known-good version "
+                "(TORCH_NATIVE_SKIP_VERSION_CHECK=1 overrides)"
+            )
+        else:
+            reason = None
+    except Exception as exc:
+        return {"registered": None, "reason": f"cannot tell: {type(exc).__name__}: {exc}"}
+    return {"registered": reason is None, "reason": reason}
+
+
 def setup_lce(case: Case) -> dict[str, Any]:
     options = resolved_options(case)
-    _STATE.update(case=case, options=options)
-    return {"compiled": False, "options": options, **lce_source_md5()}
+    registration = override_registration()
+    _STATE.update(case=case, options=options, registration=registration)
+    return {
+        "compiled": False,
+        "options": options,
+        "override_registration": registration,
+        **lce_source_md5(),
+    }
 
 
 def setup_lce_no_override(case: Case) -> dict[str, Any]:
@@ -333,10 +375,16 @@ def verify_lce(fn: Any) -> dict[str, Any]:
     events = override_events(fn)
     case, options = _STATE["case"], _STATE["options"]
     if not events and override_eligible(case, options):
+        registration = _STATE["registration"]
+        cause = (
+            "it is registered, yet did not run"
+            if registration["registered"]
+            else f"not registered: {registration['reason']}"
+        )
         raise AssertionError(
             f"the torch._native LCE override did not run although eligible "
             f"({case.device}, {case.dtype}, acc_policy={options['acc_policy']}, "
-            f"acc_dtype={options['acc_dtype']}): the timing would be mislabelled"
+            f"acc_dtype={options['acc_dtype']}); {cause}; the timing would be mislabelled"
         )
     return {"override_ran": bool(events), "override_events": events}
 
@@ -387,6 +435,7 @@ LCE = OpSpec(
             setup=setup_lce,
             verify=verify_lce,
             available=lce_available,
+            packages=DSL_PACKAGES,
             info={**CONTRACT, "options": "LinearCrossEntropyOptions()"},
         ),
         Implementation(
@@ -396,6 +445,7 @@ LCE = OpSpec(
             setup=setup_lce_no_override,
             verify=verify_lce_no_override,
             available=lce_no_override_available,
+            packages=DSL_PACKAGES,
             info={**CONTRACT, "options": "LinearCrossEntropyOptions()"},
         ),
     ],

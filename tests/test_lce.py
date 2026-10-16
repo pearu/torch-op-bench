@@ -128,6 +128,7 @@ def test_setup_records_options_and_source_hash():
     assert "nn/modules/linear_cross_entropy.py" in info["lce_source_files"]
     no_override = lce.setup_lce_no_override(c)
     assert no_override["override_disabled"] == list(lce.OVERRIDE_OPS)
+    assert info["override_registration"] == lce.override_registration()
     assert no_override["lce_source_md5"] == md5
     assert lce.setup_eager(c) == {"compiled": False}
     assert lce.setup_compiled(c) == {"compiled": True}
@@ -168,15 +169,66 @@ def test_verify_raises_when_eligible_but_absent(monkeypatch):
     c = case("bfloat16", device="cuda")
     monkeypatch.setitem(lce._STATE, "case", c)
     monkeypatch.setitem(lce._STATE, "options", {"acc_policy": "compact", "acc_dtype": "float32"})
+    monkeypatch.setitem(lce._STATE, "registration", {"registered": True, "reason": None})
     monkeypatch.setattr(lce, "override_eligible", lambda case, options: True)
     monkeypatch.setattr(lce, "override_events", lambda fn: [])
-    with pytest.raises(AssertionError, match="did not run although eligible"):
+    with pytest.raises(AssertionError, match="although eligible .*; it is registered, yet did not"):
+        lce.verify_lce(lambda: None)
+    reason = "disabled by TORCH_DISABLE_NATIVE_JIT=1"
+    monkeypatch.setitem(lce._STATE, "registration", {"registered": False, "reason": reason})
+    with pytest.raises(AssertionError, match=f"; not registered: {reason}; the timing"):
         lce.verify_lce(lambda: None)
     names = ["_native::_linear_cross_entropy_batch_chunked_cutedsl_2"]
     monkeypatch.setattr(lce, "override_events", lambda fn: names)
     assert lce.verify_lce(lambda: None) == {"override_ran": True, "override_events": names}
     with pytest.raises(AssertionError, match="ran although disabled"):
         lce.verify_lce_no_override(lambda: None)
+
+
+def test_override_registration(monkeypatch):
+    from torch._native import cutedsl_utils as cu
+
+    expected = {"registered": True, "reason": None}
+    if not cu.runtime_available():  # e.g. the CPU wheel of CI
+        expected = {"registered": False, "reason": lce.override_registration()["reason"]}
+        assert expected["reason"].startswith("CuTeDSL runtime not available")
+    assert lce.override_registration() == expected
+
+    monkeypatch.setattr(cu, "runtime_available", lambda: True)
+    monkeypatch.setattr(cu, "check_native_jit_disabled", lambda: False)
+    monkeypatch.setattr(cu, "_version_is_ok", lambda: True)
+    assert lce.override_registration() == {"registered": True, "reason": None}
+    monkeypatch.setattr(cu, "_version_is_ok", lambda: False)
+    monkeypatch.setattr(cu, "runtime_version", lambda: "4.5.0")
+    assert lce.override_registration()["reason"] == (
+        "nvidia-cutlass-dsl 4.5.0 is not a known-good version "
+        "(TORCH_NATIVE_SKIP_VERSION_CHECK=1 overrides)"
+    )
+    monkeypatch.setattr(cu, "check_native_jit_disabled", lambda: True)
+    assert lce.override_registration() == {
+        "registered": False,
+        "reason": "disabled by TORCH_DISABLE_NATIVE_JIT=1",
+    }
+    monkeypatch.setattr(cu, "runtime_available", lambda: False)
+    assert lce.override_registration()["reason"].startswith("CuTeDSL runtime not available")
+
+    def broken():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cu, "runtime_available", broken)
+    assert lce.override_registration() == {
+        "registered": None,
+        "reason": "cannot tell: RuntimeError: boom",
+    }
+    import torch._native
+
+    monkeypatch.delattr(torch._native, "cutedsl_utils")
+    monkeypatch.setitem(sys.modules, "torch._native.cutedsl_utils", None)
+    result = lce.override_registration()
+    assert result["registered"] is None
+    assert result["reason"].startswith(
+        "cannot tell: torch._native.cutedsl_utils: ModuleNotFoundError"
+    )
 
 
 def test_override_eligible(monkeypatch):
@@ -257,6 +309,9 @@ def test_through_worker_and_runner(tmp_path):
     assert by_impl["torch_lce"]["verify"] == {"override_ran": False, "override_events": []}
     assert len(by_impl["torch_lce"]["info"]["lce_source_md5"]) == 32
     assert by_impl["torch_lce_no_override"]["info"]["override_disabled"] == list(lce.OVERRIDE_OPS)
+    for name in ["torch_lce", "torch_lce_no_override"]:
+        assert set(by_impl[name]["env"]["packages"]) == {"nvidia-cutlass-dsl", "apache-tvm-ffi"}
+        assert "override_registration" in by_impl[name]["info"]
     assert len(records.read(tmp_path / "lce" / "cpu")) == 8
 
 
@@ -328,3 +383,20 @@ def test_cuda_small_case_through_runner(tmp_path):
     assert fwd_bwd["torch_lce_no_override"]["verify"]["override_ran"] is False
     peak = {name: r["memory"]["peak_bytes"] for name, r in fwd_bwd.items()}
     assert peak["torch_lce"] < peak["torch_eager"], peak
+
+
+@pytest.mark.cuda
+def test_cuda_override_not_registered_is_named(monkeypatch):
+    # The override registers at import; TORCH_DISABLE_NATIVE_JIT=1 keeps it out, as a
+    # missing or wrong nvidia-cutlass-dsl would on a fresh host.
+    if torch.cuda.get_device_capability() < (8, 0):
+        pytest.skip("the override is not eligible below sm_80")
+    monkeypatch.setenv("TORCH_DISABLE_NATIVE_JIT", "1")
+    c = Case({"N": 1024, "H": 1024, "V": 32768, "ignore_frac": "0"}, "bfloat16", "cuda")
+    payload = runner.make_payload(
+        SPEC, "lce", c, SPEC.implementation("torch_lce"), "fwd", runner.Settings(1, 2), slug="gpu"
+    )
+    record = runner.launch(payload, sys.executable, 600)
+    assert record["status"] == "error"
+    assert "not registered: disabled by TORCH_DISABLE_NATIVE_JIT=1" in record["reason"]
+    assert record["env"]["packages"]["nvidia-cutlass-dsl"]
