@@ -174,6 +174,10 @@ counterpart:
 | `liger` (env `liger`) | Liger-Kernel's `liger_fused_linear_cross_entropy(hidden, weight, labels, ignore_index=-100, reduction="mean", accum_dtype=torch.float32)`, `fwd_bwd` only |
 | `liger_native_accum` (env `liger`) | the same with `accum_dtype=None`, Liger's default: the weight gradient accumulated in the parameter dtype; `fwd_bwd` only |
 | `torch_eager_liger` (env `liger`) | `torch_eager` in the `liger` environment, the control |
+| `torchtitan_chunked` (env `torchtitan`) | torchtitan's `ChunkedLossWrapper` (8 chunks) with its default inner `CrossEntropyLoss`, over an lm_head computing `F.linear(x, weight)`; eager; `fwd_bwd` only |
+| `torchtitan_chunked_compiled` (env `torchtitan`) | the same with the inner loss under `torch.compile`, the lm_head not compiled, as torchtitan does it; `fwd_bwd` only |
+| `torchtitan_ce` (env `torchtitan`) | torchtitan's default loss, `CrossEntropyLoss`, on the full logits `F.linear(hidden, weight)`; eager |
+| `torch_eager_torchtitan` (env `torchtitan`) | `torch_eager` in the `torchtitan` environment, the control |
 
 The Liger entries run `fwd_bwd` only: Liger computes the gradients inside its forward
 whenever the inputs require grad, so a `fwd` number would include the backward work.
@@ -181,6 +185,30 @@ They are `unavailable` without `liger_kernel` or without a CUDA device. Their `i
 records Liger's chunking for the case (`chunk_size`, `num_chunks`), the
 `liger_kernel` version and `ce_impl: "triton"`, and `verify.liger_events` the Liger
 kernels that ran (an `error` record if none did).
+
+The torchtitan entries need no GPU and no process group: without a device mesh,
+torchtitan's losses are plain torch (`F.cross_entropy(..., reduction="sum")` on
+`pred.float()`), divided by the number of non-ignored tokens, which the entries pass
+as `global_valid_tokens`. The chunked entries run `fwd_bwd` only, for the same reason
+as Liger's: the wrapper runs the chunk backwards whenever the hidden states require
+grad. They need `N` divisible by 8 (every sweep value is; otherwise an `error`
+record). Their `info` records `num_chunks`, `chunk_tokens` (`N / 8`) and two dtypes:
+
+- `logits_dtype: "float32"`: torchtitan upcasts the logits with `.float()` before the
+  cross-entropy, per chunk for the wrapper (`chunk_tokens × V × 4` bytes) and in full
+  for `torchtitan_ce`;
+- `grad_accum_dtype: "float32"`: the wrapper's `GradAccumulator` buffer, which
+  collects `grad_hidden` chunk by chunk. `grad_weight` is not in it: the chunk
+  backwards accumulate into `weight.grad` in the weight's dtype.
+
+`info.torchtitan_api` says which torchtitan API ran: `compile_config` (0.3.0:
+`[1, N, ...]` inputs, the loss compiled through a `CompileConfig`) or `local_compile`
+(`main`: `[N, ...]` inputs, compiled through `apply_local_compile(["loss"])`).
+`verify.compiled_events` of the compiled entry are the events showing the compiled
+loss ran (`CompiledFunction`, or `triton_` kernels on CUDA); an `error` record if
+there are none. `main` reports a stale version (`0.2.2` on 2026-10-16), so for
+`envs/torchtitan-git.yml` it is the commit in `env.packages["torchtitan"]` that names
+it.
 
 The default sweep (CUDA, bf16) varies one axis at a time around
 (N, H, V) = (4096, 4096, 131072): N 1K–16K, H 1K–8K, V 32K–256K, `ignore_frac` 0
@@ -204,6 +232,13 @@ scripts/setup-env.sh liger
 torch-op-bench run lce --device cuda --env liger=envs/.prefix/liger/bin/python
 ```
 
+With torchtitan:
+
+```sh
+scripts/setup-env.sh torchtitan
+torch-op-bench run lce --device cuda --env torchtitan=envs/.prefix/torchtitan/bin/python
+```
+
 What the records say:
 
 - `verify.override_ran`: the profiler saw a `_native::...linear_cross_entropy...` event.
@@ -215,9 +250,11 @@ What the records say:
   the `nvidia-cutlass-dsl` version is not known-good. `info.override_registration`
   records the same, and `env.packages` the versions of `nvidia-cutlass-dsl` and
   `apache-tvm-ffi`.
-- `verify.native_events`: every `torch._native` event seen, not only LCE's. With the
-  LCE override disabled, or in fp32, the backward still runs
-  `_native::scatter_add__cutedsl_*`, so "no override" means no *LCE* override.
+- `verify.native_events`, on every entry (baselines, controls and counterparts
+  alike): every `torch._native` event seen, not only LCE's. With the LCE override
+  disabled, or in fp32, the backward still runs `_native::scatter_add__cutedsl_*`, so
+  "no override" means no *LCE* override. `[]` means that none ran, or that the torch
+  of that environment has no `torch._native`.
 - `parity`: errors against the fp32 reference. The tolerances are 4× the bf16 error
   of `torch_eager` (see `ops/lce.py`). A failure is a finding for the report, not a
   failure of the run.
@@ -266,7 +303,10 @@ pytest --cov=torch_op_bench --cov-report=term-missing
 Tests marked `cuda` run when a CUDA device is present and are skipped otherwise. CI
 runs the CPU tests with a coverage floor. The CUDA test of the Liger entries runs
 once per Liger environment present (`envs/.prefix/liger`, `envs/.prefix/liger-git`,
-or the interpreter in `TOB_LIGER_PYTHON`) and is skipped without one.
+or the interpreter in `TOB_LIGER_PYTHON`) and is skipped without one. The torchtitan
+tests (a CPU one and a CUDA one) run the same way, once per torchtitan environment
+present (`envs/.prefix/torchtitan`, `envs/.prefix/torchtitan-git`, or
+`TOB_TORCHTITAN_PYTHON`).
 
 ## Licence
 
