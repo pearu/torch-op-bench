@@ -68,18 +68,26 @@ else
     exit 1
 fi
 
+# No prompt: mamba 2 asks to confirm a transaction (conda's env commands do not, and
+# conda env update takes no --yes), and stdin is no answer: under
+# scripts/remote-run.sh it is the rest of the remote script.
+yes=()
+if [[ "$tool" == mamba ]]; then
+    yes=(--yes)
+fi
+
 # Everything but the provenance and the interpreter goes to stderr.
 if [[ -d "$prefix" ]]; then
     echo "setup-env.sh: updating $prefix from $definition with $tool" >&2
-    "$tool" env update --file "$definition" --prefix "$prefix" >&2
+    "$tool" env update "${yes[@]}" --file "$definition" --prefix "$prefix" >&2 </dev/null
 else
     echo "setup-env.sh: creating $prefix from $definition with $tool" >&2
-    "$tool" env create --file "$definition" --prefix "$prefix" >&2
+    "$tool" env create "${yes[@]}" --file "$definition" --prefix "$prefix" >&2 </dev/null
 fi
 
 python="$prefix/bin/python"
 echo "setup-env.sh: installing $root into $prefix" >&2
-"$python" -m pip install --quiet -e "$root" >&2
+"$python" -m pip install --quiet -e "$root" >&2 </dev/null
 
 # The distributions named in the definition's pip section ("name==1.0" or
 # "name @ git+https://..."), whose versions or commits the records carry.

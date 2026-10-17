@@ -6,6 +6,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "setup-env.sh"
 LIGER_GIT = "git+https://github.com/linkedin/Liger-Kernel@"
@@ -111,3 +113,55 @@ def test_torchtitan_git_definition():
 def torchtitan_git_commit() -> str:
     text = (ROOT / "envs" / "torchtitan-git.yml").read_text()
     return re.search(rf"{re.escape(TORCHTITAN_GIT)}([0-9a-f]{{40}})", text).group(1)
+
+
+@pytest.mark.parametrize("tool, flag", [("mamba", ["--yes"]), ("conda", [])])
+def test_script_never_prompts(tmp_path, tool, flag):
+    # mamba 2 asks to confirm; under remote-run.sh stdin is the rest of the remote
+    # script, so the tool gets --yes (mamba only) and /dev/null as stdin.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ["dirname", "mkdir"]:
+        (bin_dir / name).symlink_to(shutil.which(name))
+    log = tmp_path / "args"
+    fake = bin_dir / tool
+    fake.write_text(
+        f'#!{BASH}\nprintf "%s\\n" "$@" > {log}\n'
+        f'if read -r line; then echo "stdin: $line" >> {log}; fi\n'
+        "exit 3\n"
+    )
+    fake.chmod(0o755)
+    proc = subprocess.run(
+        [BASH, str(SCRIPT), "liger", "--prefix", str(tmp_path / "p")],
+        input="a line that must not be read\n",
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": str(bin_dir)},
+    )
+    assert proc.returncode == 3
+    args = log.read_text().splitlines()
+    assert args[:2] == ["env", "create"] and args[2 : 2 + len(flag)] == flag
+    assert not any(line.startswith("stdin:") for line in args)
+
+
+def test_torch_definitions():
+    # The torch environment of a host without a torch build (remote runs): both are
+    # the environment named torch, with the override's runtime pinned.
+    nightly = (ROOT / "envs" / "torch-nightly.yml").read_text()
+    stable = (ROOT / "envs" / "torch-stable.yml").read_text()
+    for text in [nightly, stable]:
+        assert re.search(r"^name: torch$", text, re.M)
+        assert re.search(r"^\s+- python=3\.\d+\.\d+$", text, re.M)
+        assert re.search(r"^\s+- nvidia-cutlass-dsl==\d+\.\d+\.\d+$", text, re.M)
+        assert re.search(r"^\s+- apache-tvm-ffi==\d+\.\d+\.\d+$", text, re.M)
+        assert len(re.findall(r"^\s+- triton==\S+$", text, re.M)) == 1
+        assert re.search(r"^\s+- numpy==\d+\.\d+\.\d+$", text, re.M)  # no warning per worker
+    # One nightly build, named exactly, from the nightly index.
+    assert re.search(r"^\s+- torch==\d+\.\d+\.\d+\.dev\d{8}\+cu\d+$", nightly, re.M)
+    assert re.search(
+        r"^\s+- --extra-index-url https://download\.pytorch\.org/whl/nightly/cu\d+$",
+        nightly,
+        re.M,
+    )
+    assert re.search(r"^\s+- torch==\d+\.\d+\.\d+$", stable, re.M)
+    assert "--extra-index-url" not in stable

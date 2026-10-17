@@ -1,0 +1,26 @@
+# The `torch` environment on a host without a torch build: the PyPI torch release.
+# Create it with `scripts/setup-env.sh torch-stable` (prefix envs/.prefix/torch-stable)
+# and run torch-op-bench from its interpreter, as with envs/torch-nightly.yml, which
+# is the nightly instead. The release has F.linear_cross_entropy (torch >= 2.13) but
+# not its CuTeDSL override (no torch/_native/ops/linear_cross_entropy/ in 2.14.1):
+# on sm_80+ with bf16/fp16, torch_lce's verify then makes an error record (see
+# Handoff I1-6); torch_lce_no_override and everything else run. Every version is
+# pinned.
+name: torch
+channels:
+  - conda-forge
+dependencies:
+  # As the other definitions: the newest Python minor with wheels of everything below.
+  - python=3.14.8
+  - pip=26.2.1
+  - pip:
+      # The latest stable torch, the PyPI default wheel (CUDA 13.0).
+      - torch==2.14.1
+      # The triton torch 2.14.1 asks for.
+      - triton==3.8.0
+      # The override's runtime, the versions pytorch-dev has.
+      - nvidia-cutlass-dsl==4.8.0
+      - apache-tvm-ffi==0.1.12
+      # torch imports numpy if it is there and warns in every worker when not
+      # ("Failed to initialize NumPy", in each record's stderr): the newest.
+      - numpy==2.5.4
