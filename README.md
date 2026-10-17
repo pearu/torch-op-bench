@@ -350,13 +350,14 @@ results hold several):
   axes, the first solid and the second dashed, e.g. one device under two torch builds.
 
 Every figure draws the baseline black, dashed and thick, and a control dotted and
-thin in its original's colour (`plot.STYLE`, `plot.COLORS`). A point whose parity
-failed has a hollow marker, so a fast but wrong number does not read as a win. A
-missing point (`error`, `unavailable`, no parity) is a gap, and the footer counts
-what was left out and why. The footer also gives the provenance (each environment's
-torch and torch-op-bench commit, and the hosts); a figure without it is not a
-result. `--metric`, `--sweep` and `--impl` restrict what is drawn (the baseline is
-always drawn).
+thin in its original's colour, with one marker per environment, so two controls of
+one original stay apart (`plot.STYLE`, `plot.COLORS`, `plot.CONTROL_MARKERS`). A
+point whose parity failed has a hollow marker, so a fast but wrong number does not
+read as a win. A missing point (`error`, `unavailable`, no parity) is a gap, and the
+footer counts what was left out and why. The footer also gives the provenance (each
+environment's torch and torch-op-bench commit, and the hosts); a figure without it
+is not a result. `--metric`, `--sweep` and `--impl` restrict what is drawn (the
+baseline is always drawn).
 
 Next to every PNG, a CSV of the same name holds exactly the plotted points, one row
 per point: the metric, axis, x, implementation, environment, role, y, parity status,

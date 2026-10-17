@@ -47,6 +47,10 @@ COLORS = (
     "#bcbd22",
     "#17becf",
 )
+# A control's marker, one per environment, so two controls of one original (the
+# same colour and line) stay apart: the first environment in sorted order gets the
+# first. "s" is STYLE["control"]'s own.
+CONTROL_MARKERS = ("s", "^", "D", "v", "P", "X", "<", ">")
 # The overlay tells its two result sets apart by line style.
 OVERLAY_LINESTYLE = ("-", "--")
 
@@ -168,6 +172,18 @@ def colors(rows: Sequence[Row], baseline: str) -> dict[str, str]:
     return result
 
 
+def control_markers(rows: Sequence[Row]) -> dict[str, str]:
+    """One marker per control, by its environment: controls of one original in
+    different environments look different."""
+    envs = sorted({r.get("env_name") or "" for r in rows if r.get("role") == "control"})
+    marker = {env: CONTROL_MARKERS[i % len(CONTROL_MARKERS)] for i, env in enumerate(envs)}
+    return {
+        r["implementation"]: marker[r.get("env_name") or ""]
+        for r in rows
+        if r.get("role") == "control"
+    }
+
+
 def swept_axes(rows: Sequence[Row], point: Mapping[str, Any]) -> list[str]:
     return [
         axis
@@ -268,6 +284,7 @@ def _draw_panel(
     point: Mapping[str, Any],
     names: Sequence[str],
     palette: Mapping[str, str],
+    markers: Mapping[str, str],
     baseline: str,
     figure: str,
     handles: dict[str, Any],
@@ -282,7 +299,7 @@ def _draw_panel(
     for (label, _, linestyle), swept in zip(sets, all_swept, strict=True):
         for name in names:
             role = role_of(swept, name, baseline)
-            style = STYLE[role]
+            style = {**STYLE[role], "marker": markers.get(name, STYLE[role]["marker"])}
             color = palette.get(name, "#7f7f7f")
             by_x = {r[axis]: r for r in swept if r["implementation"] == name}
             if not by_x:
@@ -374,6 +391,7 @@ def _figure(
     union = [row for _, rows, _ in sets for row in rows]
     names = analysis.implementations(union, baseline)
     palette = colors(union, baseline)
+    markers = control_markers(union)
     width = PANEL_WIDTH * max(1, len(axes))
     fig, grid = plt.subplots(
         len(metrics), max(1, len(axes)), figsize=(width, PANEL_HEIGHT * len(metrics)), squeeze=False
@@ -384,7 +402,17 @@ def _figure(
         for j, axis in enumerate(axes):
             ax = grid[i][j]
             plotted += _draw_panel(
-                ax, sets, metric, axis, point, names, palette, baseline, path.stem, handles
+                ax,
+                sets,
+                metric,
+                axis,
+                point,
+                names,
+                palette,
+                markers,
+                baseline,
+                path.stem,
+                handles,
             )
             if ratio_line:
                 base = STYLE["baseline"]

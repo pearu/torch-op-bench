@@ -227,3 +227,43 @@ def test_no_sweep(synth, tmp_path):
     messages = [str(w.message) for w in caught]
     assert any("no axis varies around the default point" in m for m in messages)
     assert any("different torch-op-bench commits" in m for m in messages)
+
+
+def test_controls_of_one_original_differ():
+    # Two controls of torch_eager in two environments: the same colour and line,
+    # so their markers differ (R1-12 F1), one per environment, stable by name.
+    rows = [
+        {"implementation": "eager", "env_name": "torch", "role": "baseline"},
+        {
+            "implementation": "eager_liger",
+            "env_name": "liger",
+            "role": "control",
+            "control_of": "eager",
+        },
+        {
+            "implementation": "eager_titan",
+            "env_name": "titan",
+            "role": "control",
+            "control_of": "eager",
+        },
+        {"implementation": "other", "env_name": "titan"},
+    ]
+    markers = plot.control_markers(rows)
+    assert markers == {"eager_liger": "s", "eager_titan": "^"}
+    assert plot.control_markers(rows[::-1]) == markers
+    palette = plot.colors(rows, "eager")
+    assert palette["eager_liger"] == palette["eager_titan"] == "black"
+
+
+def test_controls_drawn_with_their_markers(synth, tmp_path, monkeypatch):
+    # The legend handle of a control carries its environment's marker.
+    seen = {}
+    real = plot._draw_panel
+
+    def spy(ax, sets, metric, axis, point, names, palette, markers, *rest):
+        seen.update(markers)
+        return real(ax, sets, metric, axis, point, names, palette, markers, *rest)
+
+    monkeypatch.setattr(plot, "_draw_panel", spy)
+    draw(synth, tmp_path, dtype="float32", mode="fwd", metrics=["median_ms"], sweep=["M"])
+    assert seen == {"base_other": "s"}
