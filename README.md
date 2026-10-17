@@ -377,6 +377,57 @@ figure). The write-up quotes those numbers, not values read off a figure.
 `torch_op_bench.analysis` turns records into flat rows (`load`, `to_rows`,
 `default_point`, `sweeps`) for anything else; it needs no pandas.
 
+## Remote runs
+
+A benchmark runs on a fresh host that has `ssh`, `git`, `curl`, `rsync`, an NVIDIA
+driver and internet access, from `scripts/remote-run.sh` on your machine. Each of its
+subcommands is one ssh session or one rsync, and all of them work in one scratch
+directory on the host (`--dir`, default `~/torch_op_bench-scratch`), outside which
+nothing is written. The five steps of a run:
+
+```sh
+scripts/remote-run.sh HOST push        # 1. this checkout, with .git, to HOST
+scripts/remote-run.sh HOST bootstrap   #    Miniforge, unless conda is there
+scripts/remote-run.sh HOST setup --envs liger,torchtitan   # 2. environments
+                                       # 3. setup shows `env`, nvidia-smi, `list lce`
+scripts/remote-run.sh HOST run --envs liger,torchtitan -- --case N=4096,V=65536
+scripts/remote-run.sh HOST status      # 4. while it runs: alive?, log, records
+scripts/remote-run.sh HOST wait        #    or follow it to the end
+scripts/remote-run.sh HOST fetch       # 5. results back into results/
+```
+
+- **`push`** refuses a checkout with uncommitted changes to tracked files. Every
+  record carries `env.torch_op_bench.hash`; a run from a dirty tree, or one during
+  which the checkout changed, names code that is not what ran (the step-5 sweep
+  had records from two commits, because a commit landed mid-run). `--allow-dirty`
+  is for development only, and the script says so loudly.
+- **`bootstrap`** installs Miniforge into the scratch directory when the host has
+  neither mamba nor conda. It writes `env.sh`, which puts every cache (Triton,
+  Inductor, conda packages, pip) in the scratch directory and keeps conda from
+  registering environments under `~`.
+- **`setup`** runs `scripts/setup-env.sh` for the torch environment and each of
+  `--envs`. The torch environment is `--torch-env torch-nightly` (default:
+  `envs/torch-nightly.yml`, a pinned nightly wheel, which carries the newest
+  CuTeDSL override) or `torch-stable` (`envs/torch-stable.yml`, the PyPI release).
+  Take the nightly to measure what torch `main` does now, and the release to
+  measure what users have. torch-op-bench runs from that environment's interpreter,
+  so it is the `torch` environment and needs no `--env torch=...`.
+- **`run`** starts `torch-op-bench run lce --device cuda` with `nohup` and
+  `setsid`, writing to `logs/<timestamp>.log` and `results/` in the scratch
+  directory, and returns at once. A dropped connection does not end it. Running the
+  same `run` again (after a disconnect, or after an error) resumes: the triples
+  recorded `ok` are skipped. Arguments after `--` go to `torch-op-bench run`;
+  `--gpu N` sets `CUDA_VISIBLE_DEVICES`; `--op` names another op.
+- **`fetch`** copies the host's `results/` into this checkout's `results/` without
+  deleting anything on either side (the files are append-only, with new names per
+  run), then prints the start of each fetched slug's report as a check. Commit the
+  new files yourself, one commit per host run:
+  `results/<op>/<slug>/<timestamp>-<host>.jsonl`.
+- **`shell`** opens a shell on the host in the scratch directory, with `env.sh`
+  sourced.
+
+`--dry-run` prints every command, local and remote, and runs none.
+
 ## Tests
 
 ```sh
