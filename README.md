@@ -188,8 +188,9 @@ kernels that ran (an `error` record if none did).
 
 The torchtitan entries need no GPU and no process group: without a device mesh,
 torchtitan's losses are plain torch (`F.cross_entropy(..., reduction="sum")` on
-`pred.float()`), divided by the number of non-ignored tokens, which the entries pass
-as `global_valid_tokens`. The chunked entries run `fwd_bwd` only, for the same reason
+`pred.float()`), divided by the number of non-ignored tokens. The entries pass the
+count positionally, as the losses' third argument: 0.3.0 names it
+`global_valid_tokens`, `main` `global_loss_token_counts`. The chunked entries run `fwd_bwd` only, for the same reason
 as Liger's: the wrapper runs the chunk backwards whenever the hidden states require
 grad. They need `N` divisible by 8 (every sweep value is; otherwise an `error`
 record). Their `info` records `num_chunks`, `chunk_tokens` (`N / 8`) and two dtypes:
