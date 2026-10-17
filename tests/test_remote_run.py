@@ -70,7 +70,8 @@ def test_push_dry_run(repo):
     assert rsync.endswith(f" {repo}/.git/ tob-ex:{remote_dir}/.git/")
     assert r"--rsync-path=if\ p=\$\(cat\ torch_op_bench-scratch/run.pid\ " in rsync
     assert r"a\ run\ is\ in\ progress" in rsync
-    assert rf"mkdir\ -p\ {remote_dir}\ \&\&\ \{{\ git\ -C\ {remote_dir}\ " in rsync
+    old_head = "torch_op_bench-scratch/push.old-head"
+    assert rf"mkdir\ -p\ {remote_dir}\ \&\&\ \{{\ \[\ -s\ {old_head}\ \]\ \|\|\ " in rsync
     assert rf"\&\&\ \{{\ \[\ -d\ {remote_dir}/.git\ " in rsync
     assert rf"\&\&\ rm\ -f\ {remote_dir}/.git/objects/info/alternates\ \&\&\ rsync " in rsync
     # Then exactly the tracked files: no exclusion list to keep up to date.
@@ -80,9 +81,11 @@ def test_push_dry_run(repo):
         f"{repo}/ tob-ex:{remote_dir}/"
     ) in lines
     assert "--exclude=/.asb/" not in out and "--delete " not in out.split("ls-files")[1]
-    # The checkout's HEAD before the copy, for what left the index (R1-16 F4).
+    # The checkout's HEAD before the copy, for what left the index (R1-16 F4), unless
+    # a cut-off push left one (R1-17 F5); asked of git only when .git is there.
     assert (
-        r"git\ -C\ torch_op_bench-scratch/torch-op-bench\ rev-parse\ -q\ --verify\ HEAD\ " in rsync
+        rf"\{{\ \[\ -d\ {remote_dir}/.git\ \]\ \&\&\ git\ -C\ {remote_dir}\ rev-parse\ -q\ "
+        rf"--verify\ HEAD\ \>{old_head}\ " in rsync
     )
     assert "\ngit clean -fd -e /envs/.prefix/ -e /results/\n" in out
     assert out.index("xargs -0 rm -f --") < out.index("git clean -fd")
@@ -418,6 +421,54 @@ def test_push_removes_what_left_the_index(fake_host, repo):
     assert (repo / "pkg" / "b.py").exists()  # still here, ignored
 
     proc = run_script("fakehost", "push", script=script, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert not (checkout / "pkg" / "b.py").exists()
+    assert "\nno longer tracked, removing pkg/b.py\n" in proc.stdout
+    assert _files(checkout) == sorted(_git(repo, "ls-files").split())
+    assert not (scratch / "push.old-head").exists()
+
+
+def test_push_after_an_interrupted_push(fake_host, repo, tmp_path):
+    """R1-17 F5: a push cut off after its .git rsync leaves push.old-head with the
+    commit whose files are on the host; the next push keeps it, and removes what
+    left the index then."""
+    env, home = fake_host
+    script = repo / "scripts" / "remote-run.sh"
+    scratch = home / "torch_op_bench-scratch"
+    checkout = scratch / "torch-op-bench"
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "b.py").write_text("b = 1\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "pkg")
+    first = _git(repo, "rev-parse", "HEAD").strip()
+    proc = run_script("fakehost", "push", script=script, env=env)
+    assert proc.returncode == 0, proc.stderr
+
+    _git(repo, "rm", "-q", "--cached", "pkg/b.py")
+    (repo / ".gitignore").write_text("pkg/b.py\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "pkg/b.py: untracked and ignored")
+    # The connection drops during the tracked files' rsync, once: a wrapper on PATH.
+    bin_dir = tmp_path / "drop"
+    bin_dir.mkdir()
+    marker = tmp_path / "drop-once"
+    marker.touch()
+    wrapper = bin_dir / "rsync"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'case " $* " in *" --files-from=- "*) if [ -e {marker} ]; then rm {marker}; '
+        'echo "connection dropped" >&2; exit 30; fi ;; esac\n'
+        f'exec {shutil.which("rsync")} "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    dropping = {**env, "PATH": f"{bin_dir}:{env['PATH']}"}
+    proc = run_script("fakehost", "push", script=script, env=dropping)
+    assert proc.returncode == 30 and "connection dropped" in proc.stderr
+    assert _git(checkout, "rev-parse", "HEAD") == _git(repo, "rev-parse", "HEAD")  # .git went
+    assert (scratch / "push.old-head").read_text().strip() == first
+    assert (checkout / "pkg" / "b.py").exists()
+
+    proc = run_script("fakehost", "push", script=script, env=dropping)  # in full
     assert proc.returncode == 0, proc.stderr
     assert not (checkout / "pkg" / "b.py").exists()
     assert "\nno longer tracked, removing pkg/b.py\n" in proc.stdout

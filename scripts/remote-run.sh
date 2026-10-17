@@ -209,12 +209,15 @@ cmd_push() {
     # the checkout; --allow-dirty does not override this), make the directory,
     # record the checkout's HEAD (none on a first push) for the step after the
     # copy, and remove a .git that is a file (rsync does not replace a file with a
-    # directory) and an alternates file an older push left.
+    # directory) and an alternates file an older push left. A push.old-head that is
+    # already there is kept: only a completed push removes it, so the last push was
+    # cut off, and its HEAD is the last one whose files were all on the host. git is
+    # asked only when .git is there: otherwise it would look in the directories above.
     local prepare="if p=\$(cat $pid_file 2>/dev/null) && kill -0 \"\$p\" 2>/dev/null; then"
     prepare+=" echo \"remote-run.sh: a run is in progress (pid \$p): wait for it or stop it\" >&2;"
     prepare+=" exit 1; fi; mkdir -p $q"
-    prepare+=" && { git -C $q rev-parse -q --verify HEAD >$old_head 2>/dev/null"
-    prepare+=" || rm -f $old_head; }"
+    prepare+=" && { [ -s $old_head ] || { [ -d $q/.git ] &&"
+    prepare+=" git -C $q rev-parse -q --verify HEAD >$old_head 2>/dev/null; } || rm -f $old_head; }"
     prepare+=" && { [ -d $q/.git ] || rm -f $q/.git; }"
     prepare+=" && rm -f $q/.git/objects/info/alternates"
     # --checksum: refs, the index and tracked files change in place, and the quick
