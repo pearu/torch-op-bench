@@ -386,7 +386,7 @@ directory on the host (`--dir`, default `~/torch_op_bench-scratch`), outside whi
 nothing is written. The five steps of a run:
 
 ```sh
-scripts/remote-run.sh HOST push        # 1. this checkout, with .git, to HOST
+scripts/remote-run.sh HOST push        # 1. the tracked files and .git, to HOST
 scripts/remote-run.sh HOST bootstrap   #    Miniforge, unless conda is there
 scripts/remote-run.sh HOST setup --envs liger,torchtitan   # 2. environments
                                        # 3. setup shows `env`, nvidia-smi, `list lce`
@@ -396,15 +396,22 @@ scripts/remote-run.sh HOST wait        #    or follow it to the end
 scripts/remote-run.sh HOST fetch       # 5. results back into results/
 ```
 
-- **`push`** refuses a checkout with uncommitted changes to tracked files. Every
-  record carries `env.torch_op_bench.hash`; a run from a dirty tree, or one during
-  which the checkout changed, names code that is not what ran (the step-5 sweep
-  had records from two commits, because a commit landed mid-run). `--allow-dirty`
-  is for development only, and the script says so loudly. The remote `.git` is a
-  repository of its own: a checkout whose `.git` is a `gitdir:` file (`git clone
+- **`push`** sends the tracked files (`git ls-files`) and the repository, and
+  nothing else: untracked and ignored files never leave your machine, and a file
+  deleted since the previous push is removed on the host (`git clean`, which keeps
+  the host's ignored files, `envs/.prefix/` and `results/`). It refuses a checkout
+  with uncommitted changes to tracked files. Every record carries
+  `env.torch_op_bench.hash`; a run from a dirty tree, or one during which the
+  checkout changed, names code that is not what ran (the step-5 sweep had records
+  from two commits, because a commit landed mid-run). So `push` also refuses while
+  a run is alive on the host, and `--allow-dirty`, which is for development only
+  and says so loudly, does not override that. The remote `.git` is a repository of
+  its own: a checkout whose `.git` is a `gitdir:` file (`git clone
   --separate-git-dir`) has that directory copied, objects borrowed through
   `objects/info/alternates` (`git clone --shared`) are copied in, one rsync more
-  each, and a linked worktree is refused (push from a clone).
+  each, and a linked worktree is refused (push from a clone). The whole repository
+  goes, `.git/config` and hooks included: a remote URL with credentials in it
+  reaches the host too, so push to a shared host from a clone without them.
 - **`bootstrap`** installs Miniforge into the scratch directory when the host has
   neither mamba nor conda. It writes `env.sh`, which puts every cache (Triton,
   Inductor, CUDA's JIT cache, conda packages, pip) in the scratch directory. The

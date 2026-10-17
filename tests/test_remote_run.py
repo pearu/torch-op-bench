@@ -62,31 +62,31 @@ def test_usage_errors(args, message):
 def test_push_dry_run(repo):
     script = repo / "scripts" / "remote-run.sh"
     out = run_script("tob-ex", "push", "--dry-run", script=script).stdout
-    (rsync,) = [line for line in out.splitlines() if line.startswith("+ rsync")]
-    assert rsync.startswith("+ rsync -a --delete ")
-    for exclude in [
-        "/.asb/",
-        "/envs/.prefix/",
-        "/results/",
-        "__pycache__/",
-        ".pytest_cache/",
-        ".ruff_cache/",
-        "htmlcov/",
-        r".coverage\*",
-    ]:
-        assert f"--exclude={exclude} " in rsync
-    assert "--exclude=/.git " not in rsync  # .git goes: records name the commit
-    assert "--exclude=/.git/objects/info/alternates " in rsync
-    assert rsync.endswith(f" {repo}/ tob-ex:torch_op_bench-scratch/torch-op-bench/")
+    lines = out.splitlines()
     remote_dir = "torch_op_bench-scratch/torch-op-bench"
-    assert rf"--rsync-path=mkdir\ -p\ {remote_dir}\ \&\&\ \{{\ \[\ -d\ {remote_dir}/.git\ " in rsync
+    # The repository first, whole, after the remote checks.
+    (rsync,) = [line for line in lines if line.startswith("+ rsync")]
+    assert rsync.startswith("+ rsync -a --checksum --delete --exclude=/objects/info/alternates ")
+    assert rsync.endswith(f" {repo}/.git/ tob-ex:{remote_dir}/.git/")
+    assert r"--rsync-path=if\ p=\$\(cat\ torch_op_bench-scratch/run.pid\ " in rsync
+    assert r"a\ run\ is\ in\ progress" in rsync
+    assert rf"mkdir\ -p\ {remote_dir}\ \&\&\ \{{\ \[\ -d\ {remote_dir}/.git\ " in rsync
     assert rf"\&\&\ rm\ -f\ {remote_dir}/.git/objects/info/alternates\ \&\&\ rsync " in rsync
+    # Then exactly the tracked files: no exclusion list to keep up to date.
+    assert (
+        f"+ git -C {repo} ls-files -z | rsync -a --checksum --from0 --files-from=- "
+        "--ignore-missing-args "
+        f"{repo}/ tob-ex:{remote_dir}/"
+    ) in lines
+    assert "--exclude=/.asb/" not in out and "--delete " not in out.split("ls-files")[1]
+    # Then git removes what is no longer tracked, and keeps the ignored and results/.
+    assert "\ngit clean -fd -e /envs/.prefix/ -e /results/\n" in out
 
 
 def test_dir_option(repo):
     script = repo / "scripts" / "remote-run.sh"
     out = run_script("tob-ex", "push", "--dry-run", "--dir", "/scratch/tob", script=script).stdout
-    assert out.rstrip().endswith("tob-ex:/scratch/tob/torch-op-bench/")
+    assert " tob-ex:/scratch/tob/torch-op-bench/\n" in out
     assert "\nD=/scratch/tob\n" in dry("status", "--dir", "/scratch/tob")
     assert '\nD="$HOME"/torch_op_bench-scratch\n' in dry("status")
     assert '\nD="$HOME"/my\\ scratch\n' in dry("status", "--dir", "~/my scratch")
@@ -183,7 +183,7 @@ def test_push_refuses_a_dirty_tree(repo):
     proc = run_script("tob-ex", "push", "--dry-run", "--allow-dirty", script=script)
     assert proc.returncode == 0
     assert "WARNING: pushing UNCOMMITTED changes" in proc.stderr
-    assert "+ rsync -a --delete" in proc.stdout
+    assert "+ rsync -a --checksum --delete" in proc.stdout
 
 
 def test_count(tmp_path):
@@ -218,7 +218,9 @@ def test_count_main(tmp_path, capsys):
 @pytest.fixture
 def fake_host(tmp_path, repo):
     """A "remote host" that is this machine: ``ssh HOST CMD...`` runs CMD locally
-    with HOME set to a directory of its own, and conda is a stub on PATH. Returns
+    with HOME set to a directory of its own, and conda is a stub on PATH. The
+    remote checkout is the ``repo`` fixture's, which has no torch_op_bench: the
+    remote interpreter imports it from this checkout, through PYTHONPATH. Returns
     (environment for the script, the remote home)."""
     home = tmp_path / "remote-home"
     home.mkdir()
@@ -241,6 +243,7 @@ def fake_host(tmp_path, repo):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("CONDA", "MAMBA"))}
     env["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
     env["PYTHON"] = sys.executable
+    env["PYTHONPATH"] = str(ROOT)
     return env, home
 
 
@@ -264,10 +267,9 @@ def test_push_a_separate_git_dir(fake_host, tmp_path):
 
     proc = run_script("tob-ex", "push", "--dry-run", script=script)
     assert proc.returncode == 0, proc.stderr
-    first, second = [line for line in proc.stdout.splitlines() if line.startswith("+ rsync")]
-    assert "--exclude=/.git " in first
-    assert second.startswith("+ rsync -a --delete --exclude=/objects/info/alternates ")
-    assert second.endswith(f" {gitdir}/ tob-ex:torch_op_bench-scratch/torch-op-bench/.git/")
+    (rsync,) = [line for line in proc.stdout.splitlines() if line.startswith("+ rsync")]
+    assert rsync.startswith("+ rsync -a --checksum --delete --exclude=/objects/info/alternates ")
+    assert rsync.endswith(f" {gitdir}/ tob-ex:torch_op_bench-scratch/torch-op-bench/.git/")
 
     proc = run_script("fakehost", "push", script=script, env=env)
     assert proc.returncode == 0, proc.stderr
@@ -301,7 +303,7 @@ def test_push_a_clone_that_borrows_objects(fake_host, repo, tmp_path):
     proc = run_script("tob-ex", "push", "--dry-run", script=script)
     assert proc.returncode == 0, proc.stderr
     first, second = [line for line in proc.stdout.splitlines() if line.startswith("+ rsync")]
-    assert "--exclude=/.git/objects/info/alternates " in first
+    assert first.endswith(f" {shared}/.git/ tob-ex:torch_op_bench-scratch/torch-op-bench/.git/")
     assert second == (
         f"+ rsync -a --exclude=/info/ {repo}/.git/objects/ "
         "tob-ex:torch_op_bench-scratch/torch-op-bench/.git/objects/"
@@ -314,6 +316,102 @@ def test_push_a_clone_that_borrows_objects(fake_host, repo, tmp_path):
         ["git", "-C", str(remote_git.parent), "fsck", "--full"], capture_output=True, text=True
     )
     assert fsck.returncode == 0 and "missing" not in fsck.stdout + fsck.stderr, fsck
+
+
+def _git(root, *args):
+    cmd = ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", *args]
+    return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+
+
+def _files(root):
+    """Every file under ROOT outside .git, relative."""
+    return sorted(
+        str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and ".git" not in p.parts
+    )
+
+
+def test_push_sends_exactly_the_tracked_files(fake_host, repo):
+    """After push the remote checkout holds the tracked files and nothing else: an
+    untracked file and an ignored file stay here, a file deleted since the previous
+    push is removed there; envs/.prefix/, results/, the remote's ignored files and
+    the run files are untouched."""
+    env, home = fake_host
+    script = repo / "scripts" / "remote-run.sh"
+    scratch = home / "torch_op_bench-scratch"
+    checkout = scratch / "torch-op-bench"
+    (repo / ".gitignore").write_text("secret.cfg\n__pycache__/\nenvs/.prefix/\n")
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "mod.py").write_text("x = 1\n")
+    (repo / "old.txt").write_text("gone soon\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "more")
+    (repo / "pkg" / "stray.py").write_text("untracked code\n")
+    (repo / ".agent-sandbox").write_text("untracked policy\n")
+    (repo / "secret.cfg").write_text("ignored\n")
+    (repo / "pkg" / "__pycache__").mkdir()
+    (repo / "pkg" / "__pycache__" / "mod.pyc").write_text("ignored\n")
+
+    proc = run_script("fakehost", "push", script=script, env=env)
+    assert proc.returncode == 0, proc.stderr
+    tracked = _git(repo, "ls-files").split()
+    assert _files(checkout) == sorted(tracked)
+    assert "old.txt" in tracked
+
+    # What the remote has of its own: an ignored cache, an environment, results
+    # inside the checkout, and the run files beside it.
+    kept = [
+        checkout / "pkg" / "__pycache__" / "remote.pyc",
+        checkout / "envs" / ".prefix" / "torch" / "bin" / "python",
+        checkout / "results" / "toy" / "cpu" / "r.jsonl",
+        scratch / "run.status",
+        scratch / "results" / "toy" / "cpu" / "r.jsonl",
+    ]
+    for path in kept:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("remote\n")
+    _git(repo, "rm", "-q", "old.txt")
+    _git(repo, "commit", "-q", "-m", "drop old.txt")
+
+    proc = run_script("fakehost", "push", script=script, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert "Removing old.txt" in proc.stdout
+    assert not (checkout / "old.txt").exists()
+    for path in kept:
+        assert path.read_text() == "remote\n", path
+    left = [f for f in _files(checkout) if not f.startswith(("envs/.prefix/", "results/"))]
+    assert left == sorted(_git(repo, "ls-files").split() + ["pkg/__pycache__/remote.pyc"])
+    assert _git(checkout, "rev-parse", "HEAD") == _git(repo, "rev-parse", "HEAD")
+    assert _git(checkout, "status", "--porcelain", "--untracked-files=no") == ""
+
+
+def test_push_refuses_during_a_run(fake_host, repo):
+    """push refuses while run.pid is alive, also with --allow-dirty, and changes
+    nothing on the remote."""
+    env, home = fake_host
+    script = repo / "scripts" / "remote-run.sh"
+    scratch = home / "torch_op_bench-scratch"
+    checkout = scratch / "torch-op-bench"
+    proc = run_script("fakehost", "push", script=script, env=env)
+    assert proc.returncode == 0, proc.stderr
+    head = _git(checkout, "rev-parse", "HEAD")
+    (repo / "tracked.txt").write_text("two\n")
+    _git(repo, "commit", "-q", "-am", "two")
+    (repo / "tracked.txt").write_text("three, uncommitted\n")
+    sleeper = subprocess.Popen(["sleep", "60"])
+    try:
+        (scratch / "run.pid").write_text(f"{sleeper.pid}\n")
+        proc = run_script("fakehost", "push", "--allow-dirty", script=script, env=env)
+        assert proc.returncode != 0
+        assert f"a run is in progress (pid {sleeper.pid}): wait for it or stop it" in proc.stderr
+        assert (checkout / "tracked.txt").read_text() == "one\n"
+        assert _git(checkout, "rev-parse", "HEAD") == head
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+    # The run is over: the same push goes through.
+    proc = run_script("fakehost", "push", "--allow-dirty", script=script, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert (checkout / "tracked.txt").read_text() == "three, uncommitted\n"
 
 
 def test_push_refuses_a_linked_worktree(repo, tmp_path):

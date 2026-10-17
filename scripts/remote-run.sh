@@ -7,12 +7,14 @@ usage() {
 usage: scripts/remote-run.sh HOST SUBCOMMAND [options] [-- RUN-ARGS...]
 
 Run torch-op-bench on HOST (an ssh destination or alias) in a scratch directory
-there, from this checkout. Each subcommand is one ssh session or one rsync (push:
-more when the repository is outside .git or borrows objects).
+there, from this checkout. Each subcommand is one ssh session or one rsync, except
+push: an rsync of the repository (one more for each alternate), one of the tracked
+files, and an ssh session.
 
 subcommands:
-  push       copy this checkout (with .git) to REMOTE_DIR/torch-op-bench; refuses
-             unless the tracked files are clean, so every record names one commit
+  push       copy the tracked files and .git to REMOTE_DIR/torch-op-bench, and
+             nothing untracked or ignored; refuses unless the tracked files are
+             clean, so every record names one commit, and while a run is alive
   bootstrap  install Miniforge into REMOTE_DIR/miniforge3 unless mamba or conda is
              on PATH, and write REMOTE_DIR/env.sh (caches under REMOTE_DIR/cache)
   setup      create the torch environment and each of --envs under REMOTE_DIR/envs
@@ -177,19 +179,19 @@ cmd_push() {
             "records will name $(git -C "$root" rev-parse --short HEAD) but run other code" >&2
     fi
     echo "commit: $(git -C "$root" rev-parse HEAD)"
-    # The remote .git must be a repository of its own, or the records name no
-    # commit. A checkout whose .git is a "gitdir: ..." file (git clone
-    # --separate-git-dir) gets that directory copied as the remote .git; objects
-    # borrowed through objects/info/alternates (git clone --shared or --reference)
-    # are copied into it, and the alternates file is left out. One rsync more for
-    # each.
-    local common gitdir="" alternates=() alt
+    # The remote checkout is exactly the tracked files plus .git: nothing untracked
+    # or ignored leaves this machine (the records' dirty flag is about tracked files,
+    # so nothing else may run there). The repository goes first, whole: a checkout
+    # whose .git is a "gitdir: ..." file (git clone --separate-git-dir) has that
+    # directory copied, and objects borrowed through objects/info/alternates (git
+    # clone --shared or --reference) are copied into it, without the alternates
+    # file; one rsync more each. Then the files `git ls-files` lists, and on HOST
+    # `git clean` removes what is no longer tracked.
+    local common gitdir alternates=() alt
     common="$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)"
-    if [[ ! -d "$root/.git" ]]; then
-        gitdir="$(git -C "$root" rev-parse --absolute-git-dir)"
-        [[ "$gitdir" == "$common" ]] ||
-            die "$root is a linked worktree (its repository is shared): push from a clone"
-    fi
+    gitdir="$(git -C "$root" rev-parse --absolute-git-dir)"
+    [[ "$gitdir" == "$common" ]] ||
+        die "$root is a linked worktree (its repository is shared): push from a clone"
     if [[ -f "$common/objects/info/alternates" ]]; then
         while IFS= read -r alt; do
             [[ -n "$alt" && "$alt" != "#"* ]] || continue
@@ -199,28 +201,39 @@ cmd_push() {
             alternates+=("$alt")
         done <"$common/objects/info/alternates"
     fi
-    local dest="$rsync_dir/torch-op-bench" q git_exclude=/.git/objects/info/alternates
+    local dest="$rsync_dir/torch-op-bench" q pid_file
     q="$(printf '%q' "$dest")"
-    [[ -z "$gitdir" ]] || git_exclude=/.git
-    local prepare="mkdir -p $q && { [ -d $q/.git ] || rm -f $q/.git; }"
+    pid_file="$(printf '%q' "$rsync_dir/run.pid")"
+    # Before the first rsync, on HOST: refuse while a run is alive (it imports from
+    # the checkout; --allow-dirty does not override this), make the directory, and
+    # remove a .git that is a file (rsync does not replace a file with a directory)
+    # and an alternates file an older push left.
+    local prepare="if p=\$(cat $pid_file 2>/dev/null) && kill -0 \"\$p\" 2>/dev/null; then"
+    prepare+=" echo \"remote-run.sh: a run is in progress (pid \$p): wait for it or stop it\" >&2;"
+    prepare+=" exit 1; fi; mkdir -p $q && { [ -d $q/.git ] || rm -f $q/.git; }"
     prepare+=" && rm -f $q/.git/objects/info/alternates"
-    # Before the first rsync, on HOST: make the directory, remove a .git that is a
-    # file (rsync does not replace a file with a directory) and an alternates file
-    # an older push left.
-    local_cmd rsync -a --delete \
-        --exclude=/.asb/ --exclude=/envs/.prefix/ --exclude=/results/ \
-        --exclude="$git_exclude" \
-        --exclude=__pycache__/ --exclude=.pytest_cache/ --exclude=.ruff_cache/ \
-        --exclude=htmlcov/ --exclude='.coverage*' \
-        --rsync-path="$prepare && rsync" \
-        "$root/" "$host:$dest/"
-    if [[ -n "$gitdir" ]]; then
-        local_cmd rsync -a --delete --exclude=/objects/info/alternates \
-            "$gitdir/" "$host:$dest/.git/"
-    fi
+    # --checksum: refs, the index and tracked files change in place, and the quick
+    # check (size and time) misses a change of the same size within the same second.
+    local_cmd rsync -a --checksum --delete --exclude=/objects/info/alternates \
+        --rsync-path="$prepare && rsync" "$gitdir/" "$host:$dest/.git/"
     for alt in "${alternates[@]}"; do
         local_cmd rsync -a --exclude=/info/ "$alt/" "$host:$dest/.git/objects/"
     done
+    # A tracked file deleted but not committed (--allow-dirty) is listed and missing.
+    local tree_cmd=(rsync -a --checksum --from0 --files-from=- --ignore-missing-args
+        "$root/" "$host:$dest/")
+    printf '+ git -C %q ls-files -z |' "$root"
+    printf ' %q' "${tree_cmd[@]}"
+    printf '\n'
+    if ((!dry_run)); then
+        git -C "$root" ls-files -z | "${tree_cmd[@]}"
+    fi
+    remote 'cd torch-op-bench
+# What is no longer tracked: files deleted since the previous push. Ignored files
+# (caches, envs/.prefix/) stay, and so does results/.
+git clean -fd -e /envs/.prefix/ -e /results/
+echo "remote checkout: $(git rev-parse HEAD)"
+git status --short --untracked-files=no'
 }
 
 cmd_bootstrap() {
