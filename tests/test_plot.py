@@ -369,3 +369,35 @@ def test_overlay_footer_counts_both_sets(synth, tmp_path, monkeypatch):
     assert footer[0] == "one: Left out: 1 unavailable (gaps in the lines)."
     assert footer[1] == "two: Left out: 1 error, 1 unavailable (gaps in the lines)."
     assert footer[2].startswith("one: ") and footer[3].startswith("two: ")
+
+
+def test_markers_independent_of_impl(synth, tmp_path, monkeypatch):
+    # Two controls of one original: alpha's sorts first, so it has the square and
+    # other's the triangle. Drawing only other's control must not hand it the
+    # square (R1-13 F3): the markers come from all records, before --impl.
+    from torch_op_bench import records
+
+    both = tmp_path / "both"
+    with pytest.warns(UserWarning):
+        recs = analysis.load(synth)
+    for r in recs:
+        r = {k: v for k, v in r.items() if k != analysis.SOURCE}
+        records.append(both / "synth" / S.SLUG / "x-host.jsonl", r)
+        if r["implementation"] == "base_other":
+            alpha = {**r, "implementation": "base_alpha", "env_name": "alpha"}
+            records.append(both / "synth" / S.SLUG / "x-host.jsonl", alpha)
+    seen = []
+    real = plot._draw_panel
+
+    def spy(ax, sets, metric, axis, point, names, palette, markers, *rest):
+        seen.append({n: markers[n] for n in names if n in markers})
+        return real(ax, sets, metric, axis, point, names, palette, markers, *rest)
+
+    monkeypatch.setattr(plot, "_draw_panel", spy)
+    kwargs = dict(baseline="base", dtype="float32", mode="fwd", metrics=["median_ms"], sweep=["M"])
+    with pytest.warns(UserWarning):
+        plot.plot(both, tmp_path / "all", **kwargs)
+    with pytest.warns(UserWarning):
+        plot.plot(both, tmp_path / "one", impls=["base_other"], **kwargs)
+    assert seen[0] == {"base_alpha": "s", "base_other": "^"}  # all drawn
+    assert seen[-1] == {"base_other": "^"}  # alone, the same marker

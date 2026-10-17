@@ -424,13 +424,14 @@ def _figure(
     footer: Sequence[str],
     *,
     palette: Mapping[str, str] | None = None,
+    markers: Mapping[str, str] | None = None,
     ratio_line: bool = False,
 ) -> Path:
     plt = pyplot()
     union = [row for _, rows, _ in sets for row in rows]
     names = analysis.implementations(union, baseline)
     palette = palette if palette is not None else colors(union, baseline)
-    markers = control_markers(union)
+    markers = markers if markers is not None else control_markers(union)
     width = PANEL_WIDTH * max(1, len(axes))
     fig, grid = plt.subplots(
         len(metrics), max(1, len(axes)), figsize=(width, PANEL_HEIGHT * len(metrics)), squeeze=False
@@ -550,6 +551,9 @@ def plot(
     # --impl narrows the rows: an implementation's colour does not depend on what
     # else is drawn.
     palette = colors(rows + rows_b, baseline, stable_order(recs))
+    # The controls' markers likewise, from every environment in the records: with
+    # --impl, a control keeps the marker its environment has without it (R1-13 F3).
+    markers = control_markers(rows + rows_b)
     if impls:
         _check(
             impls, list(dict.fromkeys(r["implementation"] for r in rows + rows_b)), "implementation"
@@ -593,6 +597,7 @@ def plot(
                     title,
                     footer,
                     palette=palette,
+                    markers=markers,
                 )
             )
             ratios = ratio_rows(selected, baseline, axes_all)
@@ -615,6 +620,7 @@ def plot(
                         provenance(selected),
                     ],
                     palette=palette,
+                    markers=markers,
                     ratio_line=True,
                 )
             )
@@ -642,6 +648,7 @@ def plot(
                             provenance(selected_b, b),
                         ],
                         palette=palette,
+                        markers=markers,
                     )
                 )
     return written
