@@ -81,11 +81,14 @@ def test_grid_csv_is_what_was_drawn(synth, tmp_path):
 def test_ratio_csv(synth, tmp_path):
     draw(synth, tmp_path, dtype="float32", mode="fwd_bwd")
     rows = read_csv(tmp_path / "ratio-fwd_bwd.csv")
-    assert list(dict.fromkeys(r["metric"] for r in rows)) == [
-        "speedup",
-        "memory_ratio",
-        "throughput_ratio",
-    ]
+    # Every implementation has the baseline's work at each point: no throughput row,
+    # which would repeat the speedup (R1-12 R2).
+    assert list(dict.fromkeys(r["metric"] for r in rows)) == ["speedup", "memory_ratio"]
+    assert all(r["work"] == r["baseline_work"] for r in rows)
+    for r in rows:
+        params = dict(item.split("=") for item in r["point"].split(", "))
+        flops = 2 * int(params["M"]) * int(params["K"]) * int(params["N"])
+        assert r["work"] == f"tokens={params['M']},flops={flops}"
     assert "base" not in {r["implementation"] for r in rows}  # the line at 1
     speedup = {
         (r["implementation"], r["axis"], r["x"]): float(r["y"])
@@ -267,3 +270,32 @@ def test_controls_drawn_with_their_markers(synth, tmp_path, monkeypatch):
     monkeypatch.setattr(plot, "_draw_panel", spy)
     draw(synth, tmp_path, dtype="float32", mode="fwd", metrics=["median_ms"], sweep=["M"])
     assert seen == {"base_other": "s"}
+
+
+def test_throughput_ratio_when_work_differs(synth, tmp_path):
+    # An implementation whose work differs from the baseline's at a point: the
+    # throughput ratio is no longer the speedup, so it is drawn, and the CSV shows
+    # both works.
+    from torch_op_bench import records
+
+    changed = tmp_path / "changed"
+    with pytest.warns(UserWarning):
+        recs = analysis.load(synth)
+    for r in recs:
+        r = {k: v for k, v in r.items() if k != analysis.SOURCE}
+        if r["implementation"] == "chunked":
+            r["work"] = {**r["work"], "tokens": 2 * r["work"]["tokens"]}
+        records.append(changed / "synth" / S.SLUG / "x-host.jsonl", r)
+    with pytest.warns(UserWarning):
+        plot.plot(changed, tmp_path / "out", baseline="base", dtype="float32", mode="fwd_bwd")
+    rows = read_csv(tmp_path / "out" / "ratio-fwd_bwd.csv")
+    assert "throughput_ratio" in {r["metric"] for r in rows}
+    (row,) = [
+        r
+        for r in rows
+        if (r["metric"], r["implementation"], r["axis"], r["x"])
+        == ("throughput_ratio", "chunked", "M", "64")
+    ]
+    assert row["work"] == f"tokens=128,flops={2 * 64 * 32 * 16}"
+    assert row["baseline_work"] == f"tokens=64,flops={2 * 64 * 32 * 16}"
+    assert float(row["y"]) == pytest.approx(2 * 0.5)  # twice the tokens in twice the time

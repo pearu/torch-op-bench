@@ -86,6 +86,8 @@ CSV_COLUMNS = [
     "dtype",
     "mode",
     "point",
+    "work",
+    "baseline_work",
 ]
 
 
@@ -199,9 +201,16 @@ def _value(row: Row, metric: str) -> float | None:
     return value / MIB if metric in MEMORY else value
 
 
+def work_text(row: Row) -> str | None:
+    """The work units of a row, as the CSV shows them."""
+    parts = [f"{k}={row[k]}" for k in ("tokens", "flops") if row.get(k) is not None]
+    return ",".join(parts) or None
+
+
 def ratio_rows(rows: Sequence[Row], baseline: str, axes: Sequence[str]) -> list[Row]:
     """Each ok row with ``speedup``, ``memory_ratio`` and ``throughput_ratio`` against
-    the baseline's ok row at the same point; the baseline's own rows left out."""
+    the baseline's ok row at the same point, and both rows' work (``work``,
+    ``baseline_work``); the baseline's own rows left out."""
     base = {
         (row["mode"], analysis.case_of(row, axes)): row
         for row in rows
@@ -213,7 +222,15 @@ def ratio_rows(rows: Sequence[Row], baseline: str, axes: Sequence[str]) -> list[
             continue
         ref = base.get((row["mode"], analysis.case_of(row, axes)))
         if ref is None or row.get("status") != "ok":
-            result.append({**row, "speedup": None, "memory_ratio": None, "throughput_ratio": None})
+            result.append(
+                {
+                    **row,
+                    "speedup": None,
+                    "memory_ratio": None,
+                    "throughput_ratio": None,
+                    "baseline_work": None,
+                }
+            )
             continue
         result.append(
             {
@@ -223,9 +240,18 @@ def ratio_rows(rows: Sequence[Row], baseline: str, axes: Sequence[str]) -> list[
                     row.get("peak_above_baseline"), ref.get("peak_above_baseline")
                 ),
                 "throughput_ratio": _div(row.get("tokens_per_s"), ref.get("tokens_per_s")),
+                "baseline_work": work_text(ref),
             }
         )
     return result
+
+
+def work_differs(ratios: Sequence[Row]) -> bool:
+    """Whether some implementation's work differs from the baseline's at a point:
+    only then is the throughput ratio not the speedup again."""
+    return any(
+        r.get("baseline_work") is not None and work_text(r) != r["baseline_work"] for r in ratios
+    )
 
 
 def _div(a: Any, b: Any) -> float | None:
@@ -329,6 +355,8 @@ def _draw_panel(
                         "dtype": row.get("dtype"),
                         "mode": row.get("mode"),
                         "point": ", ".join(f"{k}={row.get(k)}" for k in point),
+                        "work": work_text(row),
+                        "baseline_work": row.get("baseline_work"),
                     }
                 )
             line = linestyle or style["linestyle"]
@@ -553,7 +581,9 @@ def plot(
             )
             ratios = ratio_rows(selected, baseline, axes_all)
             ratio_metrics = ["speedup", "memory_ratio"]
-            if any(r.get("throughput_ratio") is not None for r in ratios):
+            # Within a case every implementation usually has the same work, so the
+            # throughput ratio would repeat the speedup (R1-12 R2).
+            if work_differs(ratios):
                 ratio_metrics.append("throughput_ratio")
             written.append(
                 _figure(

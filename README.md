@@ -348,8 +348,10 @@ results hold several):
 - `grid-<mode>.png`: rows are metrics (by default median time, tokens/s, peak above
   baseline and one parity error, the op's `grad_hidden` or `loss` error when it has
   one), columns are the swept axes (int axes on a log scale);
-- `ratio-<mode>.png`: speedup (baseline time / time), memory ratio and throughput
-  ratio against the baseline, with the baseline as the line at 1;
+- `ratio-<mode>.png`: speedup (baseline time / time) and memory ratio against the
+  baseline, with the baseline as the line at 1. A throughput ratio is drawn only
+  when some implementation's work differs from the baseline's at a point; otherwise
+  it is the speedup again;
 - `overlay-<mode>.png`, with `--overlay`: the grid of both directories on the same
   axes, the first solid and the second dashed, e.g. one device under two torch builds.
 
@@ -365,8 +367,8 @@ baseline is always drawn).
 
 Next to every PNG, a CSV of the same name holds exactly the plotted points, one row
 per point: the metric, axis, x, implementation, environment, role, y, parity status,
-whether parity failed, and the point. The write-up quotes those numbers, not values
-read off a figure.
+whether parity failed, the point, and the work (with the baseline's, in a ratio
+figure). The write-up quotes those numbers, not values read off a figure.
 
 `torch_op_bench.analysis` turns records into flat rows (`load`, `to_rows`,
 `default_point`, `sweeps`) for anything else; it needs no pandas.
