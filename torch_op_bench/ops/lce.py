@@ -21,7 +21,7 @@ import inspect
 from pathlib import Path
 from typing import Any
 
-from ..spec import Axis, Case, Implementation, OpSpec
+from ..spec import Axis, Case, Implementation, OpSpec, Unavailable
 
 IGNORE_INDEX = -100
 
@@ -504,7 +504,26 @@ def override_registration() -> dict[str, Any]:
     return {"present": True, "registered": reason is None, "reason": reason}
 
 
+def check_device(case: Case) -> None:
+    """Raise ``Unavailable`` on a CUDA device below sm_80, which torch's LCE does not
+    support (its CuTeDSL path and CUTLASS need sm_80+; on sm_75 the backward's
+    ``torch._native`` dispatch fails). CPU runs the eager accumulator.
+    """
+    if not case.device.startswith("cuda"):
+        return
+    import torch
+
+    device = torch.device(case.device)
+    major, minor = torch.cuda.get_device_capability(device)
+    if (major, minor) < (8, 0):
+        raise Unavailable(
+            "torch's linear_cross_entropy CuTeDSL path needs sm_80 or newer; "
+            f"{torch.cuda.get_device_name(device)} is sm_{major}{minor}"
+        )
+
+
 def setup_lce(case: Case) -> dict[str, Any]:
+    check_device(case)
     options = resolved_options(case)
     registration = override_registration()
     _STATE.update(case=case, options=options, registration=registration)
@@ -518,6 +537,8 @@ def setup_lce(case: Case) -> dict[str, Any]:
 
 def setup_lce_no_override(case: Case) -> dict[str, Any]:
     import torch
+
+    check_device(case)  # before the process-wide disabling
 
     # Disabling ops a build does not have raises nothing (torch 2.14.1, 2.16.0a0);
     # override_present tells the reader whether the disabling did anything.

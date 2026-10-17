@@ -331,6 +331,36 @@ def test_override_present(monkeypatch):
     assert lce.lce_override_present() is True
 
 
+SM75 = "torch's linear_cross_entropy CuTeDSL path needs sm_80 or newer; Tesla T4 is sm_75"
+
+
+def _plant_device(monkeypatch, capability, name="Tesla T4"):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: capability)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: name)
+
+
+@pytest.mark.parametrize("name", ["torch_lce", "torch_lce_no_override"])
+def test_setup_below_sm80_is_unavailable(monkeypatch, name):
+    from torch_op_bench.spec import Unavailable
+
+    disabled = []
+    monkeypatch.setattr(
+        torch.backends.python_native, "disable_operations", lambda *ops: disabled.append(ops)
+    )
+    setup = SPEC.implementation(name).setup
+    _plant_device(monkeypatch, (7, 5))
+    with pytest.raises(Unavailable) as raised:
+        setup(case("bfloat16", device="cuda"))
+    assert raised.value.reason == SM75 == str(raised.value)
+    assert disabled == []  # refused before the process-wide disabling
+    # CPU and sm_80+ pass the check (the rest of setup is tested elsewhere).
+    lce.check_device(case("bfloat16"))
+    _plant_device(monkeypatch, (8, 0), "NVIDIA A100")
+    lce.check_device(case("bfloat16", device="cuda"))
+    # Availability of the entry as such is not device-bound.
+    assert lce.lce_no_override_available() is True
+
+
 def test_availability(monkeypatch):
     assert lce.lce_available() is True
     assert lce.lce_no_override_available() is True
@@ -985,6 +1015,21 @@ def test_cuda_small_case_through_runner(tmp_path):
         assert all(event.startswith("_native::") for event in verify["native_events"])
     peak = {name: r["memory"]["peak_bytes"] for name, r in fwd_bwd.items()}
     assert peak["torch_lce"] < peak["torch_eager"], peak
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("name", ["torch_lce", "torch_lce_no_override"])
+def test_cuda_below_sm80_record(monkeypatch, name):
+    # ey has no sub-sm_80 device: the capability is planted, in process.
+    monkeypatch.setattr(lce, "lce_override_present", lambda: True)
+    _plant_device(monkeypatch, (7, 5))
+    c = Case({"N": 1024, "H": 1024, "V": 32768, "ignore_frac": "0"}, "bfloat16", "cuda")
+    payload = runner.make_payload(
+        SPEC, "lce", c, SPEC.implementation(name), "fwd_bwd", runner.Settings(1, 2), slug="gpu"
+    )
+    record = worker.run_payload(payload)
+    assert (record["status"], record["reason"], record["traceback"]) == ("unavailable", SM75, None)
+    assert record["times_ms"] is None and record["parity"] is None
 
 
 @pytest.mark.cuda

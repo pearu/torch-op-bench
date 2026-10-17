@@ -25,7 +25,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import env, records
-from .spec import Case, Implementation, OpSpec, resolve_op, to_json
+from .spec import Case, Implementation, OpSpec, Unavailable, resolve_op, to_json
 
 
 def base_record(payload: dict[str, Any], python: str) -> dict[str, Any]:
@@ -76,8 +76,14 @@ def run_payload(payload: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"implementation {impl.name!r} does not support mode {mode!r}")
         available = impl.available()
         if available is True:
-            record.update(_measure(spec, impl, case, mode, payload["settings"], record["info"]))
-            record["status"] = "ok"
+            try:
+                measured = _measure(spec, impl, case, mode, payload["settings"], record["info"])
+            except Unavailable as exc:  # from setup, before anything is timed
+                record["status"] = "unavailable"
+                record["reason"] = exc.reason
+            else:
+                record.update(measured)
+                record["status"] = "ok"
         else:
             record["status"] = "unavailable"
             record["reason"] = available if isinstance(available, str) else "not available"

@@ -247,7 +247,10 @@ What the records say:
   `torch_lce` fails with an `error` record if the override was eligible (CUDA sm_80+,
   bf16 or fp16, options resolved to `compact` with fp32 accumulation) and did not
   run, and `torch_lce_no_override` fails if it ran. On CPU, below sm_80 or in fp32,
-  `override_ran: false` is simply recorded. On a torch without the override (2.14.1
+  `override_ran: false` is simply recorded. On a CUDA device below sm_80 both
+  `torch_lce` entries are `unavailable` ("torch's linear_cross_entropy CuTeDSL path
+  needs sm_80 or newer; Tesla T4 is sm_75"): there the backward's `torch._native`
+  dispatch fails. On a torch without the override (2.14.1
   and older), `torch_lce` is `unavailable` with that reason rather than run: it would
   measure what `torch_lce_no_override` measures, under another name. The error names
   why a build that has the override did not register it: the CuTeDSL runtime is missing, `TORCH_DISABLE_NATIVE_JIT=1` is set, or
@@ -286,7 +289,7 @@ concatenation; `torch_op_bench.records.read(directory)` reads a tree and
 | `case`, `case_key`, `device_slug` | `{params, dtype, device}` (device normalised: `cuda` is `cuda:0`); its stable key; results subdirectory |
 | `implementation`, `mode`, `env_name`, `python` | what ran, where |
 | `settings` | `warmup`, `repeat`, `flush_l2`, `seed`, `timeout` |
-| `status`, `reason`, `traceback`, `stderr` | `ok`, `unavailable` or `error`, and why |
+| `status`, `reason`, `traceback`, `stderr` | `ok`, `unavailable` or `error`, and why; `unavailable` has two sources, the implementation's `available()` (a package or an API missing) and its `setup` raising `spec.Unavailable` (the case cannot run here, e.g. a device the op does not support), both before anything is timed and without a traceback; `error` is for failures nobody foresaw |
 | `times_ms` | all timing samples, in milliseconds (statistics are derived, `records.stats`) |
 | `memory` | `peak_bytes`, `baseline_bytes` (inputs allocated); `null` on CPU |
 | `parity` | `status` (`ok`, `fail`, `skipped`), `reason`, `metrics`, `tolerances`, `failed` |
