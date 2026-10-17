@@ -1,4 +1,4 @@
-"""Command line: ``torch-op-bench run|env|list|report``."""
+"""Command line: ``torch-op-bench run|env|list|report|plot``."""
 
 from __future__ import annotations
 
@@ -147,6 +147,29 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plot(args: argparse.Namespace) -> int:
+    from . import plot
+
+    plot.pyplot()  # fails early, naming the extra, when matplotlib is absent
+    written = plot.plot(
+        args.results,
+        args.out,
+        op=args.op,
+        device_slug=args.device_slug,
+        dtype=args.dtype,
+        mode=args.mode,
+        baseline=args.baseline,
+        metrics=_split(args.metric),
+        sweep=_split(args.sweep),
+        impls=_split(args.impl),
+        overlay=args.overlay,
+        labels=(args.label_a, args.label_b),
+    )
+    for path in written:
+        print(f"wrote {path} and {path.with_suffix('.csv').name}")
+    return 0
+
+
 def _selection(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("results", help="results directory")
     parser.add_argument("--op", help="the op, when the results hold several")
@@ -223,6 +246,19 @@ def build_parser() -> argparse.ArgumentParser:
     _selection(report_cmd)
     report_cmd.add_argument("--out", help="markdown file to write (default: stdout)")
     report_cmd.set_defaults(func=cmd_report)
+
+    plot_cmd = sub.add_parser("plot", help="draw the figures of a results directory (PNG + CSV)")
+    _selection(plot_cmd)
+    plot_cmd.add_argument("--out", required=True, help="directory for the PNGs and CSVs")
+    plot_cmd.add_argument("--metric", action="append", help="metrics to draw (default: a set)")
+    plot_cmd.add_argument("--sweep", action="append", help="swept axes to draw (default: all)")
+    plot_cmd.add_argument(
+        "--impl", action="append", help="implementations to draw (the baseline always is)"
+    )
+    plot_cmd.add_argument("--overlay", help="a second results directory, drawn dashed")
+    plot_cmd.add_argument("--label-a", default="A", help="label of RESULTS in the overlay")
+    plot_cmd.add_argument("--label-b", default="B", help="label of --overlay in the overlay")
+    plot_cmd.set_defaults(func=cmd_plot)
     return parser
 
 
