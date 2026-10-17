@@ -219,5 +219,8 @@ def test_no_sweep(synth, tmp_path):
         if all(r["case"]["params"][k] == v for k, v in S.DEFAULT.items()):
             r = {k: v for k, v in r.items() if k != analysis.SOURCE}
             records.append(only / "synth" / S.SLUG / "x-host.jsonl", r)
-    with pytest.warns(UserWarning, match="no axis varies around the default point"):
+    with pytest.warns(UserWarning) as caught:
         assert plot.plot(only, tmp_path / "out", baseline="base") == []
+    messages = [str(w.message) for w in caught]
+    assert any("no axis varies around the default point" in m for m in messages)
+    assert any("different torch-op-bench commits" in m for m in messages)
