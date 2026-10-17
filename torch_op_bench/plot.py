@@ -63,11 +63,13 @@ METRIC_LABELS = {
     "tflops": "TFLOP/s",
     "peak_above_baseline": "peak above baseline (MiB)",
     "peak_bytes": "peak (MiB)",
+    "time_x_peak": "time × peak (ms·MiB)",
     "speedup": "speedup (baseline / impl time)",
     "memory_ratio": "memory ratio (impl / baseline peak)",
     "throughput_ratio": "throughput ratio (impl / baseline)",
+    "time_x_peak_ratio": "time × peak ratio (impl / baseline)",
 }
-NUMERIC = ("median_ms", "min_ms", "mean_ms", "iqr_ms", "tokens_per_s", "tflops")
+NUMERIC = ("median_ms", "min_ms", "mean_ms", "iqr_ms", "tokens_per_s", "tflops", "time_x_peak")
 MEMORY = ("peak_above_baseline", "peak_bytes")
 DEFAULT_PARITY = {"fwd_bwd": "parity_grad_hidden_rel_l2", "fwd": "parity_loss_rel_err"}
 
@@ -218,7 +220,8 @@ def work_text(row: Row) -> str | None:
 
 
 def ratio_rows(rows: Sequence[Row], baseline: str, axes: Sequence[str]) -> list[Row]:
-    """Each ok row with ``speedup``, ``memory_ratio`` and ``throughput_ratio`` against
+    """Each ok row with ``speedup``, ``memory_ratio``, ``throughput_ratio`` and
+    ``time_x_peak_ratio`` against
     the baseline's ok row at the same point, and both rows' work (``work``,
     ``baseline_work``); the baseline's own rows left out."""
     base = {
@@ -238,6 +241,7 @@ def ratio_rows(rows: Sequence[Row], baseline: str, axes: Sequence[str]) -> list[
                     "speedup": None,
                     "memory_ratio": None,
                     "throughput_ratio": None,
+                    "time_x_peak_ratio": None,
                     "baseline_work": None,
                 }
             )
@@ -250,6 +254,7 @@ def ratio_rows(rows: Sequence[Row], baseline: str, axes: Sequence[str]) -> list[
                     row.get("peak_above_baseline"), ref.get("peak_above_baseline")
                 ),
                 "throughput_ratio": _div(row.get("tokens_per_s"), ref.get("tokens_per_s")),
+                "time_x_peak_ratio": _div(row.get("time_x_peak"), ref.get("time_x_peak")),
                 "baseline_work": work_text(ref),
             }
         )
@@ -601,7 +606,7 @@ def plot(
                 )
             )
             ratios = ratio_rows(selected, baseline, axes_all)
-            ratio_metrics = ["speedup", "memory_ratio"]
+            ratio_metrics = ["speedup", "memory_ratio", "time_x_peak_ratio"]
             # Within a case every implementation usually has the same work, so the
             # throughput ratio would repeat the speedup (R1-12 R2).
             if work_differs(ratios):

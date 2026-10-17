@@ -83,7 +83,8 @@ def test_ratio_csv(synth, tmp_path):
     rows = read_csv(tmp_path / "ratio-fwd_bwd.csv")
     # Every implementation has the baseline's work at each point: no throughput row,
     # which would repeat the speedup (R1-12 R2).
-    assert list(dict.fromkeys(r["metric"] for r in rows)) == ["speedup", "memory_ratio"]
+    metrics = ["speedup", "memory_ratio", "time_x_peak_ratio"]
+    assert list(dict.fromkeys(r["metric"] for r in rows)) == metrics
     assert all(r["work"] == r["baseline_work"] for r in rows)
     for r in rows:
         params = dict(item.split("=") for item in r["point"].split(", "))
@@ -106,6 +107,16 @@ def test_ratio_csv(synth, tmp_path):
     assert memory[("chunked", "M", "64")] == pytest.approx(0.25)
     expected = 1 + S.PEAK_DEVIATION / S.peak_above("base", {**S.DEFAULT, "M": 256})
     assert memory[("base_other", "M", "256")] == pytest.approx(expected)
+    product = {
+        (r["implementation"], r["axis"], r["x"]): float(r["y"])
+        for r in rows
+        if r["metric"] == "time_x_peak_ratio"
+    }
+    # chunked: twice the time at a quarter of the peak; compiled: half the time.
+    assert product[("chunked", "N", "8")] == pytest.approx(2.0 * 0.25)
+    assert product[("compiled", "M", "64")] == pytest.approx(0.5)
+    assert product[("base_other", "M", "128")] == pytest.approx(S.DEVIATION)
+    assert product[("base_other", "M", "256")] == pytest.approx(expected)
 
 
 def test_dtypes_suffix_and_overlay(synth, tmp_path):

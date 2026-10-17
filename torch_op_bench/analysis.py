@@ -18,6 +18,8 @@ from . import records
 Record = dict[str, Any]
 Row = dict[str, Any]
 
+MIB = 1024**2
+
 # Where a record came from: the file name, kept beside the record for its host part.
 SOURCE = "_source"
 
@@ -33,6 +35,7 @@ RESULTS = [
     "peak_bytes",
     "baseline_bytes",
     "peak_above_baseline",
+    "time_x_peak",
     "tokens",
     "flops",
     "tokens_per_s",
@@ -203,6 +206,7 @@ def flatten(
     median_s = timing["median"] / 1e3 if timing["median"] else None
     tokens, flops = work.get("tokens"), work.get("flops")
     parity = record.get("parity") or {}
+    above = None if on_cpu or peak is None or baseline is None else peak - baseline
     row.update(
         {
             "status": record.get("status"),
@@ -214,9 +218,8 @@ def flatten(
             "iqr_ms": timing["iqr"],
             "peak_bytes": peak,
             "baseline_bytes": baseline,
-            "peak_above_baseline": (
-                None if on_cpu or peak is None or baseline is None else peak - baseline
-            ),
+            "peak_above_baseline": above,
+            "time_x_peak": time_x_peak(timing["median"], above),
             "tokens": tokens,
             "flops": flops,
             "tokens_per_s": tokens / median_s if tokens is not None and median_s else None,
@@ -251,6 +254,16 @@ def flatten(
     for name in info_keys:
         row[INFO_PREFIX + name] = _cell(flat.get(name))
     return row
+
+
+def time_x_peak(median_ms: float | None, peak_above_baseline: int | None) -> float | None:
+    """Elapsed time × peak memory, in ms·MiB: the median time and the peak above the
+    process baseline, as the peak columns are. The user's comparison (Statement
+    §6 step 6b): a counterpart that is faster by holding more memory, or smaller by
+    taking longer, does not win on it unless the product drops."""
+    if median_ms is None or peak_above_baseline is None:
+        return None
+    return median_ms * peak_above_baseline / MIB
 
 
 def varying_info(recs: Iterable[Mapping[str, Any]]) -> list[str]:

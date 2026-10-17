@@ -83,6 +83,16 @@ def test_default_point(synth):
     assert by_name["chunked"][peak] == report.mib(S.peak_above("chunked", S.DEFAULT))
     ratio = header.index("peak above baseline / baseline's")
     assert by_name["chunked"][ratio] == "0.250"
+    # Elapsed time x peak memory, the user's comparison, and its ratio (Part B).
+    product = header.index("time × peak, ms·MiB")
+    t = S.median_ms("chunked", "fwd_bwd", "float32", S.DEFAULT)
+    expected = t * S.peak_above("chunked", S.DEFAULT) / S.MIB
+    assert by_name["chunked"][product] == report.sig3(expected)
+    assert header[product + 1] == "time × peak / baseline's"
+    assert by_name["chunked"][product + 1] == "0.500"  # 2x the time, 1/4 of the peak
+    assert by_name["compiled"][product + 1] == "0.500"
+    assert by_name["base_other (control of base)"][product + 1] == "1.10"
+    assert by_name["base"][product + 1] == "1.00"
     assert "api.name" in header and "num_chunks" in header  # varying info
     # fwd: chunked has no fwd records, and no info column is empty there
     part = section(text, "### fwd, float32", "\n### ")
@@ -97,6 +107,13 @@ def test_sweeps(synth):
     assert "| 8 | 64.0 | 64.0 | — | 128 |" in part  # compiled has no record at N=8
     part = section(text, "#### fwd_bwd, float32: median ms against K", "\n####")
     assert "| 16 | 64.0 | 64.0 | 32.0 | unavailable |" in part
+    part = section(
+        text, "#### fwd_bwd, float32: time × peak, ms·MiB (/ baseline's) against M", "\n####"
+    )
+    base = S.median_ms("base", "fwd_bwd", "float32", S.DEFAULT) * S.peak_above("base", S.DEFAULT)
+    base /= S.MIB
+    assert f"| 128 | {report.sig3(base)} (1.00) | " in part
+    assert f"(1.10) | {report.sig3(base / 2)} (0.500) | {report.sig3(base / 2)} (0.500) |" in part
     part = section(text, "#### fwd_bwd, float32: median ms against layout", "\n####")
     assert "| :--- |" in part.splitlines()[3]  # a str axis is not right-aligned
     assert "### fwd, " not in text and "bfloat16" not in text.split("## Environment check")[0]

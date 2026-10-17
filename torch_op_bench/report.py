@@ -225,12 +225,14 @@ def render_default(
         "TFLOP/s",
         "peak above baseline, MiB",
         "peak above baseline / baseline's",
+        "time × peak, ms·MiB",
+        "time × peak / baseline's",
         "parity",
         *(p.removeprefix(analysis.PARITY_PREFIX) for p in parity),
         "override_ran",
         *(c.removeprefix(analysis.INFO_PREFIX) for c in info),
     ]
-    numeric = [False, False, False, *[True] * 7, False, *[True] * len(parity), False]
+    numeric = [False, False, False, *[True] * 9, False, *[True] * len(parity), False]
     numeric += [False] * len(info)
     body = []
     for name in analysis.implementations(here, baseline):
@@ -252,6 +254,8 @@ def render_default(
                         base_ok and base_ok.get("peak_above_baseline"),
                     )
                 ),
+                sig3(row.get("time_x_peak")),
+                sig3(ratio(row.get("time_x_peak"), base_ok and base_ok.get("time_x_peak"))),
                 parity_text(row),
                 *(sig3(row.get(p)) for p in parity),
                 text(row.get("override_ran")),
@@ -269,7 +273,7 @@ def render_default(
 # --- 3. the sweeps --------------------------------------------------------------------
 
 
-def _cell(row: Row | None, what: str) -> str:
+def _cell(row: Row | None, what: str, base: Row | None = None) -> str:
     if row is None:
         return MISSING
     if what == "parity":
@@ -278,14 +282,21 @@ def _cell(row: Row | None, what: str) -> str:
         return text(row.get("status"))
     if what == "median":
         return sig3(row.get("median_ms"))
+    if what == "time_x_peak":
+        # The product and, after it, its ratio to the baseline's at the same value.
+        value = row.get("time_x_peak")
+        base_value = base.get("time_x_peak") if base and base.get("status") == "ok" else None
+        quotient = ratio(value, base_value)
+        return sig3(value) + ("" if quotient is None else f" ({sig3(quotient)})")
     return mib(row.get("peak_above_baseline"))
 
 
 def render_sweeps(
     rows: Sequence[Row], point: Mapping[str, Any], baseline: str, *, title: str
 ) -> str:
-    """For each axis that varies around the default point: median, peak and parity,
-    one row per axis value and one column per implementation."""
+    """For each axis that varies around the default point: median, peak, time × peak
+    (with its ratio to the baseline's) and parity, one row per axis value and one
+    column per implementation."""
     names = analysis.implementations(rows, baseline)
     parts = []
     for axis, swept in analysis.sweeps(rows, point).items():
@@ -296,10 +307,17 @@ def render_sweeps(
         for what, label in (
             ("median", "median ms"),
             ("peak", "peak above baseline, MiB"),
+            ("time_x_peak", "time × peak, ms·MiB (/ baseline's)"),
             ("parity", "parity"),
         ):
             body = [
-                [str(value), *(_cell(by_key.get((value, name)), what) for name in names)]
+                [
+                    str(value),
+                    *(
+                        _cell(by_key.get((value, name)), what, by_key.get((value, baseline)))
+                        for name in names
+                    ),
+                ]
                 for value in values
             ]
             numbers = all(isinstance(v, (int, float)) for v in values)

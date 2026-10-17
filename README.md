@@ -325,13 +325,16 @@ torch-op-bench commits). Its sections:
    axis when the op cannot be imported), per mode and dtype: one row per
    implementation, the baseline first and each control right after its original,
    with its environment, median and IQR, time against the baseline, tokens/s,
-   TFLOP/s, peak memory above baseline and against the baseline's, parity and its
+   TFLOP/s, peak memory above baseline and against the baseline's, **time × peak**
+   (median ms × peak above baseline in MiB, in ms·MiB) and against the baseline's,
+   parity and its
    metrics, `override_ran`, and each `info` field that differs between records (e.g.
    `torchtitan_api`, `compile`, `accum_dtype`), so a difference cannot hide in
    `info`.
-3. **Sweeps**: for each axis varied around the default point, three tables (median,
-   peak, parity with the failing metrics) with one column per implementation. A cell
-   is `—` when there is no record, or the status when it is not `ok`.
+3. **Sweeps**: for each axis varied around the default point, four tables (median,
+   peak, time × peak with its ratio to the baseline's in parentheses, parity with
+   the failing metrics) with one column per implementation. A cell is `—` when there
+   is no record, or the status when it is not `ok`.
 4. **Environment check**: each control (`torch_eager_<env>`) against its original at
    every point both have, as the time ratio (control / original), the peak
    difference, and the ratio of each parity metric. A time ratio outside [0.95,
@@ -346,6 +349,13 @@ torch-op-bench commits). Its sections:
 
 Numbers have 3 significant digits and memory is in MiB with one decimal.
 
+Time × peak is there because the comparison that matters for a fused kernel is
+elapsed time *and* memory together: a counterpart that is faster by holding more,
+or smaller by taking longer, does not win on it unless the product drops (the
+user's comparison; the other one, time at equal peak memory, needs variants of an
+entry and is not here yet). The environment check still compares time and peak
+separately.
+
 `plot` (`pip install -e .[plot]`; matplotlib, with the Agg backend, so no display
 is needed) writes PNGs at 150 dpi, per mode (and per dtype, as `-<dtype>`, when the
 results hold several):
@@ -353,8 +363,9 @@ results hold several):
 - `grid-<mode>.png`: rows are metrics (by default median time, tokens/s, peak above
   baseline and one parity error, the op's `grad_hidden` or `loss` error when it has
   one), columns are the swept axes (int axes on a log scale);
-- `ratio-<mode>.png`: speedup (baseline time / time) and memory ratio against the
-  baseline, with the baseline as the line at 1. A throughput ratio is drawn only
+- `ratio-<mode>.png`: speedup (baseline time / time), memory ratio and time × peak
+  ratio (`time_x_peak_ratio`, impl / baseline) against the baseline, with the
+  baseline as the line at 1. A throughput ratio is drawn only
   when some implementation's work differs from the baseline's at a point; otherwise
   it is the speedup again;
 - `overlay-<mode>.png`, with `--overlay`: the grid of both directories on the same

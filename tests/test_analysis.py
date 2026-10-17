@@ -82,6 +82,7 @@ def test_flatten_values(synth):
         "peak_bytes": S.BASELINE_BYTES + S.peak_above("chunked", params),
         "baseline_bytes": S.BASELINE_BYTES,
         "peak_above_baseline": S.peak_above("chunked", params),
+        "time_x_peak": t * S.peak_above("chunked", params) / 1024**2,
         "tokens": 256,
         "flops": 2 * 256 * 32 * 16,
         "tokens_per_s": 256 / (t / 1e3),
@@ -203,3 +204,9 @@ def test_records_unchanged_by_load(synth):
     load(synth)
     assert sorted(p.read_text() for p in synth.rglob("*.jsonl")) == before
     assert records.read(synth)
+
+
+def test_time_x_peak():
+    assert analysis.time_x_peak(2.0, 3 * 1024**2) == 6.0  # ms x MiB
+    assert analysis.time_x_peak(None, 1024**2) is None
+    assert analysis.time_x_peak(2.0, None) is None
