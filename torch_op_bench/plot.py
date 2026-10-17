@@ -150,28 +150,38 @@ def role_of(row_or_rows: Row | Sequence[Row], name: str, baseline: str) -> str:
     return "counterpart"
 
 
-def colors(rows: Sequence[Row], baseline: str) -> dict[str, str]:
-    """One colour per implementation, fixed by display order; a control its
-    original's; the baseline black."""
-    names = analysis.implementations(rows, baseline)
+def colors(
+    rows: Sequence[Row], baseline: str, order: Sequence[str] | None = None
+) -> dict[str, str]:
+    """One colour per implementation, by its place in a stable order: ``order`` (the
+    spec's implementations, controls left out) and then the sorted names it lacks,
+    so another invocation, or a figure without some implementation, gives the same
+    colours. A control takes its original's; the baseline is black."""
     control_of = {
         r["implementation"]: r.get("control_of") for r in rows if r.get("role") == "control"
     }
-    result: dict[str, str] = {}
-    cycle = iter(COLORS * (1 + len(names) // len(COLORS)))
-    for name in names:
-        if name == baseline:
+    present = sorted({r["implementation"] for r in rows})
+    ranked = [*(order or ()), *(n for n in present if n not in (order or ()))]
+    ranked = [n for n in ranked if n != baseline and n not in control_of]
+    result: dict[str, str] = {
+        name: COLORS[i % len(COLORS)] for i, name in enumerate(ranked) if name in present
+    }
+    if baseline in present:
+        result[baseline] = STYLE["baseline"]["color"]
+    for name, original in control_of.items():
+        if original == baseline:  # drawn or not (a ratio figure omits it)
             result[name] = STYLE["baseline"]["color"]
-        elif name not in control_of:
-            result[name] = next(cycle)
-    for name in names:
-        if name in control_of:
-            original = control_of[name]
-            if original == baseline:  # drawn or not (a ratio figure omits it)
-                result[name] = STYLE["baseline"]["color"]
-            else:
-                result[name] = result.get(original) or next(cycle)
+        else:
+            result[name] = result.get(original, COLORS[len(ranked) % len(COLORS)])
     return result
+
+
+def stable_order(recs: Sequence[Mapping[str, Any]]) -> list[str] | None:
+    """The spec's implementations, controls left out, when the op resolves."""
+    spec = analysis.spec_of(recs[0]) if recs else None
+    if spec is None:
+        return None
+    return [i.name for i in spec.implementations if i.info.get("role") != "control"]
 
 
 def control_markers(rows: Sequence[Row]) -> dict[str, str]:
@@ -413,12 +423,13 @@ def _figure(
     title: str,
     footer: Sequence[str],
     *,
+    palette: Mapping[str, str] | None = None,
     ratio_line: bool = False,
 ) -> Path:
     plt = pyplot()
     union = [row for _, rows, _ in sets for row in rows]
     names = analysis.implementations(union, baseline)
-    palette = colors(union, baseline)
+    palette = palette if palette is not None else colors(union, baseline)
     markers = control_markers(union)
     width = PANEL_WIDTH * max(1, len(axes))
     fig, grid = plt.subplots(
@@ -535,6 +546,10 @@ def plot(
     if overlay is not None:
         recs_b = _load(overlay, op or recs[0]["op"], device_slug)
         rows_b = analysis.to_rows(recs_b)
+    # One palette for every figure of this invocation, from a stable order, before
+    # --impl narrows the rows: an implementation's colour does not depend on what
+    # else is drawn.
+    palette = colors(rows + rows_b, baseline, stable_order(recs))
     if impls:
         _check(
             impls, list(dict.fromkeys(r["implementation"] for r in rows + rows_b)), "implementation"
@@ -577,6 +592,7 @@ def plot(
                     baseline,
                     title,
                     footer,
+                    palette=palette,
                 )
             )
             ratios = ratio_rows(selected, baseline, axes_all)
@@ -598,6 +614,7 @@ def plot(
                         left_out([r for r in scope if r["implementation"] != baseline], []),
                         provenance(selected),
                     ],
+                    palette=palette,
                     ratio_line=True,
                 )
             )
@@ -621,6 +638,7 @@ def plot(
                             provenance(selected, a),
                             provenance(selected_b, b),
                         ],
+                        palette=palette,
                     )
                 )
     return written

@@ -158,18 +158,52 @@ def test_restrictions(synth, tmp_path):
 def test_styles(synth):
     with pytest.warns(UserWarning):
         rows = analysis.to_rows(analysis.load(synth))
+    # Without an order: by sorted name, whatever the records' order (R1-12 remark).
     palette = plot.colors(rows, "base")
     assert palette["base"] == "black" and palette["base_other"] == "black"
+    assert palette["chunked"] == plot.COLORS[0] and palette["compiled"] == plot.COLORS[1]
+    assert plot.colors(rows[::-1], "base") == palette
+    # With the spec's order; a figure lacking an implementation keeps the others'.
+    order = ["base", "compiled", "chunked"]
+    palette = plot.colors(rows, "base", order)
     assert palette["compiled"] == plot.COLORS[0] and palette["chunked"] == plot.COLORS[1]
+    no_compiled = [r for r in rows if r["implementation"] != "compiled"]
+    assert plot.colors(no_compiled, "base", order)["chunked"] == plot.COLORS[1]
     # A control of a counterpart takes its colour; without the baseline drawn (the
     # ratio figure), a control of the baseline is still black.
     rows2 = [
         {**r, "control_of": "chunked"} if r["implementation"] == "base_other" else r for r in rows
     ]
-    assert plot.colors(rows2, "base")["base_other"] == plot.COLORS[1]
+    assert plot.colors(rows2, "base")["base_other"] == plot.COLORS[0]
     no_base = [r for r in rows if r["implementation"] != "base"]
     assert plot.colors(no_base, "base")["base_other"] == "black"
     assert plot.STYLE["baseline"]["linestyle"] == "--" and plot.STYLE["control"]["linestyle"] == ":"
+
+
+def test_stable_order():
+    from torch_op_bench.ops import lce
+
+    order = plot.stable_order([{"op_ref": "lce"}])
+    assert order == [i.name for i in lce.LCE.implementations if i.info.get("role") != "control"]
+    assert "torch_eager_liger" not in order and order[0] == "torch_eager"
+    assert plot.stable_order([{"op_ref": "no_such_module_xyz:SPEC"}]) is None
+    assert plot.stable_order([]) is None
+
+
+def test_one_palette_per_invocation(synth, tmp_path, monkeypatch):
+    palettes = []
+    real = plot._figure
+
+    def spy(*args, palette=None, **kwargs):
+        palettes.append(dict(palette))
+        return real(*args, palette=palette, **kwargs)
+
+    monkeypatch.setattr(plot, "_figure", spy)
+    draw(synth, tmp_path, dtype="float32", metrics=["median_ms"], sweep=["M"])
+    draw(synth, tmp_path, dtype="float32", metrics=["median_ms"], sweep=["M"], impls=["chunked"])
+    # fwd has no chunked; --impl drops compiled: the colours stay.
+    assert all(p == palettes[0] for p in palettes)
+    assert palettes[0]["chunked"] == plot.COLORS[0]
 
 
 def test_left_out_and_provenance():
