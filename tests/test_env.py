@@ -22,6 +22,33 @@ def test_collect_is_json_and_complete():
     assert env.is_checkout(env.package_root())  # the tests run from a checkout
 
 
+def test_matmul_precision(monkeypatch):
+    matmul = env.collect()["torch"]["matmul"]
+    assert matmul == {
+        "allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "allow_bf16_reduced_precision_reduction": (
+            torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
+        ),
+        "allow_fp16_reduced_precision_reduction": (
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
+        ),
+        "fp32_precision": getattr(torch.backends.cuda.matmul, "fp32_precision", None),
+        "float32_matmul_precision": torch.get_float32_matmul_precision(),
+    }
+    # As the process has them when the record is made, not the defaults.
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_bf16_reduced_precision_reduction", False)
+    torch.set_float32_matmul_precision("high")
+    try:
+        matmul = env.torch_info()["matmul"]
+    finally:
+        torch.set_float32_matmul_precision("highest")
+    assert matmul["allow_bf16_reduced_precision_reduction"] is False
+    assert matmul["float32_matmul_precision"] == "high"
+    # A setting this torch lacks is None, not an error.
+    monkeypatch.setattr(env, "MATMUL_FLAGS", ("allow_tf32", "no_such_flag"))
+    assert env.matmul_precision()["no_such_flag"] is None
+
+
 def test_torch_without_cuda(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     info = env.torch_info()
@@ -40,7 +67,8 @@ def test_without_torch(monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    assert env.torch_info()["version"] is None
+    info = env.torch_info()
+    assert info["version"] is None and info["matmul"] is None
 
 
 def test_cudnn_failure_tolerated(monkeypatch):

@@ -1,0 +1,29 @@
+# The `torchtitan` environment, torchtitan from its PyPI release.
+# Create it with `scripts/setup-env.sh torchtitan` (prefix envs/.prefix/torchtitan).
+# Every version on the measured path is pinned: a results file names this
+# definition, and a definition that drifts would make the record lie. To move to a
+# newer release, change the pins here; envs/torchtitan-git.yml pins a git commit of
+# torchtitan instead.
+name: torchtitan
+channels:
+  - conda-forge
+dependencies:
+  # The newest Python minor for which torch 2.14.1 and triton 3.8.0 both have
+  # wheels (cp310-cp314); torchtitan needs >= 3.11. It need not be pytorch-dev's.
+  - python=3.14.8
+  - pip=26.2.1
+  - pip:
+      # torchtitan 0.3.0 is the release paired with torch 2.14 (its docs/release.md),
+      # here the PyPI default wheel (CUDA 13.0). Its own torch and CUDA libraries:
+      # parity in this environment is against this torch (R2).
+      - torch==2.14.1
+      # The triton torch 2.14.1 asks for; the compiled entry's Inductor kernels use it.
+      - triton==3.8.0
+      # torchtitan.config imports tyro, which torchtitan declares unpinned.
+      - tyro==1.0.16
+      # torchtitan's own pin (spmd_types==0.2.3); pure Python, from PyPI.
+      - spmd_types==0.2.3
+      # The counterpart under test. Its other declared dependencies (torchdata,
+      # datasets, tokenizers, ...) are not on the measured path and are left to
+      # pip's resolver; Handoff I1-4 lists what it picked.
+      - torchtitan==0.3.0

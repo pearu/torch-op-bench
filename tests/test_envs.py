@@ -80,3 +80,34 @@ def test_liger_git_definition():
 def liger_git_commit() -> str:
     text = (ROOT / "envs" / "liger-git.yml").read_text()
     return re.search(rf"{re.escape(LIGER_GIT)}([0-9a-f]{{40}})", text).group(1)
+
+
+TORCHTITAN_GIT = "git+https://github.com/pytorch/torchtitan@"
+
+
+def test_torchtitan_release_definition():
+    text = (ROOT / "envs" / "torchtitan.yml").read_text()
+    for pin in [r"torchtitan==0\.3\.0", r"spmd_types==0\.2\.3", r"torch==\d+\.\d+\.\d+"]:
+        assert re.search(rf"^\s+- {pin}$", text, re.M), pin
+    assert re.search(r"^\s+- tyro==\d+\.\d+\.\d+$", text, re.M)
+    assert re.search(r"^\s+- python=3\.(1[1-9])\.\d+$", text, re.M)  # torchtitan: >= 3.11
+    assert "nvidia-cutlass-dsl" not in text and "--no-deps" not in text
+
+
+def test_torchtitan_git_definition():
+    text = (ROOT / "envs" / "torchtitan-git.yml").read_text()
+    pin = re.escape(TORCHTITAN_GIT)
+    assert re.search(rf"^\s+- torchtitan @ {pin}[0-9a-f]{{40}}$", text, re.M)
+    spmd = re.escape("git+https://github.com/meta-pytorch/spmd_types.git@")
+    assert re.search(rf"^\s+- spmd_types @ {spmd}[0-9a-f]{{40}}$", text, re.M)
+    # One torch build, named exactly: a release, or a nightly from its index.
+    torch_pins = re.findall(r"^\s+- torch==(\S+)$", text, re.M)
+    assert len(torch_pins) == 1
+    assert re.fullmatch(r"\d+\.\d+\.\d+(\.dev\d{8}\+cu\d+)?", torch_pins[0])
+    if ".dev" in torch_pins[0]:
+        assert "--extra-index-url https://download.pytorch.org/whl/nightly/" in text
+
+
+def torchtitan_git_commit() -> str:
+    text = (ROOT / "envs" / "torchtitan-git.yml").read_text()
+    return re.search(rf"{re.escape(TORCHTITAN_GIT)}([0-9a-f]{{40}})", text).group(1)
