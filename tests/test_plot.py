@@ -206,3 +206,18 @@ def test_cli(synth, tmp_path, capsys, monkeypatch):
     with pytest.raises(SystemExit):
         cli.main(argv)
     assert "install torch-op-bench[plot]" in capsys.readouterr().err
+
+
+def test_no_sweep(synth, tmp_path):
+    # Only the default point's records: no axis varies, so no figure and a warning.
+    from torch_op_bench import records
+
+    only = tmp_path / "only"
+    with pytest.warns(UserWarning):
+        recs = analysis.load(synth)
+    for r in recs:
+        if all(r["case"]["params"][k] == v for k, v in S.DEFAULT.items()):
+            r = {k: v for k, v in r.items() if k != analysis.SOURCE}
+            records.append(only / "synth" / S.SLUG / "x-host.jsonl", r)
+    with pytest.warns(UserWarning, match="no axis varies around the default point"):
+        assert plot.plot(only, tmp_path / "out", baseline="base") == []

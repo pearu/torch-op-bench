@@ -197,3 +197,20 @@ def test_cli(synth, tmp_path, capsys):
     with pytest.raises(SystemExit):
         cli.main(["report", str(tmp_path / "nothing")])
     assert "no results at" in capsys.readouterr().err
+
+
+def test_no_sweep(synth, tmp_path):
+    # Only the default point's records: nothing varies around it.
+    from torch_op_bench import records
+
+    only = tmp_path / "only"
+    with pytest.warns(UserWarning, match=MERGE_WARNING):
+        recs = analysis.load(synth)
+    for r in recs:
+        if all(r["case"]["params"][k] == v for k, v in S.DEFAULT.items()):
+            r = {k: v for k, v in r.items() if k != analysis.SOURCE}
+            records.append(only / "synth" / S.SLUG / "x-host.jsonl", r)
+    text = report.report(only, baseline="base")
+    assert "## Sweeps\n\nNo axis varies around the default point in these records." in text
+    assert "### fwd_bwd, float32" in text  # the default point is still reported
+    assert "No axis varies" not in make(synth)

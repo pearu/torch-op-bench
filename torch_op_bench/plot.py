@@ -485,6 +485,13 @@ def plot(
             if not selected:
                 continue
             axes = [a for a in swept_axes(selected, point) if not sweep or a in sweep]
+            if not axes:
+                warnings.warn(
+                    f"{m}, {d}: no axis varies around the default point "
+                    f"{', '.join(f'{k}={v}' for k, v in point.items())}: no figures",
+                    stacklevel=2,
+                )
+                continue
             chosen = list(metrics) if metrics else default_metrics(selected, m)
             suffix = f"{m}-{d}" if len(dtypes) > 1 else m
             scope = [r for axis in axes for r in analysis.sweeps(selected, point)[axis]]

@@ -472,10 +472,17 @@ def report(
             selected = analysis.at(rows, dtype=d, mode=m)
             lines.append(render_default(selected, point["params"], baseline, title=f"{m}, {d}"))
     lines += ["## Sweeps", ""]
-    for d in dtypes:
-        for m in modes:
-            selected = analysis.at(rows, dtype=d, mode=m)
-            lines.append(render_sweeps(selected, point["params"], baseline, title=f"{m}, {d}"))
+    swept = [
+        render_sweeps(
+            analysis.at(rows, dtype=d, mode=m), point["params"], baseline, title=f"{m}, {d}"
+        )
+        for d in dtypes
+        for m in modes
+    ]
+    if any(swept):
+        lines += [part for part in swept if part]
+    else:
+        lines += ["No axis varies around the default point in these records.", ""]
     scope = [row for row in rows if row["dtype"] in dtypes and row["mode"] in modes]
     lines.append(render_environment_check(scope, axes))
     lines.append(render_not_measured(scope, axes))
