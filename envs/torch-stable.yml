@@ -1,9 +1,11 @@
 # The `torch` environment on a host without a torch build: the PyPI torch release.
 # Create it with `scripts/setup-env.sh torch-stable` (prefix envs/.prefix/torch-stable)
 # and run torch-op-bench from its interpreter, as with envs/torch-nightly.yml, which
-# is the nightly instead. The release has F.linear_cross_entropy (torch >= 2.13), so
-# torch_lce runs; whether its CuTeDSL override registers is in each record
-# (info.override_registration). Every version is pinned.
+# is the nightly instead. The release has F.linear_cross_entropy (torch >= 2.13) but
+# not its CuTeDSL override (no torch/_native/ops/linear_cross_entropy/ in 2.14.1):
+# on sm_80+ with bf16/fp16, torch_lce's verify then makes an error record (see
+# Handoff I1-6); torch_lce_no_override and everything else run. Every version is
+# pinned.
 name: torch
 channels:
   - conda-forge

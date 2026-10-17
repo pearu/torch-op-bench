@@ -407,11 +407,13 @@ scripts/remote-run.sh HOST fetch       # 5. results back into results/
   registering environments under `~`.
 - **`setup`** runs `scripts/setup-env.sh` for the torch environment and each of
   `--envs`. The torch environment is `--torch-env torch-nightly` (default:
-  `envs/torch-nightly.yml`, a pinned nightly wheel, which carries the newest
-  CuTeDSL override) or `torch-stable` (`envs/torch-stable.yml`, the PyPI release).
-  Take the nightly to measure what torch `main` does now, and the release to
-  measure what users have. torch-op-bench runs from that environment's interpreter,
-  so it is the `torch` environment and needs no `--env torch=...`.
+  `envs/torch-nightly.yml`, a pinned nightly wheel, which carries the newest CuTeDSL
+  override) or `torch-stable` (`envs/torch-stable.yml`, the PyPI release). Take the
+  nightly to measure what torch `main` does now, and the release to measure what
+  users have. torch 2.14.1 has `F.linear_cross_entropy` but not its CuTeDSL
+  override, so on sm_80+ `torch_lce` ends in an `error` record there. torch-op-bench
+  runs from that environment's interpreter, so it is the `torch` environment and
+  needs no `--env torch=...`.
 - **`run`** starts `torch-op-bench run lce --device cuda` with `nohup` and
   `setsid`, writing to `logs/<timestamp>.log` and `results/` in the scratch
   directory, and returns at once. A dropped connection does not end it. Running the
