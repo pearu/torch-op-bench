@@ -39,8 +39,11 @@ def test_figures_and_backend(synth, tmp_path):
     import matplotlib
 
     assert matplotlib.get_backend().lower() == "agg"
-    # 4 swept axes x 3.8 in; 4 metrics x 2.8 in + legend + two footer lines; 150 dpi
-    assert png_size(tmp_path / "out" / "grid-fwd_bwd.png") == (2280, 1926)
+    # 4 swept axes x 3.8 in wide; 4 metrics x 2.8 in, plus the title, one legend row
+    # and two footer lines, high; at 150 dpi.
+    width, height = png_size(tmp_path / "out" / "grid-fwd_bwd.png")
+    assert width == 4 * 3.8 * 150
+    assert height == round((0.45 + 0.1 + 0.24 + 4 * 2.8 + 0.15 + 2 * 0.17) * 150)
     for path in written:
         assert path.with_suffix(".csv").exists()
 

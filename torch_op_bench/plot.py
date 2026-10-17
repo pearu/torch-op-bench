@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import math
+import textwrap
 import warnings
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -22,6 +23,8 @@ from .analysis import Row
 from .spec import MODES
 
 DPI = 150
+# Inches per panel; the bands above and below the panels are sized to their text.
+PANEL_WIDTH, PANEL_HEIGHT = 3.8, 2.8
 MIB = 1024**2
 
 # The line styles, by role. The baseline's is fixed here, in every figure, and owes
@@ -371,10 +374,9 @@ def _figure(
     union = [row for _, rows, _ in sets for row in rows]
     names = analysis.implementations(union, baseline)
     palette = colors(union, baseline)
-    width = 3.8 * max(1, len(axes))
-    height = 2.8 * len(metrics) + 1.2 + 0.22 * len(footer)
+    width = PANEL_WIDTH * max(1, len(axes))
     fig, grid = plt.subplots(
-        len(metrics), max(1, len(axes)), figsize=(width, height), squeeze=False
+        len(metrics), max(1, len(axes)), figsize=(width, PANEL_HEIGHT * len(metrics)), squeeze=False
     )
     handles: dict[str, Any] = {}
     plotted: list[dict[str, Any]] = []
@@ -392,20 +394,31 @@ def _figure(
                     linestyle=base["linestyle"],
                     linewidth=base["linewidth"],
                 )
-    fig.suptitle(title)
+    # Bands in inches, top to bottom: title, legend, panels, footer. The footer wraps
+    # to the figure's width, so the provenance is never cut off.
+    columns = max(1, min(4, int(width // 2.2)))
+    legend_rows = math.ceil(len(handles) / columns)
+    lines = [
+        part
+        for line in footer
+        for part in textwrap.wrap(line, int(width * 17), break_on_hyphens=False)
+    ]
+    title_h, legend_h = 0.45, 0.1 + 0.24 * legend_rows
+    footer_h = 0.15 + 0.17 * len(lines)
+    height = title_h + legend_h + PANEL_HEIGHT * len(metrics) + footer_h
+    fig.set_size_inches(width, height)
+    fig.suptitle(title, y=1 - 0.12 / height, va="top")
     if handles:
         fig.legend(
             handles=list(handles.values()),
             loc="upper center",
-            ncol=min(4, len(handles)),
-            bbox_to_anchor=(0.5, 1 - 0.35 / height),
+            ncol=columns,
+            bbox_to_anchor=(0.5, 1 - title_h / height),
             fontsize="small",
         )
-    bottom = (0.25 + 0.2 * len(footer)) / height
-    for k, line in enumerate(footer):
-        fig.text(0.01, (0.08 + 0.2 * (len(footer) - 1 - k)) / height, line, fontsize="x-small")
-    top = 1 - (0.45 + 0.2 * math.ceil(len(handles) / 4)) / height
-    fig.tight_layout(rect=(0, bottom, 1, top))
+    for k, line in enumerate(lines):
+        fig.text(0.01, (0.08 + 0.17 * (len(lines) - 1 - k)) / height, line, fontsize="x-small")
+    fig.tight_layout(rect=(0, footer_h / height, 1, 1 - (title_h + legend_h) / height))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=DPI)
     plt.close(fig)
