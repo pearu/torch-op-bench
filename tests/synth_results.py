@@ -12,6 +12,8 @@ memory ``peak_above``. Planted, for the tests to find:
 
 - ``base_other`` is 10 % slower than ``base`` at the default point (``DEVIATION``),
   and holds 100 MiB more at ``M=256`` (``PEAK_DEVIATION``);
+- ``base_other``'s ``grad_rel`` is 25 % larger than ``base``'s at ``N=8``
+  (``PARITY_DEVIATION``), within tolerance: another build moving the error;
 - ``chunked`` fails parity at ``M=256`` (``PARITY_FAIL``);
 - ``compiled`` has an ``error`` record (``ERROR``, in the second host's file, with
   no ``env``, as the runner writes one) and no record at all at
@@ -57,6 +59,7 @@ IMPLS = {
 DEVIATION = 1.10
 PEAK_DEVIATION = 100 * MIB
 PARITY_FAIL = ("chunked", {"M": 256})
+PARITY_DEVIATION = ("base_other", {"N": 8}, 1.25)
 ERROR = ("compiled", "fwd", "float32", {"M": 64})
 UNAVAILABLE = ("chunked", "fwd_bwd", "float32", {"K": 16})
 MISSING = ("compiled", "fwd_bwd", "float32", {"N": 8})
@@ -167,6 +170,8 @@ def _record(impl: str, mode: str, dtype: str, params: dict, when: datetime.datet
     t = median_ms(impl, mode, dtype, params)
     failed = impl == PARITY_FAIL[0] and _matches(params, PARITY_FAIL[1])
     metrics = {"loss_rel_err": 1e-3, "grad_rel": 0.5 if failed else 2e-3}
+    if impl == PARITY_DEVIATION[0] and _matches(params, PARITY_DEVIATION[1]):
+        metrics["grad_rel"] *= PARITY_DEVIATION[2]
     if mode == "fwd":
         metrics = {"loss_rel_err": 1e-3}
     record.update(

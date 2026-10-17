@@ -105,7 +105,8 @@ def test_sweeps(synth):
 def test_environment_check(synth):
     text = section(make(synth), "## Environment check")
     flagged = [line for line in text.splitlines() if line.startswith("- **base_other**")]
-    assert len(flagged) == 2 * 2 * 2  # time and peak, two modes, two dtypes
+    # time and peak in both modes and dtypes; grad_rel in fwd_bwd, both dtypes
+    assert len(flagged) == 2 * 2 * 2 + 2
     assert any(
         "fwd_bwd float32 at M=128, K=32, N=16, layout=a: time ratio 1.10 outside [0.95, 1.05]"
         in line
@@ -114,9 +115,65 @@ def test_environment_check(synth):
     assert any(
         "at M=256, K=32, N=16, layout=a: peak difference 100.0 MiB" in line for line in flagged
     )
-    rows = [r for r in table_rows(text)[2:]]
+    # The parity of the same code moved by the environment (R1-12 R1).
+    assert any(
+        "fwd_bwd float32 at M=128, K=32, N=8, layout=a: grad_rel 0.00250 against 0.00200 "
+        "(ratio 1.25) outside [0.9, 1.1]" in line
+        for line in flagged
+    )
+    header = cells(table_rows(text)[0])
+    assert header[-3:] == ["grad_rel ratio", "loss_rel_err ratio", "flag"]
+    rows = [cells(r) for r in table_rows(text)[2:]]
     assert len(rows) == 6 * 2 * 2  # every point both have, both modes, both dtypes
-    assert sum(r.endswith("|  |") for r in rows) == len(rows) - 8
+    assert sum(r[-1] == "" for r in rows) == len(rows) - 10
+    at_n8 = [r for r in rows if r[1] == "base" and "N=8" in r[4] and r[2] == "fwd_bwd"]
+    assert [r[-3:] for r in at_n8] == [["1.25", "1.00", "grad_rel"]] * 2
+    fwd = [r for r in rows if r[2] == "fwd"]
+    assert {r[-3] for r in fwd} == {"—"}  # no grad_rel in fwd: neither side has it
+
+
+def test_parity_ratios():
+    control = {"parity_a": 2.0, "parity_b": 1.0, "parity_c": 3.0, "parity_z": 0.0}
+    original = {"parity_a": 1.0, "parity_b": 1.0, "parity_d": 4.0, "parity_z": 0.0}
+    assert report.parity_ratios(control, original) == {
+        "a": {"control": 2.0, "original": 1.0, "ratio": 2.0, "side": None},
+        "b": {"control": 1.0, "original": 1.0, "ratio": 1.0, "side": None},
+        "c": {"control": 3.0, "original": None, "ratio": None, "side": "control only"},
+        "d": {"control": None, "original": 4.0, "ratio": None, "side": "original only"},
+        "z": {"control": 0.0, "original": 0.0, "ratio": 1.0, "side": None},
+    }
+    base = {"implementation": "e", "mode": "fwd", "status": "ok", "median_ms": 1.0}
+    rows = [
+        {**base, **original},
+        {
+            **base,
+            **control,
+            "implementation": "c",
+            "role": "control",
+            "control_of": "e",
+            "env_name": "x",
+        },
+    ]
+    text = report.render_environment_check(rows, [])
+    assert "a 2.00 against 1.00 (ratio 2.00) outside [0.9, 1.1]" in text
+    assert "c on the control only" in text and "d on the original only" in text
+    assert "| control only | original only |" in text
+    # Only one side: reported, not flagged as the environment's difference.
+    one_sided = [
+        {**base, "parity_d": 1.0},
+        {**rows[1], "parity_a": None, "parity_b": None, "parity_c": 1.0, "parity_z": None},
+    ]
+    text = report.render_environment_check(one_sided, [])
+    assert "c on the control only and d on the original only." in text
+    assert "differs from the baseline's" not in text
+    # Zero against nonzero: no ratio, both values shown, flagged.
+    zero = [
+        {**base, "parity_a": 0.0},
+        {**rows[1], "parity_a": 1.0, "parity_b": None, "parity_c": None, "parity_z": None},
+    ]
+    checks = report.environment_check(zero, [])
+    assert checks[0]["flags"] == ["a"]
+    assert "| 1.00 / 0 |" in report.render_environment_check(zero, [])
 
 
 def test_environment_check_without_controls():

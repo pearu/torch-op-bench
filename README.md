@@ -328,10 +328,14 @@ torch-op-bench commits). Its sections:
    peak, parity with the failing metrics) with one column per implementation. A cell
    is `—` when there is no record, or the status when it is not `ok`.
 4. **Environment check**: each control (`torch_eager_<env>`) against its original at
-   every point both have, as the time ratio (control / original) and the peak
-   difference. A ratio outside [0.95, 1.05] or a difference beyond 64 MiB is named in
-   a sentence: there the environment, not the counterpart, makes a difference, and
-   the counterpart must be compared with its own environment's control.
+   every point both have, as the time ratio (control / original), the peak
+   difference, and the ratio of each parity metric. A time ratio outside [0.95,
+   1.05], a difference beyond 64 MiB or a parity ratio outside [0.9, 1.1] is named
+   in a sentence: there the environment, not the counterpart, makes a difference,
+   and the counterpart must be compared with its own environment's control. Another
+   torch build can move the error of the same code (by 23 % in `grad_hidden` at one
+   shape between torch 2.14 and 2.16), so a parity comparison across environments
+   needs this too. A parity metric on one side only is reported as such.
 5. **Not measured**: every `error` and `unavailable` record, grouped by the first
    line of its reason.
 
