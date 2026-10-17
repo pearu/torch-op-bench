@@ -162,14 +162,18 @@ def render_provenance(recs: Sequence[Mapping[str, Any]], rows: Sequence[Row]) ->
             "**The records come from different torch-op-bench commits**: a difference "
             "between environments may be the tool's, not the code under test's."
         )
-    per_env = defaultdict(int)
-    for build in builds:
-        per_env[build[0]] += 1
-    for env_name, count in sorted(per_env.items()):
-        if count > 1:
+    # The environment's own build: torch, CUDA, Python, matmul settings, packages;
+    # not the torch-op-bench commit, flagged above.
+    per_env = defaultdict(set)
+    for build, packages in builds.items():
+        env_name, version, cuda, python, _, matmul = build
+        names = tuple(sorted(v for vs in packages.values() for v in vs))
+        per_env[env_name].add((version, cuda, python, matmul, names))
+    for env_name, variants in sorted(per_env.items()):
+        if len(variants) > 1:
             lines.append(
-                f"**Environment `{env_name}` has {count} different builds** in these "
-                "records: its rows mix them."
+                f"**Environment `{env_name}` has {len(variants)} different builds** in "
+                "these records: its rows mix them."
             )
     return "\n".join(lines) + "\n"
 

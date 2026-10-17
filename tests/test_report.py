@@ -214,3 +214,28 @@ def test_no_sweep(synth, tmp_path):
     assert "## Sweeps\n\nNo axis varies around the default point in these records." in text
     assert "### fwd_bwd, float32" in text  # the default point is still reported
     assert "No axis varies" not in make(synth)
+
+
+def test_provenance_builds():
+    def rec(env_name, version, tob):
+        return {
+            "device_slug": "d",
+            "env_name": env_name,
+            "timestamp": "t",
+            "env": {
+                "hostname": "h",
+                "python": "3.14",
+                "torch": {"version": version, "cuda": "13.0"},
+                "torch_op_bench": {"hash": tob},
+                "packages": {"p": "1"},
+            },
+        }
+
+    # Another torch-op-bench commit alone is not another build of the environment.
+    text = report.render_provenance([rec("e", "2.1", "a" * 40), rec("e", "2.1", "b" * 40)], [])
+    assert "different torch-op-bench commits" in text and "different builds" not in text
+    text = report.render_provenance([rec("e", "2.1", "a" * 40), rec("e", "2.2", "a" * 40)], [])
+    assert "**Environment `e` has 2 different builds**" in text
+    assert "different torch-op-bench commits" not in text
+    runner_only = {"device_slug": "d", "env_name": "e", "timestamp": "t", "env": None}
+    assert "| e |" not in report.render_provenance([runner_only], [])
