@@ -17,7 +17,7 @@ environment that has torch:
 
 ```sh
 pip install -e .            # the tool
-pip install -e .[dev,plot]  # plus tests, lint and plotting dependencies
+pip install -e .[dev,plot]  # plus tests, lint and matplotlib for plots
 ```
 
 Install torch-op-bench from the same checkout into every environment a benchmark
@@ -292,6 +292,90 @@ concatenation; `torch_op_bench.records.read(directory)` reads a tree and
 | `env`, `env_from`, `env_error` | provenance of the worker's interpreter (`worker`), or of the parent's when the worker produced no record (`runner`, without torch); why `env` is `null` if collecting it failed; `env.packages` maps each of the implementation's `packages` to its version (`null` if not installed), or, for a package installed from a VCS URL, to `{version, url, commit, requested}` from its `direct_url.json`; `env.package_root` the directory the worker imported torch-op-bench from; `env.torch.matmul` the process-wide settings that choose how matmuls round (`allow_tf32`, `allow_bf16_reduced_precision_reduction`, `allow_fp16_reduced_precision_reduction`, `fp32_precision`, `float32_matmul_precision`), as the worker had them after the run: they change parity (bf16 reduced-precision reduction, on by default, doubles the `grad_hidden` error of chunked LCE at 128-row chunks) |
 
 The resume and merge key is (op, device slug, case key, implementation, mode).
+
+## Reports
+
+Two commands read a results directory, never an op's code: they work for any op,
+and `report` needs nothing but this package. Each takes `--op` and `--device-slug`
+(required only when the directory holds several), `--dtype` and `--mode` (default:
+each in turn), and `--baseline` (default `torch_eager`).
+
+```sh
+torch-op-bench report results --out report.md
+torch-op-bench plot results --out figures
+torch-op-bench plot results --out figures \
+    --overlay other-results --label-a 2.16 --label-b 2.14
+```
+
+`report` writes one markdown document (to stdout without `--out`), starting with the
+command that made it, and any warning the merge raised (records from different
+torch-op-bench commits). Its sections:
+
+1. **Provenance**: device, hosts, the time span of the records, and one row per
+   environment build: torch and CUDA, Python, the packages (a version, or the first
+   12 characters of the commit of a git install), the torch-op-bench commit, and
+   the matmul settings. It says so when the commits differ, or when one environment
+   holds several builds.
+2. **At the default point** (the op's `defaults`, or the most common value of each
+   axis when the op cannot be imported), per mode and dtype: one row per
+   implementation, the baseline first and each control right after its original,
+   with its environment, median and IQR, time against the baseline, tokens/s,
+   TFLOP/s, peak memory above baseline and against the baseline's, parity and its
+   metrics, `override_ran`, and each `info` field that differs between records (e.g.
+   `torchtitan_api`, `compile`, `accum_dtype`), so a difference cannot hide in
+   `info`.
+3. **Sweeps**: for each axis varied around the default point, three tables (median,
+   peak, parity with the failing metrics) with one column per implementation. A cell
+   is `—` when there is no record, or the status when it is not `ok`.
+4. **Environment check**: each control (`torch_eager_<env>`) against its original at
+   every point both have, as the time ratio (control / original), the peak
+   difference, and the ratio of each parity metric. A time ratio outside [0.95,
+   1.05], a difference beyond 64 MiB or a parity ratio outside [0.9, 1.1] is named
+   in a sentence: there the environment, not the counterpart, makes a difference,
+   and the counterpart must be compared with its own environment's control. Another
+   torch build can move the error of the same code (by 23 % in `grad_hidden` at one
+   shape between torch 2.14 and 2.16), so a parity comparison across environments
+   needs this too. A parity metric on one side only is reported as such.
+5. **Not measured**: every `error` and `unavailable` record, grouped by the first
+   line of its reason.
+
+Numbers have 3 significant digits and memory is in MiB with one decimal.
+
+`plot` (`pip install -e .[plot]`; matplotlib, with the Agg backend, so no display
+is needed) writes PNGs at 150 dpi, per mode (and per dtype, as `-<dtype>`, when the
+results hold several):
+
+- `grid-<mode>.png`: rows are metrics (by default median time, tokens/s, peak above
+  baseline and one parity error, the op's `grad_hidden` or `loss` error when it has
+  one), columns are the swept axes (int axes on a log scale);
+- `ratio-<mode>.png`: speedup (baseline time / time) and memory ratio against the
+  baseline, with the baseline as the line at 1. A throughput ratio is drawn only
+  when some implementation's work differs from the baseline's at a point; otherwise
+  it is the speedup again;
+- `overlay-<mode>.png`, with `--overlay`: the grid of both directories on the same
+  axes, the first solid and the second dashed, e.g. one device under two torch
+  builds; its footer counts what each set leaves out, and gives each set's
+  provenance, under the labels.
+
+Every figure draws the baseline black, dashed and thick, and a control dotted and
+thin in its original's colour, with one marker per environment, so two controls of
+one original stay apart (`plot.STYLE`, `plot.COLORS`, `plot.CONTROL_MARKERS`).
+Colours follow the op's implementation order (sorted names when the op cannot be
+imported), so an implementation has the same colour in every figure and every
+invocation. A point whose parity failed has a hollow marker, so a fast but wrong
+number does not read as a win. A missing point (`error`, `unavailable`, no parity)
+is a gap, and the footer counts what was left out and why. The footer also gives the
+provenance (each environment's torch and torch-op-bench commit, and the hosts); a
+figure without it is not a result. `--metric`, `--sweep` and `--impl` restrict what
+is drawn (the baseline is always drawn).
+
+Next to every PNG, a CSV of the same name holds exactly the plotted points, one row
+per point: the metric, axis, x, implementation, environment, role, y, parity status,
+whether parity failed, the point, and the work (with the baseline's, in a ratio
+figure). The write-up quotes those numbers, not values read off a figure.
+
+`torch_op_bench.analysis` turns records into flat rows (`load`, `to_rows`,
+`default_point`, `sweeps`) for anything else; it needs no pandas.
 
 ## Tests
 

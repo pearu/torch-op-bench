@@ -28,3 +28,13 @@ def pytest_collection_modifyitems(config, items):
 @pytest.fixture
 def tests_dir() -> Path:
     return TESTS_DIR
+
+
+@pytest.fixture
+def synth(tmp_path) -> Path:
+    """A synthetic results directory (see ``synth_results``); returns its root."""
+    import synth_results
+
+    root = tmp_path / "results"
+    synth_results.write(root)
+    return root

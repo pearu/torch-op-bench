@@ -15,7 +15,8 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-plot = ["matplotlib", "pandas"]
+# matplotlib only: the reports read records with the standard library, no pandas.
+plot = ["matplotlib"]
 dev = ["pytest", "pytest-cov", "ruff"]
 # Liger in the torch environment itself (§4.2); envs/liger.yml is its own environment.
 liger = ["liger-kernel==0.8.4"]
