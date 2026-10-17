@@ -155,6 +155,7 @@ def test_torch_definitions():
         assert re.search(r"^\s+- nvidia-cutlass-dsl==\d+\.\d+\.\d+$", text, re.M)
         assert re.search(r"^\s+- apache-tvm-ffi==\d+\.\d+\.\d+$", text, re.M)
         assert len(re.findall(r"^\s+- triton==\S+$", text, re.M)) == 1
+        assert re.search(r"^\s+- numpy==\d+\.\d+\.\d+$", text, re.M)  # no warning per worker
     # One nightly build, named exactly, from the nightly index.
     assert re.search(r"^\s+- torch==\d+\.\d+\.\d+\.dev\d{8}\+cu\d+$", nightly, re.M)
     assert re.search(

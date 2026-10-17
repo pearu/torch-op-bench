@@ -20,6 +20,10 @@ dependencies:
       # The triton this nightly requires, from the same index.
       - triton==3.9.0+gitfc8d31a5
       # The override's runtime, the versions pytorch-dev has; torch._native checks
-      # both before registering the override (and does not on CPU or below sm_80).
+      # both before registering the override, registers it, and does not run it on
+      # CPU or below sm_80.
       - nvidia-cutlass-dsl==4.8.0
       - apache-tvm-ffi==0.1.12
+      # torch imports numpy if it is there and warns in every worker when not
+      # ("Failed to initialize NumPy", in each record's stderr): the newest.
+      - numpy==2.5.4
