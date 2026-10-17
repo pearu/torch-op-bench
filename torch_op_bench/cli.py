@@ -1,4 +1,4 @@
-"""Command line: ``torch-op-bench run|env|list``."""
+"""Command line: ``torch-op-bench run|env|list|report``."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import json
 import sys
 from collections import Counter
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from . import env, runner
@@ -125,6 +126,38 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    from . import report
+
+    text = report.report(
+        args.results,
+        op=args.op,
+        device_slug=args.device_slug,
+        dtype=args.dtype,
+        mode=args.mode,
+        baseline=args.baseline,
+        command=["torch-op-bench", *args.argv],
+    )
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(text, encoding="utf-8")
+        print(f"wrote {args.out}")
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+def _selection(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("results", help="results directory")
+    parser.add_argument("--op", help="the op, when the results hold several")
+    parser.add_argument("--device-slug", help="the device slug, when the results hold several")
+    parser.add_argument("--dtype", help="one dtype (default: each in turn)")
+    parser.add_argument("--mode", choices=MODES, help="one mode (default: each in turn)")
+    parser.add_argument(
+        "--baseline", default="torch_eager", help="the implementation others are compared with"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="torch-op-bench", description="Benchmark torch ops and their counterparts."
@@ -185,15 +218,22 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd.add_argument("op", help=op_help)
     list_cmd.add_argument("--pythonpath", action="append", default=[], help=path_help)
     list_cmd.set_defaults(func=cmd_list)
+
+    report_cmd = sub.add_parser("report", help="write the markdown tables of a results directory")
+    _selection(report_cmd)
+    report_cmd.add_argument("--out", help="markdown file to write (default: stdout)")
+    report_cmd.set_defaults(func=cmd_report)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(argv)
+    args.argv = argv
     try:
         return args.func(args)
-    except (KeyError, ValueError, TypeError, ImportError) as exc:
+    except (KeyError, ValueError, TypeError, ImportError, FileNotFoundError) as exc:
         parser.error(str(exc))
         return 2  # unreachable: parser.error exits
 
