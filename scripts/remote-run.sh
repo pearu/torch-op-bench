@@ -7,7 +7,8 @@ usage() {
 usage: scripts/remote-run.sh HOST SUBCOMMAND [options] [-- RUN-ARGS...]
 
 Run torch-op-bench on HOST (an ssh destination or alias) in a scratch directory
-there, from this checkout. Each subcommand is one ssh session or one rsync.
+there, from this checkout. Each subcommand is one ssh session or one rsync (push:
+two when .git is a "gitdir:" file).
 
 subcommands:
   push       copy this checkout (with .git) to REMOTE_DIR/torch-op-bench; refuses
@@ -176,12 +177,31 @@ cmd_push() {
             "records will name $(git -C "$root" rev-parse --short HEAD) but run other code" >&2
     fi
     echo "commit: $(git -C "$root" rev-parse HEAD)"
+    # A checkout whose .git is a "gitdir: ..." file (git clone --separate-git-dir)
+    # would arrive without its repository, and the records without their commit:
+    # copy that directory as the remote .git instead, in a second rsync.
+    local gitdir="" common
+    if [[ ! -d "$root/.git" ]]; then
+        gitdir="$(git -C "$root" rev-parse --absolute-git-dir)"
+        common="$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)"
+        [[ "$gitdir" == "$common" ]] ||
+            die "$root is a linked worktree (its repository is shared with others): push from a clone"
+    fi
     local_cmd rsync -a --delete \
         --exclude=/.asb/ --exclude=/envs/.prefix/ --exclude=/results/ \
+        ${gitdir:+--exclude=/.git} \
         --exclude=__pycache__/ --exclude=.pytest_cache/ --exclude=.ruff_cache/ \
         --exclude=htmlcov/ --exclude='.coverage*' \
         --rsync-path="mkdir -p $(printf '%q' "$rsync_dir/torch-op-bench") && rsync" \
         "$root/" "$host:$rsync_dir/torch-op-bench/"
+    if [[ -n "$gitdir" ]]; then
+        # rsync does not replace a file with a directory: remove a .git file first.
+        local dot_git
+        dot_git="$(printf '%q' "$rsync_dir/torch-op-bench/.git")"
+        local_cmd rsync -a --delete \
+            --rsync-path="{ [ -d $dot_git ] || rm -f $dot_git; } && rsync" \
+            "$gitdir/" "$host:$rsync_dir/torch-op-bench/.git/"
+    fi
 }
 
 cmd_bootstrap() {

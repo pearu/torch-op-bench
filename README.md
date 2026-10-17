@@ -400,7 +400,10 @@ scripts/remote-run.sh HOST fetch       # 5. results back into results/
   record carries `env.torch_op_bench.hash`; a run from a dirty tree, or one during
   which the checkout changed, names code that is not what ran (the step-5 sweep
   had records from two commits, because a commit landed mid-run). `--allow-dirty`
-  is for development only, and the script says so loudly.
+  is for development only, and the script says so loudly. A checkout whose `.git`
+  is a `gitdir:` file (`git clone --separate-git-dir`) has that directory copied as
+  the remote `.git`, in a second rsync; a linked worktree is refused (push from a
+  clone).
 - **`bootstrap`** installs Miniforge into the scratch directory when the host has
   neither mamba nor conda. It writes `env.sh`, which puts every cache (Triton,
   Inductor, conda packages, pip) in the scratch directory and keeps conda from

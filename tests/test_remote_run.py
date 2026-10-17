@@ -59,8 +59,9 @@ def test_usage_errors(args, message):
     assert proc.returncode == 2 and message in proc.stderr
 
 
-def test_push_dry_run():
-    out = dry("push", "--allow-dirty")
+def test_push_dry_run(repo):
+    script = repo / "scripts" / "remote-run.sh"
+    out = run_script("tob-ex", "push", "--dry-run", script=script).stdout
     (rsync,) = [line for line in out.splitlines() if line.startswith("+ rsync")]
     assert rsync.startswith("+ rsync -a --delete ")
     for exclude in [
@@ -75,12 +76,13 @@ def test_push_dry_run():
     ]:
         assert f"--exclude={exclude} " in rsync
     assert "--exclude=/.git" not in rsync  # .git goes: records name the commit
-    assert rsync.endswith(f" {ROOT}/ tob-ex:torch_op_bench-scratch/torch-op-bench/")
+    assert rsync.endswith(f" {repo}/ tob-ex:torch_op_bench-scratch/torch-op-bench/")
     assert r"--rsync-path=mkdir\ -p\ torch_op_bench-scratch/torch-op-bench\ \&\&\ rsync" in rsync
 
 
-def test_dir_option():
-    out = dry("push", "--allow-dirty", "--dir", "/scratch/tob")
+def test_dir_option(repo):
+    script = repo / "scripts" / "remote-run.sh"
+    out = run_script("tob-ex", "push", "--dry-run", "--dir", "/scratch/tob", script=script).stdout
     assert out.rstrip().endswith("tob-ex:/scratch/tob/torch-op-bench/")
     assert "\nD=/scratch/tob\n" in dry("status", "--dir", "/scratch/tob")
     assert '\nD="$HOME"/torch_op_bench-scratch\n' in dry("status")
@@ -228,6 +230,55 @@ def fake_host(tmp_path, repo):
     env["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
     env["PYTHON"] = sys.executable
     return env, home
+
+
+def test_push_a_separate_git_dir(fake_host, tmp_path):
+    """A checkout whose .git is a "gitdir: ..." file arrives with its repository as
+    .git, also over an earlier push that copied the file."""
+    env, home = fake_host
+    root = tmp_path / "separate"
+    gitdir = tmp_path / "separate.git"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy(SCRIPT, root / "scripts" / "remote-run.sh")
+    git = ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(["git", "init", "-q", f"--separate-git-dir={gitdir}", str(root)], check=True)
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "init"], check=True)
+    head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True).stdout
+    remote_checkout = home / "torch_op_bench-scratch" / "torch-op-bench"
+    remote_checkout.mkdir(parents=True)
+    (remote_checkout / ".git").write_text(f"gitdir: {tmp_path}/elsewhere\n")  # the old push
+    script = root / "scripts" / "remote-run.sh"
+
+    proc = run_script("tob-ex", "push", "--dry-run", script=script)
+    assert proc.returncode == 0, proc.stderr
+    first, second = [line for line in proc.stdout.splitlines() if line.startswith("+ rsync")]
+    assert "--exclude=/.git " in first
+    assert second.startswith("+ rsync -a --delete --rsync-path=")
+    assert second.endswith(f" {gitdir}/ tob-ex:torch_op_bench-scratch/torch-op-bench/.git/")
+
+    proc = run_script("fakehost", "push", script=script, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert (remote_checkout / ".git").is_dir()
+    remote_head = subprocess.run(
+        ["git", "-C", str(remote_checkout), "rev-parse", "HEAD"], capture_output=True, text=True
+    )
+    assert remote_head.stdout == head
+    status = subprocess.run(
+        ["git", "-C", str(remote_checkout), "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert status.stdout == ""
+
+
+def test_push_refuses_a_linked_worktree(repo, tmp_path):
+    linked = tmp_path / "linked"
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", str(linked)], check=True)
+    proc = run_script("tob-ex", "push", "--dry-run", script=linked / "scripts" / "remote-run.sh")
+    assert proc.returncode == 2
+    assert "is a linked worktree" in proc.stderr and "+ rsync" not in proc.stdout
 
 
 def test_remote_side_end_to_end(fake_host, repo, tests_dir):
