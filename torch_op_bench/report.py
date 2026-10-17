@@ -20,6 +20,9 @@ from .spec import MODES
 
 MIB = 1024**2
 MISSING = "—"
+# A varying info value longer than this is cut in the tables (the record has it
+# whole), so one long list cannot make the table unreadable.
+INFO_WIDTH = 40
 # The environment check: a control within these of its original is the same build.
 TIME_RATIO_RANGE = (0.95, 1.05)
 PEAK_DIFF_LIMIT = 64 * MIB
@@ -47,10 +50,13 @@ def mib(value: Any) -> str:
     return MISSING if value is None else f"{value / MIB:.1f}"
 
 
-def text(value: Any) -> str:
+def text(value: Any, width: int | None = None) -> str:
     if value is None:
         return MISSING
-    return str(value).replace("|", "\\|").replace("\n", " ")
+    value = str(value).replace("\n", " ")
+    if width is not None and len(value) > width:
+        value = value[: width - 1] + "…"
+    return value.replace("|", "\\|")
 
 
 def table(header: Sequence[str], rows: Sequence[Sequence[str]], numeric: Sequence[bool]) -> str:
@@ -245,7 +251,7 @@ def render_default(
                 parity_text(row),
                 *(sig3(row.get(p)) for p in parity),
                 text(row.get("override_ran")),
-                *(text(row.get(c)) for c in info),
+                *(text(row.get(c), INFO_WIDTH) for c in info),
             ]
         )
     point_text = ", ".join(f"{k}={v}" for k, v in point.items())

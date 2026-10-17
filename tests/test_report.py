@@ -38,6 +38,9 @@ def test_numbers():
     assert report.sig3(0) == "0"
     assert report.sig3(True) == "True"
     assert report.mib(None) == "—" and report.mib(3 * 1024**2 / 2) == "1.5"
+    assert report.text("a|b\nc") == "a\\|b c"
+    assert report.text("x" * 50, 40) == "x" * 39 + "…"
+    assert report.text("x" * 40, 40) == "x" * 40
 
 
 def test_header_and_warning(synth):
