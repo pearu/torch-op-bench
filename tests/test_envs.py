@@ -6,6 +6,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "setup-env.sh"
 LIGER_GIT = "git+https://github.com/linkedin/Liger-Kernel@"
@@ -111,3 +113,32 @@ def test_torchtitan_git_definition():
 def torchtitan_git_commit() -> str:
     text = (ROOT / "envs" / "torchtitan-git.yml").read_text()
     return re.search(rf"{re.escape(TORCHTITAN_GIT)}([0-9a-f]{{40}})", text).group(1)
+
+
+@pytest.mark.parametrize("tool, flag", [("mamba", ["--yes"]), ("conda", [])])
+def test_script_never_prompts(tmp_path, tool, flag):
+    # mamba 2 asks to confirm; under remote-run.sh stdin is the rest of the remote
+    # script, so the tool gets --yes (mamba only) and /dev/null as stdin.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ["dirname", "mkdir"]:
+        (bin_dir / name).symlink_to(shutil.which(name))
+    log = tmp_path / "args"
+    fake = bin_dir / tool
+    fake.write_text(
+        f'#!{BASH}\nprintf "%s\\n" "$@" > {log}\n'
+        f'if read -r line; then echo "stdin: $line" >> {log}; fi\n'
+        "exit 3\n"
+    )
+    fake.chmod(0o755)
+    proc = subprocess.run(
+        [BASH, str(SCRIPT), "liger", "--prefix", str(tmp_path / "p")],
+        input="a line that must not be read\n",
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": str(bin_dir)},
+    )
+    assert proc.returncode == 3
+    args = log.read_text().splitlines()
+    assert args[:2] == ["env", "create"] and args[2 : 2 + len(flag)] == flag
+    assert not any(line.startswith("stdin:") for line in args)
