@@ -278,6 +278,13 @@ def test_cli(synth, tmp_path, capsys):
     with pytest.raises(SystemExit):
         cli.main(["report", str(tmp_path / "nothing")])
     assert "no results at" in capsys.readouterr().err
+    argv = ["report", str(synth), "--baseline", "base", "--point", "M=64", "--mode", "fwd"]
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "The default point is set by --point." in out and "At M=64, K=32, N=16" in out
+    with pytest.raises(SystemExit):
+        cli.main(["report", str(synth), "--point", "M"])
+    assert "--point: expected AXIS=VALUE" in capsys.readouterr().err
 
 
 def test_no_sweep(synth, tmp_path):
@@ -292,9 +299,62 @@ def test_no_sweep(synth, tmp_path):
             r = {k: v for k, v in r.items() if k != analysis.SOURCE}
             records.append(only / "synth" / S.SLUG / "x-host.jsonl", r)
     text = report.report(only, baseline="base")
-    assert "## Sweeps\n\nNo axis varies around the default point in these records." in text
+    assert "## Sweeps\n\nNo axis varies around the default point in these records: one table" in (
+        text
+    )
     assert "### fwd_bwd, float32" in text  # the default point is still reported
+    # ... and, in place of the sweeps, one table per case: here the one case.
+    assert "### fwd_bwd, float32: M=128, K=32, N=16, layout=a" in text
     assert "No axis varies" not in make(synth)
+
+
+def test_without_the_default_point(synth, tmp_path):
+    # Two cases that differ in two axes and miss the spec's default point, as the
+    # I1-6 run on ex did: an inferred point, its source, and a table per case.
+    two = S.subset(synth, tmp_path / "two", {"M": 64}, {"K": 16})
+    text = report.report(two, baseline="base")
+    spec_point = "M=128, K=32, N=16, layout=a"
+    assert (
+        f"The default point is inferred (the spec's default point {spec_point} has no records)."
+        in text
+    )
+    with pytest.warns(UserWarning, match=MERGE_WARNING):
+        point = analysis.default_point(analysis.load(two))
+    assert point["params"] in [{**S.DEFAULT, "M": 64}, {**S.DEFAULT, "K": 16}]
+    assert "No records at the default point." not in text
+    part = section(text, "## Sweeps")
+    assert "No axis varies around the default point in these records: one table" in part
+    for case in ["M=64, K=32, N=16, layout=a", "M=128, K=16, N=16, layout=a"]:
+        for mode in ["fwd", "fwd_bwd"]:
+            for dtype in ["float32", "bfloat16"]:
+                assert f"### {mode}, {dtype}: {case}\n\nAt {case}.\n" in part
+    # The rows of the default-point table, its ratios included.
+    table = section(part, "### fwd_bwd, float32: M=64,", "\n### ")
+    header = cells(table_rows(table)[0])
+    by_name = {cells(row)[0]: cells(row) for row in table_rows(table)[2:]}
+    assert by_name["chunked"][header.index("time / baseline")] == "2.00"
+    assert by_name["chunked"][header.index("time × peak / baseline's")] == "0.500"
+    # A partial --point names one axis; the rest stay the spec's.
+    text = report.report(two, baseline="base", point={"M": "64"})
+    assert "The default point is set by --point." in text
+    assert "At M=64, K=32, N=16, layout=a." in section(text, "## At the default point")
+
+
+def test_point(synth):
+    text = make(synth, dtype="float32", mode="fwd_bwd", point={"K": "16"})
+    assert "The default point is set by --point." in text
+    assert "At M=128, K=16, N=16, layout=a." in text
+    # The sweeps are around that point now: the synthetic set varies only K there.
+    part = section(text, "#### fwd_bwd, float32: median ms against K", "\n####")
+    base = S.median_ms("base", "fwd_bwd", "float32", {**S.DEFAULT, "K": 16})
+    assert f"| 16 | {report.sig3(base)} |" in part
+    assert "median ms against M" not in text
+    with pytest.raises(ValueError, match="--point: unknown axis 'X'; known: M, K, N, layout"):
+        make(synth, point={"X": "1"})
+    assert analysis.parse_point(["M=64,K=16", "layout=b"]) == {"M": "64", "K": "16", "layout": "b"}
+    assert analysis.parse_point(None) is None
+    with pytest.raises(ValueError, match="expected AXIS=VALUE, got 'M'"):
+        analysis.parse_point("M")
 
 
 def test_provenance_builds():

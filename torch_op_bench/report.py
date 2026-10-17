@@ -20,6 +20,12 @@ from .spec import MODES
 
 MIB = 1024**2
 MISSING = "—"
+# How "The default point is ..." names analysis.default_point's source.
+SOURCES = {
+    "spec": "the op's defaults",
+    "inferred": "inferred from the records",
+    "--point": "set by --point",
+}
 # A varying info value longer than this is cut in the tables (the record has it
 # whole), so one long list cannot make the table unreadable.
 INFO_WIDTH = 40
@@ -262,8 +268,7 @@ def render_default(
                 *(text(row.get(c), INFO_WIDTH) for c in info),
             ]
         )
-    point_text = ", ".join(f"{k}={v}" for k, v in point.items())
-    lines = [f"### {title}", "", f"At {point_text}.", ""]
+    lines = [f"### {title}", "", f"At {analysis.point_text(point)}.", ""]
     if base_ok is None:
         lines += [f"The baseline `{baseline}` has no `ok` record here: no ratios.", ""]
     lines.append(table(header, body, numeric))
@@ -331,6 +336,25 @@ def render_sweeps(
     if not parts:
         return ""
     return "\n".join(parts)
+
+
+def render_per_case(
+    rows: Sequence[Row], axes: Sequence[str], baseline: str, dtype: str, mode: str
+) -> str:
+    """The default-point table at every case present, for records whose cases do not
+    form a sweep (one case, or cases that differ in more than one axis)."""
+    cases = sorted({analysis.case_of(row, axes)[1:] for row in rows}, key=_case_order)
+    parts = []
+    for values in cases:
+        here = dict(zip(axes, values, strict=True))
+        title = f"{mode}, {dtype}: {analysis.point_text(here)}"
+        parts.append(render_default(rows, here, baseline, title=title))
+    return "\n".join(parts)
+
+
+def _case_order(values: tuple) -> tuple:
+    # Numbers before text, each ascending, so a case order never depends on the files.
+    return tuple((0, v, "") if isinstance(v, (int, float)) else (1, 0, str(v)) for v in values)
 
 
 # --- 4. the environment check ------------------------------------------------------------
@@ -529,6 +553,7 @@ def report(
     dtype: str | None = None,
     mode: str | None = None,
     baseline: str = "torch_eager",
+    point: Mapping[str, str] | None = None,
     command: Sequence[str] | None = None,
 ) -> str:
     """The markdown report of a results directory."""
@@ -541,7 +566,7 @@ def report(
     _one({r["device_slug"] for r in recs}, "device slug", "choose one with --device-slug")
     rows = analysis.to_rows(recs)
     axes = analysis.axes_of(recs)
-    point = analysis.default_point(recs)
+    point = analysis.default_point(recs, point=point)
     dtypes = [dtype] if dtype else list(dict.fromkeys(row["dtype"] for row in rows))
     modes = [mode] if mode else [m for m in MODES if any(row["mode"] == m for row in rows)]
 
@@ -556,7 +581,7 @@ def report(
     for warning in caught:
         lines += [f"**Warning:** {warning.message}", ""]
     lines.append(render_provenance(recs, rows))
-    source = "the op's defaults" if point["source"] == "spec" else "inferred from the records"
+    source = SOURCES.get(point["source"], point["source"])
     lines += ["## At the default point", "", f"The default point is {source}.", ""]
     for d in dtypes:
         for m in modes:
@@ -573,7 +598,15 @@ def report(
     if any(swept):
         lines += [part for part in swept if part]
     else:
-        lines += ["No axis varies around the default point in these records.", ""]
+        lines += [
+            "No axis varies around the default point in these records: one table per case instead.",
+            "",
+        ]
+        for d in dtypes:
+            for m in modes:
+                lines.append(
+                    render_per_case(analysis.at(rows, dtype=d, mode=m), axes, baseline, d, m)
+                )
     scope = [row for row in rows if row["dtype"] in dtypes and row["mode"] in modes]
     lines.append(render_environment_check(scope, axes))
     lines.append(render_not_measured(scope, axes))

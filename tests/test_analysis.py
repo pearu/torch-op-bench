@@ -210,3 +210,21 @@ def test_time_x_peak():
     assert analysis.time_x_peak(2.0, 3 * 1024**2) == 6.0  # ms x MiB
     assert analysis.time_x_peak(None, 1024**2) is None
     assert analysis.time_x_peak(2.0, None) is None
+
+
+def test_default_point_without_spec():
+    def rec(status="ok", **params):
+        return {"op_ref": "no_such_module_xyz:SPEC", "status": status, "case": {"params": params}}
+
+    # The most common value per axis, when an ok record is there.
+    recs = [rec(A=1, B=1), rec(A=1, B=2), rec(A=2, B=2), rec("error", A=3, B=3)]
+    assert analysis.default_point(recs) == {"source": "inferred", "params": {"A": 1, "B": 2}}
+    # Per axis, A=1 and B=2 win, but no ok record is at (1, 2): the most common case.
+    recs = [rec(A=1, B=1), rec(A=1, B=1), rec(A=1, B=3), rec(A=2, B=2), rec(A=3, B=2)]
+    recs.append(rec(A=4, B=2))
+    assert analysis.default_point(recs)["params"] == {"A": 1, "B": 1}
+    # --point, with the kind of the records' values (no spec to ask).
+    found = analysis.default_point(recs, point={"B": "3"})
+    assert found == {"source": "--point", "params": {"A": 1, "B": 3}}
+    recs = [rec(A=1, L="x")]
+    assert analysis.default_point(recs, point={"L": "y"})["params"] == {"A": 1, "L": "y"}

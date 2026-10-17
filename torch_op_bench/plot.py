@@ -537,6 +537,7 @@ def plot(
     dtype: str | None = None,
     mode: str | None = None,
     baseline: str = "torch_eager",
+    point: Mapping[str, str] | None = None,
     metrics: Sequence[str] | None = None,
     sweep: Sequence[str] | None = None,
     impls: Sequence[str] | None = None,
@@ -547,7 +548,7 @@ def plot(
     recs = _load(results_dir, op, device_slug)
     rows = analysis.to_rows(recs)
     axes_all = analysis.axes_of(recs)
-    point = analysis.default_point(recs)["params"]
+    point = analysis.default_point(recs, point=point)["params"]
     rows_b: list[Row] = []
     if overlay is not None:
         recs_b = _load(overlay, op or recs[0]["op"], device_slug)
@@ -581,7 +582,7 @@ def plot(
             if not axes:
                 warnings.warn(
                     f"{m}, {d}: no axis varies around the default point "
-                    f"{', '.join(f'{k}={v}' for k, v in point.items())}: no figures",
+                    f"{analysis.point_text(point)}: no figures (report has a table per case)",
                     stacklevel=2,
                 )
                 continue

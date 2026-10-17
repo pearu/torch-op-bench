@@ -277,6 +277,26 @@ def test_no_sweep(synth, tmp_path):
     assert any("different torch-op-bench commits" in m for m in messages)
 
 
+def test_without_the_default_point(synth, tmp_path, capsys):
+    # Two cases that differ in two axes (I1-6 on ex): no sweep figure, said per mode
+    # and dtype, and exit code 0.
+    two = S.subset(synth, tmp_path / "two", {"M": 64}, {"K": 16})
+    with pytest.warns(UserWarning) as caught:
+        assert (
+            cli.main(["plot", str(two), "--out", str(tmp_path / "out"), "--baseline", "base"]) == 0
+        )
+    messages = [str(w.message) for w in caught if "no axis varies" in str(w.message)]
+    assert len(messages) == 2 * 2
+    assert all(m.endswith("no figures (report has a table per case)") for m in messages)
+    assert capsys.readouterr().out == ""
+    # --point centres on another point: around K=16 the synthetic set varies K only.
+    written = draw(synth, tmp_path / "point", dtype="float32", mode="fwd_bwd", point={"K": "16"})
+    assert [p.name for p in written] == ["grid-fwd_bwd.png", "ratio-fwd_bwd.png"]
+    rows = read_csv(tmp_path / "point" / "grid-fwd_bwd.csv")
+    assert {r["axis"] for r in rows} == {"K"}
+    assert {r["x"] for r in rows} == {"16", "32"}
+
+
 def test_controls_of_one_original_differ():
     # Two controls of torch_eager in two environments: the same colour and line,
     # so their markers differ (R1-12 F1), one per environment, stable by name.

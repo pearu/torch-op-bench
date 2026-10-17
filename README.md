@@ -303,7 +303,16 @@ The resume and merge key is (op, device slug, case key, implementation, mode).
 Two commands read a results directory, never an op's code: they work for any op,
 and `report` needs nothing but this package. Each takes `--op` and `--device-slug`
 (required only when the directory holds several), `--dtype` and `--mode` (default:
-each in turn), and `--baseline` (default `torch_eager`).
+each in turn), `--baseline` (default `torch_eager`), and `--point AXIS=VALUE,...`.
+
+The point both centre on is the op's `defaults`. When the op cannot be imported, or
+no `ok` record is at its defaults (a small run of a case or two elsewhere), it is
+inferred: the most common value of each axis over the `ok` records, or the most
+common case when no record is at that combination. The report names the source:
+"The default point is inferred (the spec's default point N=4096, H=4096, V=131072,
+ignore_frac=0 has no records)." `--point` sets it instead, for the axes it names,
+the others keeping theirs, e.g. `--point V=32768` to centre the tables and figures
+on the V=32768 sweep.
 
 ```sh
 torch-op-bench report results --out report.md
@@ -321,8 +330,7 @@ torch-op-bench commits). Its sections:
    12 characters of the commit of a git install), the torch-op-bench commit, and
    the matmul settings. It says so when the commits differ, or when one environment
    holds several builds.
-2. **At the default point** (the op's `defaults`, or the most common value of each
-   axis when the op cannot be imported), per mode and dtype: one row per
+2. **At the default point** (see above), per mode and dtype: one row per
    implementation, the baseline first and each control right after its original,
    with its environment, median and IQR, time against the baseline, tokens/s,
    TFLOP/s, peak memory above baseline and against the baseline's, **time × peak**
@@ -334,7 +342,9 @@ torch-op-bench commits). Its sections:
 3. **Sweeps**: for each axis varied around the default point, four tables (median,
    peak, time × peak with its ratio to the baseline's in parentheses, parity with
    the failing metrics) with one column per implementation. A cell is `—` when there
-   is no record, or the status when it is not `ok`.
+   is no record, or the status when it is not `ok`. When no axis varies around the
+   point (one case, or cases that differ in two axes at once), the default-point
+   table is repeated at every case present instead, one table per case.
 4. **Environment check**: each control (`torch_eager_<env>`) against its original at
    every point both have, as the time ratio (control / original), the peak
    difference, and the ratio of each parity metric. A time ratio outside [0.95,
@@ -372,6 +382,10 @@ results hold several):
   axes, the first solid and the second dashed, e.g. one device under two torch
   builds; its footer counts what each set leaves out, and gives each set's
   provenance, under the labels.
+
+When no axis varies around the point, `plot` draws nothing and says so on stderr,
+once per mode and dtype, and exits 0; the report's per-case tables are then the
+result.
 
 Every figure draws the baseline black, dashed and thick, and a control dotted and
 thin in its original's colour, with one marker per environment, so two controls of
