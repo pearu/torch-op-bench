@@ -101,6 +101,8 @@ def test_bootstrap_dry_run():
     for name in ["TRITON_HOME", "TORCHINDUCTOR_CACHE_DIR", "MAMBA_ROOT_PREFIX", "CONDA_PKGS_DIRS"]:
         assert f'echo "export {name}=\\"$D/cache/' in out
     assert "CONDA_REGISTER_ENVS=false" in out  # no ~/.conda/environments.txt
+    # The installer's conda made an empty ~/.conda on ex: it gets a home of its own.
+    assert 'HOME="$D/cache/home" CONDA_REGISTER_ENVS=false bash "$installer"' in out
 
 
 def test_setup_dry_run():

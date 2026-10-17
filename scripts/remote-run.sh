@@ -235,7 +235,9 @@ else
     installer="$D/cache/Miniforge3-Linux-$(uname -m).sh"
     curl -fsSL -o "$installer" \
         "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-$(uname -m).sh"
-    bash "$installer" -b -p "$D/miniforge3"
+    # The installer runs conda, which makes ~/.conda: give it a home in the scratch.
+    mkdir -p "$D/cache/home"
+    HOME="$D/cache/home" CONDA_REGISTER_ENVS=false bash "$installer" -b -p "$D/miniforge3"
     conda_bin="$D/miniforge3/bin"
 fi
 {
