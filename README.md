@@ -353,7 +353,9 @@ results hold several):
   when some implementation's work differs from the baseline's at a point; otherwise
   it is the speedup again;
 - `overlay-<mode>.png`, with `--overlay`: the grid of both directories on the same
-  axes, the first solid and the second dashed, e.g. one device under two torch builds.
+  axes, the first solid and the second dashed, e.g. one device under two torch
+  builds; its footer counts what each set leaves out, and gives each set's
+  provenance, under the labels.
 
 Every figure draws the baseline black, dashed and thick, and a control dotted and
 thin in its original's colour, with one marker per environment, so two controls of

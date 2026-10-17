@@ -620,6 +620,8 @@ def plot(
             )
             if overlay is not None:
                 selected_b = analysis.at(rows_b, dtype=d, mode=m)
+                scope_b = [r for axis in axes for r in analysis.sweeps(selected_b, point)[axis]]
+                scope_b = list({id(r): r for r in scope_b}.values())
                 a, b = labels
                 written.append(
                     _figure(
@@ -634,7 +636,8 @@ def plot(
                         baseline,
                         f"{title}: {a} (solid) against {b} (dashed)",
                         [
-                            left_out(scope, chosen),
+                            f"{a}: {left_out(scope, chosen)}",
+                            f"{b}: {left_out(scope_b, chosen)}",
                             provenance(selected, a),
                             provenance(selected_b, b),
                         ],

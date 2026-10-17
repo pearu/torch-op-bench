@@ -333,3 +333,39 @@ def test_throughput_ratio_when_work_differs(synth, tmp_path):
     assert row["work"] == f"tokens=128,flops={2 * 64 * 32 * 16}"
     assert row["baseline_work"] == f"tokens=64,flops={2 * 64 * 32 * 16}"
     assert float(row["y"]) == pytest.approx(2 * 0.5)  # twice the tokens in twice the time
+
+
+def test_overlay_footer_counts_both_sets(synth, tmp_path, monkeypatch):
+    # B lacks what A has and has gaps of its own: the footer counts each, labelled.
+    from torch_op_bench import records
+
+    other = tmp_path / "b"
+    with pytest.warns(UserWarning):
+        recs = analysis.load(synth)
+    for r in recs:
+        r = {k: v for k, v in r.items() if k != analysis.SOURCE}
+        if r["implementation"] == "chunked" and r["case"]["params"]["M"] == 64:
+            r = {**r, "status": "error", "reason": "boom", "times_ms": None}
+        records.append(other / "synth" / S.SLUG / "x-host.jsonl", r)
+    footers = {}
+    real = plot._figure
+
+    def spy(path, sets, metrics, axes, point, baseline, title, footer, **kwargs):
+        footers[path.name] = footer
+        return real(path, sets, metrics, axes, point, baseline, title, footer, **kwargs)
+
+    monkeypatch.setattr(plot, "_figure", spy)
+    with pytest.warns(UserWarning):
+        plot.plot(
+            synth,
+            tmp_path / "out",
+            baseline="base",
+            dtype="float32",
+            mode="fwd_bwd",
+            overlay=other,
+            labels=("one", "two"),
+        )
+    footer = footers["overlay-fwd_bwd.png"]
+    assert footer[0] == "one: Left out: 1 unavailable (gaps in the lines)."
+    assert footer[1] == "two: Left out: 1 error, 1 unavailable (gaps in the lines)."
+    assert footer[2].startswith("one: ") and footer[3].startswith("two: ")
