@@ -104,17 +104,45 @@ def _without_credentials(url: str) -> str:
     return urllib.parse.urlunsplit(parts._replace(netloc=netloc))
 
 
+# The process-wide settings that choose how matmuls round: they change the results
+# (and so parity) of the same code. Read as the process has them when the record is
+# made, i.e. after the implementation ran; None for a setting this torch lacks.
+MATMUL_FLAGS = (
+    "allow_tf32",
+    "allow_bf16_reduced_precision_reduction",
+    "allow_fp16_reduced_precision_reduction",
+    "fp32_precision",
+)
+
+
+def matmul_precision() -> dict[str, Any]:
+    import torch
+
+    flags = torch.backends.cuda.matmul
+    info = {name: getattr(flags, name, None) for name in MATMUL_FLAGS}
+    info["float32_matmul_precision"] = torch.get_float32_matmul_precision()
+    return info
+
+
 def torch_info() -> dict[str, Any]:
     try:
         import torch
     except ImportError:
-        return {"version": None, "git_version": None, "cuda": None, "cudnn": None, "devices": []}
+        return {
+            "version": None,
+            "git_version": None,
+            "cuda": None,
+            "cudnn": None,
+            "devices": [],
+            "matmul": None,
+        }
     info: dict[str, Any] = {
         "version": torch.__version__,
         "git_version": getattr(torch.version, "git_version", None),
         "cuda": torch.version.cuda,
         "cudnn": None,
         "devices": [],
+        "matmul": matmul_precision(),
     }
     if not torch.cuda.is_available():
         return info
