@@ -75,9 +75,12 @@ def test_push_dry_run(repo):
         r".coverage\*",
     ]:
         assert f"--exclude={exclude} " in rsync
-    assert "--exclude=/.git" not in rsync  # .git goes: records name the commit
+    assert "--exclude=/.git " not in rsync  # .git goes: records name the commit
+    assert "--exclude=/.git/objects/info/alternates " in rsync
     assert rsync.endswith(f" {repo}/ tob-ex:torch_op_bench-scratch/torch-op-bench/")
-    assert r"--rsync-path=mkdir\ -p\ torch_op_bench-scratch/torch-op-bench\ \&\&\ rsync" in rsync
+    remote_dir = "torch_op_bench-scratch/torch-op-bench"
+    assert rf"--rsync-path=mkdir\ -p\ {remote_dir}\ \&\&\ \{{\ \[\ -d\ {remote_dir}/.git\ " in rsync
+    assert rf"\&\&\ rm\ -f\ {remote_dir}/.git/objects/info/alternates\ \&\&\ rsync " in rsync
 
 
 def test_dir_option(repo):
@@ -254,7 +257,7 @@ def test_push_a_separate_git_dir(fake_host, tmp_path):
     assert proc.returncode == 0, proc.stderr
     first, second = [line for line in proc.stdout.splitlines() if line.startswith("+ rsync")]
     assert "--exclude=/.git " in first
-    assert second.startswith("+ rsync -a --delete --rsync-path=")
+    assert second.startswith("+ rsync -a --delete --exclude=/objects/info/alternates ")
     assert second.endswith(f" {gitdir}/ tob-ex:torch_op_bench-scratch/torch-op-bench/.git/")
 
     proc = run_script("fakehost", "push", script=script, env=env)
@@ -271,6 +274,37 @@ def test_push_a_separate_git_dir(fake_host, tmp_path):
         check=True,
     )
     assert status.stdout == ""
+
+
+def test_push_a_clone_that_borrows_objects(fake_host, repo, tmp_path):
+    """A clone with objects/info/alternates (git clone --shared) arrives with every
+    object it needs and no alternates file, also over a push that copied one."""
+    env, home = fake_host
+    shared = tmp_path / "shared"
+    subprocess.run(["git", "clone", "-q", "--shared", str(repo), str(shared)], check=True)
+    alternates = shared / ".git" / "objects" / "info" / "alternates"
+    assert alternates.read_text().strip() == str(repo / ".git" / "objects")
+    remote_git = home / "torch_op_bench-scratch" / "torch-op-bench" / ".git"
+    (remote_git / "objects" / "info").mkdir(parents=True)
+    (remote_git / "objects" / "info" / "alternates").write_text("/nowhere\n")  # the old push
+    script = shared / "scripts" / "remote-run.sh"
+
+    proc = run_script("tob-ex", "push", "--dry-run", script=script)
+    assert proc.returncode == 0, proc.stderr
+    first, second = [line for line in proc.stdout.splitlines() if line.startswith("+ rsync")]
+    assert "--exclude=/.git/objects/info/alternates " in first
+    assert second == (
+        f"+ rsync -a --exclude=/info/ {repo}/.git/objects/ "
+        "tob-ex:torch_op_bench-scratch/torch-op-bench/.git/objects/"
+    )
+
+    proc = run_script("fakehost", "push", script=script, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert not (remote_git / "objects" / "info" / "alternates").exists()
+    fsck = subprocess.run(
+        ["git", "-C", str(remote_git.parent), "fsck", "--full"], capture_output=True, text=True
+    )
+    assert fsck.returncode == 0 and "missing" not in fsck.stdout + fsck.stderr, fsck
 
 
 def test_push_refuses_a_linked_worktree(repo, tmp_path):

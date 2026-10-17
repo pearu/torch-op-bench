@@ -8,7 +8,7 @@ usage: scripts/remote-run.sh HOST SUBCOMMAND [options] [-- RUN-ARGS...]
 
 Run torch-op-bench on HOST (an ssh destination or alias) in a scratch directory
 there, from this checkout. Each subcommand is one ssh session or one rsync (push:
-two when .git is a "gitdir:" file).
+more when the repository is outside .git or borrows objects).
 
 subcommands:
   push       copy this checkout (with .git) to REMOTE_DIR/torch-op-bench; refuses
@@ -177,31 +177,50 @@ cmd_push() {
             "records will name $(git -C "$root" rev-parse --short HEAD) but run other code" >&2
     fi
     echo "commit: $(git -C "$root" rev-parse HEAD)"
-    # A checkout whose .git is a "gitdir: ..." file (git clone --separate-git-dir)
-    # would arrive without its repository, and the records without their commit:
-    # copy that directory as the remote .git instead, in a second rsync.
-    local gitdir="" common
+    # The remote .git must be a repository of its own, or the records name no
+    # commit. A checkout whose .git is a "gitdir: ..." file (git clone
+    # --separate-git-dir) gets that directory copied as the remote .git; objects
+    # borrowed through objects/info/alternates (git clone --shared or --reference)
+    # are copied into it, and the alternates file is left out. One rsync more for
+    # each.
+    local common gitdir="" alternates=() alt
+    common="$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)"
     if [[ ! -d "$root/.git" ]]; then
         gitdir="$(git -C "$root" rev-parse --absolute-git-dir)"
-        common="$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)"
         [[ "$gitdir" == "$common" ]] ||
-            die "$root is a linked worktree (its repository is shared with others): push from a clone"
+            die "$root is a linked worktree (its repository is shared): push from a clone"
     fi
+    if [[ -f "$common/objects/info/alternates" ]]; then
+        while IFS= read -r alt; do
+            [[ -n "$alt" && "$alt" != "#"* ]] || continue
+            [[ "$alt" == /* ]] || alt="$common/objects/$alt"
+            [[ -d "$alt" && ! -e "$alt/info/alternates" ]] ||
+                die "alternate $alt of $common is missing or has alternates of its own"
+            alternates+=("$alt")
+        done <"$common/objects/info/alternates"
+    fi
+    local dest="$rsync_dir/torch-op-bench" q git_exclude=/.git/objects/info/alternates
+    q="$(printf '%q' "$dest")"
+    [[ -z "$gitdir" ]] || git_exclude=/.git
+    local prepare="mkdir -p $q && { [ -d $q/.git ] || rm -f $q/.git; }"
+    prepare+=" && rm -f $q/.git/objects/info/alternates"
+    # Before the first rsync, on HOST: make the directory, remove a .git that is a
+    # file (rsync does not replace a file with a directory) and an alternates file
+    # an older push left.
     local_cmd rsync -a --delete \
         --exclude=/.asb/ --exclude=/envs/.prefix/ --exclude=/results/ \
-        ${gitdir:+--exclude=/.git} \
+        --exclude="$git_exclude" \
         --exclude=__pycache__/ --exclude=.pytest_cache/ --exclude=.ruff_cache/ \
         --exclude=htmlcov/ --exclude='.coverage*' \
-        --rsync-path="mkdir -p $(printf '%q' "$rsync_dir/torch-op-bench") && rsync" \
-        "$root/" "$host:$rsync_dir/torch-op-bench/"
+        --rsync-path="$prepare && rsync" \
+        "$root/" "$host:$dest/"
     if [[ -n "$gitdir" ]]; then
-        # rsync does not replace a file with a directory: remove a .git file first.
-        local dot_git
-        dot_git="$(printf '%q' "$rsync_dir/torch-op-bench/.git")"
-        local_cmd rsync -a --delete \
-            --rsync-path="{ [ -d $dot_git ] || rm -f $dot_git; } && rsync" \
-            "$gitdir/" "$host:$rsync_dir/torch-op-bench/.git/"
+        local_cmd rsync -a --delete --exclude=/objects/info/alternates \
+            "$gitdir/" "$host:$dest/.git/"
     fi
+    for alt in "${alternates[@]}"; do
+        local_cmd rsync -a --exclude=/info/ "$alt/" "$host:$dest/.git/objects/"
+    done
 }
 
 cmd_bootstrap() {
