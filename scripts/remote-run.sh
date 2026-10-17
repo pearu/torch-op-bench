@@ -201,16 +201,21 @@ cmd_push() {
             alternates+=("$alt")
         done <"$common/objects/info/alternates"
     fi
-    local dest="$rsync_dir/torch-op-bench" q pid_file
+    local dest="$rsync_dir/torch-op-bench" q pid_file old_head
     q="$(printf '%q' "$dest")"
     pid_file="$(printf '%q' "$rsync_dir/run.pid")"
+    old_head="$(printf '%q' "$rsync_dir/push.old-head")"
     # Before the first rsync, on HOST: refuse while a run is alive (it imports from
-    # the checkout; --allow-dirty does not override this), make the directory, and
-    # remove a .git that is a file (rsync does not replace a file with a directory)
-    # and an alternates file an older push left.
+    # the checkout; --allow-dirty does not override this), make the directory,
+    # record the checkout's HEAD (none on a first push) for the step after the
+    # copy, and remove a .git that is a file (rsync does not replace a file with a
+    # directory) and an alternates file an older push left.
     local prepare="if p=\$(cat $pid_file 2>/dev/null) && kill -0 \"\$p\" 2>/dev/null; then"
     prepare+=" echo \"remote-run.sh: a run is in progress (pid \$p): wait for it or stop it\" >&2;"
-    prepare+=" exit 1; fi; mkdir -p $q && { [ -d $q/.git ] || rm -f $q/.git; }"
+    prepare+=" exit 1; fi; mkdir -p $q"
+    prepare+=" && { git -C $q rev-parse -q --verify HEAD >$old_head 2>/dev/null"
+    prepare+=" || rm -f $old_head; }"
+    prepare+=" && { [ -d $q/.git ] || rm -f $q/.git; }"
     prepare+=" && rm -f $q/.git/objects/info/alternates"
     # --checksum: refs, the index and tracked files change in place, and the quick
     # check (size and time) misses a change of the same size within the same second.
@@ -229,8 +234,21 @@ cmd_push() {
         git -C "$root" ls-files -z | "${tree_cmd[@]}"
     fi
     remote 'cd torch-op-bench
-# What is no longer tracked: files deleted since the previous push. Ignored files
-# (caches, envs/.prefix/) stay, and so does results/.
+# What the previous push tracked and HEAD does not, ignored now or not: git clean
+# leaves a file that left the index and became ignored in one commit.
+if [ -s "$D"/push.old-head ]; then
+    old="$(cat "$D"/push.old-head)"
+    if git cat-file -e "$old^{commit}" 2>/dev/null; then
+        gone=(--name-only --no-renames --diff-filter=D "$old" HEAD)
+        git diff "${gone[@]}" | sed "s/^/no longer tracked, removing /"
+        git diff -z "${gone[@]}" | xargs -0 rm -f --
+    else
+        echo "the previous push ($old) is not in this history: only git clean below" >&2
+    fi
+fi
+rm -f "$D"/push.old-head
+# What is not tracked and not ignored: files deleted since the previous push.
+# Ignored files (caches, envs/.prefix/) stay, and so does results/.
 git clean -fd -e /envs/.prefix/ -e /results/
 echo "remote checkout: $(git rev-parse HEAD)"
 git status --short --untracked-files=no'

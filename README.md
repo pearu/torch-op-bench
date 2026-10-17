@@ -398,8 +398,9 @@ scripts/remote-run.sh HOST fetch       # 5. results back into results/
 
 - **`push`** sends the tracked files (`git ls-files`) and the repository, and
   nothing else: untracked and ignored files never leave your machine, and a file
-  deleted since the previous push is removed on the host (`git clean`, which keeps
-  the host's ignored files, `envs/.prefix/` and `results/`). It refuses a checkout
+  the previous push tracked and HEAD does not is removed on the host, also one
+  that became ignored (`git clean` keeps the host's own ignored files,
+  `envs/.prefix/` and `results/`). It refuses a checkout
   with uncommitted changes to tracked files. Every record carries
   `env.torch_op_bench.hash`; a run from a dirty tree, or one during which the
   checkout changed, names code that is not what ran (the step-5 sweep had records

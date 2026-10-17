@@ -70,7 +70,8 @@ def test_push_dry_run(repo):
     assert rsync.endswith(f" {repo}/.git/ tob-ex:{remote_dir}/.git/")
     assert r"--rsync-path=if\ p=\$\(cat\ torch_op_bench-scratch/run.pid\ " in rsync
     assert r"a\ run\ is\ in\ progress" in rsync
-    assert rf"mkdir\ -p\ {remote_dir}\ \&\&\ \{{\ \[\ -d\ {remote_dir}/.git\ " in rsync
+    assert rf"mkdir\ -p\ {remote_dir}\ \&\&\ \{{\ git\ -C\ {remote_dir}\ " in rsync
+    assert rf"\&\&\ \{{\ \[\ -d\ {remote_dir}/.git\ " in rsync
     assert rf"\&\&\ rm\ -f\ {remote_dir}/.git/objects/info/alternates\ \&\&\ rsync " in rsync
     # Then exactly the tracked files: no exclusion list to keep up to date.
     assert (
@@ -79,8 +80,12 @@ def test_push_dry_run(repo):
         f"{repo}/ tob-ex:{remote_dir}/"
     ) in lines
     assert "--exclude=/.asb/" not in out and "--delete " not in out.split("ls-files")[1]
-    # Then git removes what is no longer tracked, and keeps the ignored and results/.
+    # The checkout's HEAD before the copy, for what left the index (R1-16 F4).
+    assert (
+        r"git\ -C\ torch_op_bench-scratch/torch-op-bench\ rev-parse\ -q\ --verify\ HEAD\ " in rsync
+    )
     assert "\ngit clean -fd -e /envs/.prefix/ -e /results/\n" in out
+    assert out.index("xargs -0 rm -f --") < out.index("git clean -fd")
 
 
 def test_dir_option(repo):
@@ -375,7 +380,7 @@ def test_push_sends_exactly_the_tracked_files(fake_host, repo):
 
     proc = run_script("fakehost", "push", script=script, env=env)
     assert proc.returncode == 0, proc.stderr
-    assert "Removing old.txt" in proc.stdout
+    assert "\nno longer tracked, removing old.txt\n" in proc.stdout  # before git clean
     assert not (checkout / "old.txt").exists()
     for path in kept:
         assert path.read_text() == "remote\n", path
@@ -383,6 +388,41 @@ def test_push_sends_exactly_the_tracked_files(fake_host, repo):
     assert left == sorted(_git(repo, "ls-files").split() + ["pkg/__pycache__/remote.pyc"])
     assert _git(checkout, "rev-parse", "HEAD") == _git(repo, "rev-parse", "HEAD")
     assert _git(checkout, "status", "--porcelain", "--untracked-files=no") == ""
+
+
+def test_push_removes_what_left_the_index(fake_host, repo):
+    """R1-16 F4: a file that stops being tracked and becomes ignored in one commit
+    is not something git clean removes; push removes what the previous push
+    tracked and HEAD does not. The first push has no previous HEAD."""
+    env, home = fake_host
+    script = repo / "scripts" / "remote-run.sh"
+    scratch = home / "torch_op_bench-scratch"
+    checkout = scratch / "torch-op-bench"
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "a.py").write_text("a = 1\n")
+    (repo / "pkg" / "b.py").write_text("b = 1\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "pkg")
+
+    proc = run_script("fakehost", "push", script=script, env=env)  # the first push
+    assert proc.returncode == 0, proc.stderr
+    assert "\nno longer tracked, removing" not in proc.stdout
+    assert "previous push" not in proc.stderr
+    assert (checkout / "pkg" / "b.py").exists()
+    assert not (scratch / "push.old-head").exists()
+
+    _git(repo, "rm", "-q", "--cached", "pkg/b.py")
+    (repo / ".gitignore").write_text("pkg/b.py\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "pkg/b.py: untracked and ignored")
+    assert (repo / "pkg" / "b.py").exists()  # still here, ignored
+
+    proc = run_script("fakehost", "push", script=script, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert not (checkout / "pkg" / "b.py").exists()
+    assert "\nno longer tracked, removing pkg/b.py\n" in proc.stdout
+    assert _files(checkout) == sorted(_git(repo, "ls-files").split())
+    assert not (scratch / "push.old-head").exists()
 
 
 def test_push_refuses_during_a_run(fake_host, repo):
