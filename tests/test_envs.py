@@ -142,3 +142,25 @@ def test_script_never_prompts(tmp_path, tool, flag):
     args = log.read_text().splitlines()
     assert args[:2] == ["env", "create"] and args[2 : 2 + len(flag)] == flag
     assert not any(line.startswith("stdin:") for line in args)
+
+
+def test_torch_definitions():
+    # The torch environment of a host without a torch build (remote runs): both are
+    # the environment named torch, with the override's runtime pinned.
+    nightly = (ROOT / "envs" / "torch-nightly.yml").read_text()
+    stable = (ROOT / "envs" / "torch-stable.yml").read_text()
+    for text in [nightly, stable]:
+        assert re.search(r"^name: torch$", text, re.M)
+        assert re.search(r"^\s+- python=3\.\d+\.\d+$", text, re.M)
+        assert re.search(r"^\s+- nvidia-cutlass-dsl==\d+\.\d+\.\d+$", text, re.M)
+        assert re.search(r"^\s+- apache-tvm-ffi==\d+\.\d+\.\d+$", text, re.M)
+        assert len(re.findall(r"^\s+- triton==\S+$", text, re.M)) == 1
+    # One nightly build, named exactly, from the nightly index.
+    assert re.search(r"^\s+- torch==\d+\.\d+\.\d+\.dev\d{8}\+cu\d+$", nightly, re.M)
+    assert re.search(
+        r"^\s+- --extra-index-url https://download\.pytorch\.org/whl/nightly/cu\d+$",
+        nightly,
+        re.M,
+    )
+    assert re.search(r"^\s+- torch==\d+\.\d+\.\d+$", stable, re.M)
+    assert "--extra-index-url" not in stable
