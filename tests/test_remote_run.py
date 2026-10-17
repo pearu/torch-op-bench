@@ -98,7 +98,13 @@ def test_bootstrap_dry_run():
     assert out.rstrip().endswith("\nREMOTE")
     assert "Miniforge3-Linux-$(uname -m).sh" in out and '-b -p "$D/miniforge3"' in out
     assert "command -v mamba" in out and "command -v conda" in out
-    for name in ["TRITON_HOME", "TORCHINDUCTOR_CACHE_DIR", "MAMBA_ROOT_PREFIX", "CONDA_PKGS_DIRS"]:
+    for name in [
+        "TRITON_HOME",
+        "TORCHINDUCTOR_CACHE_DIR",
+        "CUDA_CACHE_PATH",  # else ~/.nv/ComputeCache, as on ex
+        "MAMBA_ROOT_PREFIX",
+        "CONDA_PKGS_DIRS",
+    ]:
         assert f'echo "export {name}=\\"$D/cache/' in out
     assert "CONDA_REGISTER_ENVS=false" in out  # no ~/.conda/environments.txt
     # The installer's conda made an empty ~/.conda on ex: it gets a home of its own.
@@ -108,7 +114,8 @@ def test_bootstrap_dry_run():
 def test_setup_dry_run():
     out = dry("setup", "--envs", "liger,torchtitan", "--envs", "liger-git")
     assert "for name in torch-nightly liger torchtitan liger-git; do" in out
-    assert 'scripts/setup-env.sh "$name" --prefix "$D"/envs' in out
+    # mamba 2 wrote ~/.conda/environments.txt on ex: setup-env.sh gets a home of its own.
+    assert 'HOME="$D"/cache/home scripts/setup-env.sh "$name" --prefix "$D"/envs' in out
     assert "nvidia-smi" in out
     assert '"$D"/envs/torch-nightly/bin/python -m torch_op_bench.cli list lce' in out
     out = dry("setup", "--torch-env", "torch-stable", "--op", "toy_op:TOY")
@@ -335,7 +342,7 @@ def test_remote_side_end_to_end(fake_host, repo, tests_dir):
     out = call("bootstrap")
     assert "using " in out and "conda" in out  # the stub on PATH: no Miniforge download
     env_sh = (scratch / "env.sh").read_text()
-    assert f'TRITON_HOME="{scratch}/cache/triton"' in env_sh and "PATH" not in env_sh
+    assert f'TRITON_HOME="{scratch}/cache/triton"' in env_sh and "export PATH=" not in env_sh
     # setup would build the environment; stand in this interpreter for it.
     python = scratch / "envs" / "torch-nightly" / "bin" / "python"
     python.parent.mkdir(parents=True)

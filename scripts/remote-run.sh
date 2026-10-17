@@ -245,6 +245,7 @@ fi
     if [ -n "$conda_bin" ]; then echo "export PATH=\"$conda_bin:\$PATH\""; fi
     echo "export TRITON_HOME=\"$D/cache/triton\""
     echo "export TORCHINDUCTOR_CACHE_DIR=\"$D/cache/inductor\""
+    echo "export CUDA_CACHE_PATH=\"$D/cache/nv\""
     echo "export MAMBA_ROOT_PREFIX=\"$D/cache/mamba\""
     echo "export CONDA_PKGS_DIRS=\"$D/cache/conda-pkgs\""
     echo "export CONDA_REGISTER_ENVS=false"
@@ -262,8 +263,11 @@ cmd_setup() {
     done
     remote "$source_env
 cd torch-op-bench
+# mamba 2 registers environments in ~/.conda/environments.txt whatever
+# CONDA_REGISTER_ENVS says: it gets a home in the scratch, as the installer does.
+mkdir -p \"\$D\"/cache/home
 for name in$names; do
-    scripts/setup-env.sh \"\$name\" --prefix \"\$D\"/envs
+    HOME=\"\$D\"/cache/home scripts/setup-env.sh \"\$name\" --prefix \"\$D\"/envs
 done
 nvidia-smi || echo 'nvidia-smi failed'
 $torch_python -m torch_op_bench.cli list $(printf '%q' "$op")"

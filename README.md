@@ -407,8 +407,9 @@ scripts/remote-run.sh HOST fetch       # 5. results back into results/
   each, and a linked worktree is refused (push from a clone).
 - **`bootstrap`** installs Miniforge into the scratch directory when the host has
   neither mamba nor conda. It writes `env.sh`, which puts every cache (Triton,
-  Inductor, conda packages, pip) in the scratch directory and keeps conda from
-  registering environments under `~`.
+  Inductor, CUDA's JIT cache, conda packages, pip) in the scratch directory. The
+  installer and `setup` run with `HOME` in the scratch directory, since conda and
+  mamba write `~/.conda` whatever `CONDA_REGISTER_ENVS` says.
 - **`setup`** runs `scripts/setup-env.sh` for the torch environment and each of
   `--envs`. The torch environment is `--torch-env torch-nightly` (default:
   `envs/torch-nightly.yml`, a pinned nightly wheel, which carries the newest CuTeDSL
