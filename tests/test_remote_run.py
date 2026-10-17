@@ -16,9 +16,9 @@ SCRIPT = ROOT / "scripts" / "remote-run.sh"
 BASH = shutil.which("bash")
 
 
-def run_script(*args, script=SCRIPT, env=None, cwd=None):
+def run_script(*args, script=SCRIPT, env=None, cwd=None, input=None):
     return subprocess.run(
-        [BASH, str(script), *args], capture_output=True, text=True, env=env, cwd=cwd
+        [BASH, str(script), *args], capture_output=True, text=True, env=env, cwd=cwd, input=input
     )
 
 
@@ -152,7 +152,7 @@ def test_status_wait_fetch_shell_dry_run():
     assert out == f"+ rsync -ai tob-ex:torch_op_bench-scratch/results/ {ROOT}/results/\n"
     assert "--delete" not in out  # never deletes on the remote, nor locally
     out = dry("shell")
-    assert out.startswith("+ ssh -t tob-ex ") and "source\\ env.sh" in out
+    assert out.startswith("+ ssh -t tob-ex bash\\ -c\\ ") and "source\\\\\\ env.sh" in out
 
 
 @pytest.fixture
@@ -227,10 +227,11 @@ def fake_host(tmp_path, repo):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     ssh = bin_dir / "ssh"
-    # Drop ssh's options and the host; run the rest here, as the remote shell would.
+    # Drop ssh's options (-l, -p and -e take a value) and the host; run the rest
+    # here with /bin/sh, as a remote login shell would.
     ssh.write_text(
         "#!/bin/sh\n"
-        'while [ $# -gt 0 ]; do case "$1" in -t|-l|-p|-e) shift ;; -*) ;; *) break ;; esac; '
+        'while [ $# -gt 0 ]; do case "$1" in -l|-p|-e) shift ;; -*) ;; *) break ;; esac; '
         "shift; done\n"
         "shift\n"
         f'export HOME="{home}"\n'
@@ -441,6 +442,12 @@ def test_remote_side_end_to_end(fake_host, repo, tests_dir):
     assert "using " in out and "conda" in out  # the stub on PATH: no Miniforge download
     env_sh = (scratch / "env.sh").read_text()
     assert f'TRITON_HOME="{scratch}/cache/triton"' in env_sh and "export PATH=" not in env_sh
+    # shell: the fake host's login shell is /bin/sh, and env.sh is sourced all the same.
+    proc = run_script(
+        "fakehost", "shell", script=script, env=env, input='echo "in $PWD: $TRITON_HOME"\nexit\n'
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert f"in {scratch}: {scratch}/cache/triton" in proc.stdout
     # setup would build the environment; stand in this interpreter for it.
     python = scratch / "envs" / "torch-nightly" / "bin" / "python"
     python.parent.mkdir(parents=True)

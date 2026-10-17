@@ -368,8 +368,11 @@ cmd_fetch() {
 }
 
 cmd_shell() {
+    # Run by bash, as every other remote script is, not by the login shell (sh or
+    # dash would not source env.sh). Not bash -s: stdin stays the terminal.
     local script
     script="cd $remote_d && { [ -f env.sh ] && source env.sh; }; exec bash -i"
+    script="bash -c $(printf '%q' "$script")"
     printf '+ ssh -t %q %q\n' "$host" "$script"
     if ((!dry_run)); then
         ssh -t "$host" "$script"
