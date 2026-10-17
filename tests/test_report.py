@@ -77,8 +77,12 @@ def test_default_point(synth):
         assert by_name[name][col] == report.sig3(expected)
     assert by_name["chunked"][col] == "2.00" and by_name["compiled"][col] == "0.500"
     assert by_name["base_other (control of base)"][col] == "1.10"
-    peak = header.index("peak / baseline")
-    assert by_name["chunked"][peak] == "0.250"
+    # The peak above the inputs, not the absolute peak (R1-12 F2), so labelled.
+    assert "peak MiB" not in header and "peak / baseline" not in header
+    peak = header.index("peak above baseline, MiB")
+    assert by_name["chunked"][peak] == report.mib(S.peak_above("chunked", S.DEFAULT))
+    ratio = header.index("peak above baseline / baseline's")
+    assert by_name["chunked"][ratio] == "0.250"
     assert "api.name" in header and "num_chunks" in header  # varying info
     # fwd: chunked has no fwd records, and no info column is empty there
     part = section(text, "### fwd, float32", "\n### ")
