@@ -16,6 +16,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import importlib.metadata
+import importlib.util
 import inspect
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,10 @@ OVERRIDE_OPS = (
     "_linear_cross_entropy_batch_chunked",
     "_linear_cross_entropy_batch_chunked_no_reduction",
 )
+
+# The torch._native module that holds the LCE override; a build without it has
+# F.linear_cross_entropy but nothing to override it with.
+OVERRIDE_MODULE = "torch._native.ops.linear_cross_entropy"
 
 # Source files whose Python-only edits the torch build hash would miss (R4).
 LCE_SOURCES = (
@@ -316,6 +321,29 @@ def lce_available() -> bool | str:
     return True
 
 
+def lce_override_present() -> bool:
+    """Whether the build has the torch._native LCE override module.
+
+    Looked up, not imported: importing it may register the override.
+    """
+    try:
+        return importlib.util.find_spec(OVERRIDE_MODULE) is not None
+    except ModuleNotFoundError:  # a parent package is missing
+        return False
+
+
+def lce_override_available() -> bool | str:
+    available = lce_available()
+    if available is not True:
+        return available
+    if not lce_override_present():
+        return (
+            f"torch {_torch_version()} has no torch._native LCE override "
+            "(torch/_native/ops/linear_cross_entropy)"
+        )
+    return True
+
+
 def lce_no_override_available() -> bool | str:
     available = lce_available()
     if available is not True:
@@ -441,13 +469,20 @@ def override_registration() -> dict[str, Any]:
 
     Mirrors the checks of ``register_linear_cross_entropy_overrides``, through
     ``torch._native.cutedsl_utils``, a private module: ``registered`` is ``None``
-    when it cannot be asked.
+    when it cannot be asked. ``present`` is whether the build has the override at
+    all; without it nothing else is asked.
     """
+    if not lce_override_present():
+        return {
+            "present": False,
+            "registered": False,
+            "reason": "the build has no torch._native LCE override",
+        }
     try:
         from torch._native import cutedsl_utils as cu
     except Exception as exc:
         reason = f"cannot tell: torch._native.cutedsl_utils: {type(exc).__name__}: {exc}"
-        return {"registered": None, "reason": reason}
+        return {"present": True, "registered": None, "reason": reason}
     try:
         if not cu.runtime_available():
             reason = (
@@ -464,8 +499,9 @@ def override_registration() -> dict[str, Any]:
         else:
             reason = None
     except Exception as exc:
-        return {"registered": None, "reason": f"cannot tell: {type(exc).__name__}: {exc}"}
-    return {"registered": reason is None, "reason": reason}
+        reason = f"cannot tell: {type(exc).__name__}: {exc}"
+        return {"present": True, "registered": None, "reason": reason}
+    return {"present": True, "registered": reason is None, "reason": reason}
 
 
 def setup_lce(case: Case) -> dict[str, Any]:
@@ -483,8 +519,14 @@ def setup_lce(case: Case) -> dict[str, Any]:
 def setup_lce_no_override(case: Case) -> dict[str, Any]:
     import torch
 
+    # Disabling ops a build does not have raises nothing (torch 2.14.1, 2.16.0a0);
+    # override_present tells the reader whether the disabling did anything.
     torch.backends.python_native.disable_operations(*OVERRIDE_OPS)
-    return {**setup_lce(case), "override_disabled": list(OVERRIDE_OPS)}
+    return {
+        **setup_lce(case),
+        "override_disabled": list(OVERRIDE_OPS),
+        "override_present": lce_override_present(),
+    }
 
 
 def liger_chunks(N: int, H: int, V: int, chunk_mem_const: int = 1) -> dict[str, int]:
@@ -844,7 +886,7 @@ LCE = OpSpec(
             modes=BOTH,
             setup=setup_lce,
             verify=verify_lce,
-            available=lce_available,
+            available=lce_override_available,
             packages=DSL_PACKAGES,
             info={**CONTRACT, "options": "LinearCrossEntropyOptions()"},
         ),

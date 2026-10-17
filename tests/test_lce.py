@@ -14,6 +14,8 @@ LIGER_IMPLS = ["liger", "liger_native_accum", "torch_eager_liger"]
 TITAN = ["torchtitan_chunked", "torchtitan_chunked_compiled", "torchtitan_ce"]
 TITAN_IMPLS = [*TITAN, "torch_eager_torchtitan"]
 TINY = {"N": 64, "H": 32, "V": 96}
+# Whether this torch has the torch._native LCE override (nightlies do, 2.14.1 not).
+OVERRIDE = lce.lce_override_present()
 
 
 def case(dtype="float32", ignore_frac="0", device="cpu", **params):
@@ -158,6 +160,7 @@ def test_setup_records_options_and_source_hash():
     assert "nn/modules/linear_cross_entropy.py" in info["lce_source_files"]
     no_override = lce.setup_lce_no_override(c)
     assert no_override["override_disabled"] == list(lce.OVERRIDE_OPS)
+    assert no_override["override_present"] is OVERRIDE
     assert info["override_registration"] == lce.override_registration()
     assert no_override["lce_source_md5"] == md5
     assert lce.setup_eager(c) == {"compiled": False}
@@ -234,16 +237,31 @@ def test_verify_raises_when_eligible_but_absent(monkeypatch):
 def test_override_registration(monkeypatch):
     from torch._native import cutedsl_utils as cu
 
-    expected = {"registered": True, "reason": None}
-    if not cu.runtime_available():  # e.g. the CPU wheel of CI
-        expected = {"registered": False, "reason": lce.override_registration()["reason"]}
+    absent = {
+        "present": False,
+        "registered": False,
+        "reason": "the build has no torch._native LCE override",
+    }
+    expected = {"present": True, "registered": True, "reason": None}
+    if not OVERRIDE:  # e.g. torch 2.14.1, the CPU wheel of CI
+        expected = absent
+    elif not cu.runtime_available():
+        expected = {
+            **expected,
+            "registered": False,
+            "reason": lce.override_registration()["reason"],
+        }
         assert expected["reason"].startswith("CuTeDSL runtime not available")
     assert lce.override_registration() == expected
 
+    monkeypatch.setattr(lce, "lce_override_present", lambda: False)
+    monkeypatch.setattr(cu, "runtime_available", lambda: True)
+    assert lce.override_registration() == absent
+    monkeypatch.setattr(lce, "lce_override_present", lambda: True)
     monkeypatch.setattr(cu, "runtime_available", lambda: True)
     monkeypatch.setattr(cu, "check_native_jit_disabled", lambda: False)
     monkeypatch.setattr(cu, "_version_is_ok", lambda: True)
-    assert lce.override_registration() == {"registered": True, "reason": None}
+    assert lce.override_registration() == {"present": True, "registered": True, "reason": None}
     monkeypatch.setattr(cu, "_version_is_ok", lambda: False)
     monkeypatch.setattr(cu, "runtime_version", lambda: "4.5.0")
     assert lce.override_registration()["reason"] == (
@@ -252,6 +270,7 @@ def test_override_registration(monkeypatch):
     )
     monkeypatch.setattr(cu, "check_native_jit_disabled", lambda: True)
     assert lce.override_registration() == {
+        "present": True,
         "registered": False,
         "reason": "disabled by TORCH_DISABLE_NATIVE_JIT=1",
     }
@@ -263,6 +282,7 @@ def test_override_registration(monkeypatch):
 
     monkeypatch.setattr(cu, "runtime_available", broken)
     assert lce.override_registration() == {
+        "present": True,
         "registered": None,
         "reason": "cannot tell: RuntimeError: boom",
     }
@@ -271,6 +291,7 @@ def test_override_registration(monkeypatch):
     monkeypatch.delattr(torch._native, "cutedsl_utils")
     monkeypatch.setitem(sys.modules, "torch._native.cutedsl_utils", None)
     result = lce.override_registration()
+    assert result["present"] is True
     assert result["registered"] is None
     assert result["reason"].startswith(
         "cannot tell: torch._native.cutedsl_utils: ModuleNotFoundError"
@@ -289,15 +310,48 @@ def test_override_eligible(monkeypatch):
     assert not lce.override_eligible(case("bfloat16", device="cuda"), accurate)
 
 
+def test_override_present(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+
+    on_disk = any(
+        (Path(root) / "_native" / "ops" / "linear_cross_entropy" / "__init__.py").exists()
+        for root in torch.__path__
+    )
+    assert OVERRIDE is on_disk
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    assert lce.lce_override_present() is False
+
+    def no_parent(name):
+        raise ModuleNotFoundError("No module named 'torch._native'")
+
+    monkeypatch.setattr(importlib.util, "find_spec", no_parent)
+    assert lce.lce_override_present() is False
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
+    assert lce.lce_override_present() is True
+
+
 def test_availability(monkeypatch):
     assert lce.lce_available() is True
     assert lce.lce_no_override_available() is True
+    absent = (
+        f"torch {torch.__version__} has no torch._native LCE override "
+        "(torch/_native/ops/linear_cross_entropy)"
+    )
+    assert lce.lce_override_available() == (True if OVERRIDE else absent)
+    assert SPEC.implementation("torch_lce").available is lce.lce_override_available
+    monkeypatch.setattr(lce, "lce_override_present", lambda: False)
+    assert lce.lce_override_available() == absent
+    assert lce.lce_no_override_available() is True
+    monkeypatch.setattr(lce, "lce_override_present", lambda: True)
+    assert lce.lce_override_available() is True
     assert lce.compile_available() is True
     monkeypatch.delattr(torch.nn.functional, "linear_cross_entropy")
     reason = lce.lce_available()
     assert reason.startswith(f"torch {torch.__version__} lacks")
     assert "torch.nn.functional.linear_cross_entropy" in reason
     assert lce.lce_no_override_available() == reason
+    assert lce.lce_override_available() == reason
     monkeypatch.undo()
     import types
 
@@ -346,26 +400,39 @@ def test_through_worker_and_runner(tmp_path):
         (impl, mode) for impl in IMPLS for mode in ("fwd", "fwd_bwd")
     ]
     for record in written:
-        assert record["status"] == "ok", (record["implementation"], record["reason"])
-        assert record["parity"]["status"] == "ok", record["parity"]
         assert record["work"] == {"tokens": 64, "flops": 6 * 64 * 32 * 96}
         assert record["info"]["ignore_index"] == -100
+        if record["implementation"] == "torch_lce" and not OVERRIDE:
+            assert record["status"] == "unavailable"
+            assert "has no torch._native LCE override" in record["reason"]
+            continue
+        assert record["status"] == "ok", (record["implementation"], record["reason"])
+        assert record["parity"]["status"] == "ok", record["parity"]
     by_impl = {r["implementation"]: r for r in written if r["mode"] == "fwd_bwd"}
     assert by_impl["torch_compiled"]["info"]["compiled"] is True
-    assert by_impl["torch_lce"]["verify"] == {
-        "override_ran": False,
-        "override_events": [],
-        "native_events": [],
-    }
-    assert len(by_impl["torch_lce"]["info"]["lce_source_md5"]) == 32
-    assert by_impl["torch_lce_no_override"]["info"]["override_disabled"] == list(lce.OVERRIDE_OPS)
-    for name in ["torch_lce", "torch_lce_no_override"]:
+    no_override = by_impl["torch_lce_no_override"]["info"]
+    assert no_override["override_disabled"] == list(lce.OVERRIDE_OPS)
+    assert no_override["override_present"] is OVERRIDE
+    assert no_override["override_registration"]["present"] is OVERRIDE
+    names = ["torch_lce_no_override"]
+    if OVERRIDE:
+        names.append("torch_lce")
+        assert by_impl["torch_lce"]["verify"] == {
+            "override_ran": False,
+            "override_events": [],
+            "native_events": [],
+        }
+        assert len(by_impl["torch_lce"]["info"]["lce_source_md5"]) == 32
+    for name in names:
         assert set(by_impl[name]["env"]["packages"]) == {"nvidia-cutlass-dsl", "apache-tvm-ffi"}
         assert "override_registration" in by_impl[name]["info"]
     assert len(records.read(tmp_path / "lce" / "cpu")) == 8
 
 
-def test_worker_payload_in_process():
+def test_worker_payload_in_process(monkeypatch):
+    # In process, so the override's presence can be planted: the eager path of
+    # torch_lce runs on CPU whether or not the build has it.
+    monkeypatch.setattr(lce, "lce_override_present", lambda: True)
     c = case("bfloat16", "0.25")
     payload = runner.make_payload(
         SPEC,
@@ -386,7 +453,11 @@ def test_list(capsys):
     assert cli.main(["list", "lce"]) == 0
     out = capsys.readouterr().out
     for name in IMPLS:
-        assert f"  {name}  modes=fwd,fwd_bwd  env=torch  available" in out
+        if name == "torch_lce" and not OVERRIDE:
+            assert f"  {name}  modes=fwd,fwd_bwd  env=torch  unavailable: torch " in out
+            assert "has no torch._native LCE override" in out
+        else:
+            assert f"  {name}  modes=fwd,fwd_bwd  env=torch  available" in out
     assert "default dtypes: bfloat16" in out
     not_checked = "not checked (environment 'liger')"
     assert f"  liger  modes=fwd_bwd  env=liger  {not_checked}" in out

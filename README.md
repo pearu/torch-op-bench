@@ -169,8 +169,8 @@ counterpart:
 |---|---|
 | `torch_eager` | `F.cross_entropy(F.linear(hidden, weight), labels)`; the baseline and the control |
 | `torch_compiled` | the same under `torch.compile(fullgraph=True)` |
-| `torch_lce` | `F.linear_cross_entropy(..., options=LinearCrossEntropyOptions())`, with the `torch._native` (CuTeDSL) override where eligible |
-| `torch_lce_no_override` | the same with the override ops disabled: the eager accumulator |
+| `torch_lce` | `F.linear_cross_entropy(..., options=LinearCrossEntropyOptions())`, with the `torch._native` (CuTeDSL) override where eligible; `unavailable` on a torch without the override (`torch/_native/ops/linear_cross_entropy`): every release up to 2.14.1, the newest on 2026-10-17; nightlies only |
+| `torch_lce_no_override` | the same with the override ops disabled: the eager accumulator; available wherever `F.linear_cross_entropy` is (2.13 on), and `info.override_present` says whether there was an override to disable |
 | `liger` (env `liger`) | Liger-Kernel's `liger_fused_linear_cross_entropy(hidden, weight, labels, ignore_index=-100, reduction="mean", accum_dtype=torch.float32)`, `fwd_bwd` only |
 | `liger_native_accum` (env `liger`) | the same with `accum_dtype=None`, Liger's default: the weight gradient accumulated in the parameter dtype; `fwd_bwd` only |
 | `torch_eager_liger` (env `liger`) | `torch_eager` in the `liger` environment, the control |
@@ -247,10 +247,12 @@ What the records say:
   `torch_lce` fails with an `error` record if the override was eligible (CUDA sm_80+,
   bf16 or fp16, options resolved to `compact` with fp32 accumulation) and did not
   run, and `torch_lce_no_override` fails if it ran. On CPU, below sm_80 or in fp32,
-  `override_ran: false` is simply recorded. The error names why the override was not
-  registered: the CuTeDSL runtime is missing, `TORCH_DISABLE_NATIVE_JIT=1` is set, or
+  `override_ran: false` is simply recorded. On a torch without the override (2.14.1
+  and older), `torch_lce` is `unavailable` with that reason rather than run: it would
+  measure what `torch_lce_no_override` measures, under another name. The error names
+  why a build that has the override did not register it: the CuTeDSL runtime is missing, `TORCH_DISABLE_NATIVE_JIT=1` is set, or
   the `nvidia-cutlass-dsl` version is not known-good. `info.override_registration`
-  records the same, and `env.packages` the versions of `nvidia-cutlass-dsl` and
+  records the same, after `present` (whether the build has the override), and `env.packages` the versions of `nvidia-cutlass-dsl` and
   `apache-tvm-ffi`.
 - `verify.native_events`, on every entry (baselines, controls and counterparts
   alike): every `torch._native` event seen, not only LCE's. With the LCE override
@@ -424,7 +426,7 @@ scripts/remote-run.sh HOST fetch       # 5. results back into results/
   override) or `torch-stable` (`envs/torch-stable.yml`, the PyPI release). Take the
   nightly to measure what torch `main` does now, and the release to measure what
   users have. torch 2.14.1 has `F.linear_cross_entropy` but not its CuTeDSL
-  override, so on sm_80+ `torch_lce` ends in an `error` record there. torch-op-bench
+  override, so `torch_lce` is `unavailable` there. torch-op-bench
   runs from that environment's interpreter, so it is the `torch` environment and
   needs no `--env torch=...`.
 - **`run`** starts `torch-op-bench run lce --device cuda` with `nohup` and
