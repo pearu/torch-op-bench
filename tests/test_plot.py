@@ -763,3 +763,36 @@ def test_ylabels_split_before_parentheses(synth, tmp_path, monkeypatch, kwargs):
         assert_inside(fig, path.name)
         plt.close(fig)
     assert seen and seen <= labels
+
+
+def test_metric_a_mode_lacks(synth, tmp_path, capsys):
+    # R1-21 F1: --metric parity_grad_rel without --mode used to end in a usage error
+    # (an empty log-scale fwd panel) and write nothing. fwd has no gradient errors:
+    # its grid is left out with a warning, fwd_bwd's is drawn.
+    out = tmp_path / "out"
+    argv = ["plot", str(synth), "--out", str(out), "--baseline", "base"]
+    with pytest.warns(UserWarning) as caught:
+        assert cli.main([*argv, "--metric", "parity_grad_rel"]) == 0
+    messages = [str(w.message) for w in caught]
+    for dtype in S.DTYPES:
+        assert f"fwd, {dtype}: no values of parity_grad_rel: left out" in messages
+        assert f"fwd, {dtype}: none of the metrics has values: no grid" in messages
+        assert not (out / f"grid-fwd-{dtype}.png").exists()
+        assert (out / f"ratio-fwd-{dtype}.png").exists()
+        grid = out / f"grid-fwd_bwd-{dtype}.png"
+        assert png_size(grid)[0] > 0
+        assert {r["metric"] for r in read_csv(grid.with_suffix(".csv"))} == {"parity_grad_rel"}
+    assert not any("fwd_bwd" in m and "no values" in m for m in messages)
+    # One metric fwd has, one it lacks: fwd's grid has the one, with a warning.
+    out = tmp_path / "two"
+    argv = ["plot", str(synth), "--out", str(out), "--baseline", "base", "--dtype", "float32"]
+    with pytest.warns(UserWarning) as caught:
+        assert cli.main([*argv, "--metric", "parity_grad_rel,median_ms"]) == 0
+    assert "fwd, float32: no values of parity_grad_rel: left out" in [
+        str(w.message) for w in caught
+    ]
+    assert {r["metric"] for r in read_csv(out / "grid-fwd.csv")} == {"median_ms"}
+    assert {r["metric"] for r in read_csv(out / "grid-fwd_bwd.csv")} == {
+        "parity_grad_rel",
+        "median_ms",
+    }

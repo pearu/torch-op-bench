@@ -562,6 +562,8 @@ def _layout(fig: Any, rect: tuple[float, float, float, float]) -> None:
             if max(abs(a - b) for a, b in zip(positions, previous, strict=True)) < 0.5:
                 return
         previous = positions
+    # The passes ran out with a change (a label just wrapped) no tight_layout has seen.
+    fig.tight_layout(rect=rect, pad=LAYOUT_PAD, h_pad=1.08, w_pad=1.08)
 
 
 def ylabel_text(label: str) -> str:
@@ -680,25 +682,34 @@ def plot(
                 )
                 continue
             chosen = list(metrics) if metrics else default_metrics(selected, m)
+            # --metric is checked against every row; a mode may lack a metric (fwd has
+            # no gradient errors): left out of that mode, said once per mode and dtype.
+            present = set(known_metrics(selected))
+            for metric in [c for c in chosen if c not in present]:
+                warnings.warn(f"{m}, {d}: no values of {metric}: left out", stacklevel=2)
+            chosen = [c for c in chosen if c in present]
+            if not chosen:
+                warnings.warn(f"{m}, {d}: none of the metrics has values: no grid", stacklevel=2)
             suffix = f"{m}-{d}" if len(dtypes) > 1 else m
             scope = [r for axis in axes for r in analysis.sweeps(selected, point)[axis]]
             scope = list({id(r): r for r in scope}.values())
             title = f"{recs[0]['op']} on {recs[0]['device_slug']}: {m}, {d}"
             footer = [left_out(scope, chosen), provenance(selected)]
-            written.append(
-                _figure(
-                    out / f"grid-{suffix}.png",
-                    [(None, selected, None)],
-                    chosen,
-                    axes,
-                    point,
-                    baseline,
-                    title,
-                    footer,
-                    palette=palette,
-                    markers=markers,
+            if chosen:
+                written.append(
+                    _figure(
+                        out / f"grid-{suffix}.png",
+                        [(None, selected, None)],
+                        chosen,
+                        axes,
+                        point,
+                        baseline,
+                        title,
+                        footer,
+                        palette=palette,
+                        markers=markers,
+                    )
                 )
-            )
             ratios = ratio_rows(selected, baseline, axes_all)
             ratio_metrics = ["speedup", "memory_ratio", "time_x_peak_ratio"]
             # Within a case every implementation usually has the same work, so the
@@ -723,7 +734,7 @@ def plot(
                     ratio_line=True,
                 )
             )
-            if overlay is not None:
+            if overlay is not None and chosen:
                 selected_b = analysis.at(rows_b, dtype=d, mode=m)
                 scope_b = [r for axis in axes for r in analysis.sweeps(selected_b, point)[axis]]
                 scope_b = list({id(r): r for r in scope_b}.values())
