@@ -50,6 +50,7 @@ class Settings:
     flush_l2: bool = False
     seed: int = 0
     timeout: float = 600.0
+    matmul_reduction: str = "default"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -796,3 +796,90 @@ def test_metric_a_mode_lacks(synth, tmp_path, capsys):
         "parity_grad_rel",
         "median_ms",
     }
+
+
+def test_reduction_figure(synth, synth_strict, tmp_path):
+    out = tmp_path / "out"
+    written = draw(synth, out, dtype="float32", strict=synth_strict)
+    names = [p.name for p in written]
+    assert names[-2:] == ["reduction-fwd.png", "reduction-fwd_bwd.png"]
+    assert "reduction-fwd.png" not in [p.name for p in draw(synth, tmp_path / "plain")]
+    path = out / "reduction-fwd_bwd.png"
+    assert min(png_size(path)) > 0
+    rows = read_csv(path.with_suffix(".csv"))
+    bars = {(r["metric"], r["implementation"], r["set"]): float(r["y"]) for r in rows}
+    # Per entry a pair of bars, time and the mode's parity metric; compiled is absent
+    # from the strict set: no bars, not a failure.
+    assert {k[1] for k in bars} == {"base", "base_other", "chunked"}
+    t = S.median_ms("base", "fwd_bwd", "float32", S.DEFAULT)
+    assert bars[("median_ms", "base", "default")] == pytest.approx(t)
+    assert bars[("median_ms", "base", "strict")] == pytest.approx(S.STRICT_TIME * t)
+    assert bars[("parity_grad_rel", "base", "default")] == pytest.approx(2e-3)
+    assert bars[("parity_grad_rel", "base", "strict")] == pytest.approx(1e-3)
+    assert {r["metric"] for r in rows} == {"median_ms", "parity_grad_rel"}
+    assert {r["figure"] for r in rows} == {"reduction-fwd_bwd"}
+    roles = {r["implementation"]: r["role"] for r in rows}
+    assert roles == {"base": "baseline", "base_other": "control", "chunked": "counterpart"}
+    assert {r["point"] for r in rows} == {"M=128, K=32, N=16, layout=a"}
+    # fwd: the loss error; base_other is unavailable in the strict fwd float32.
+    fwd = read_csv(out / "reduction-fwd.csv")
+    assert {r["metric"] for r in fwd} == {"median_ms", "parity_loss_rel_err"}
+    assert {r["implementation"] for r in fwd} == {"base"}
+
+
+def test_reduction_figure_with_impl_and_cli(synth, synth_strict, tmp_path):
+    out = tmp_path / "out"
+    argv = ["plot", str(synth), "--out", str(out), "--baseline", "base", "--mode", "fwd_bwd"]
+    argv += ["--dtype", "bfloat16", "--impl", "chunked", "--strict", str(synth_strict)]
+    with pytest.warns(UserWarning, match="different torch-op-bench commits"):
+        assert cli.main(argv) == 0
+    rows = read_csv(out / "reduction-fwd_bwd.csv")
+    assert {r["implementation"] for r in rows} == {"base", "chunked"}
+
+
+def test_reduction_parity():
+    def entry(*names):
+        return {"parity": {name: {} for name in names}}
+
+    assert plot.reduction_parity(
+        [entry("loss_rel_err"), entry("grad_hidden_rel_l2")], "fwd_bwd"
+    ) == ("grad_hidden_rel_l2")
+    assert plot.reduction_parity([entry("b", "a")], "fwd_bwd") == "a"
+    assert plot.reduction_parity([entry()], "fwd") is None
+
+
+def test_metric_only_away_from_the_sweeps(synth, tmp_path):
+    # R1-22 R1: a parity metric present only in rows the grid does not draw (away from
+    # the sweeps around the point) is not a metric of the grid: no empty log panel.
+    from torch_op_bench import records
+
+    away = {**S.DEFAULT, "M": 64, "K": 16}  # two axes off the point: in no sweep
+    recs = [r for r in records.read(synth) if r["status"] == "ok"]
+    planted = next(r for r in recs if r["implementation"] == "base" and r["mode"] == "fwd")
+    planted = {
+        **planted,
+        "case": {**planted["case"], "params": away},
+        "case_key": "away",
+        "parity": {**planted["parity"], "metrics": {"loss_rel_err": 1e-3, "away_err": 0.1}},
+    }
+    target = tmp_path / "results" / "synth" / S.SLUG / "x-host-a.jsonl"
+    for record in recs:
+        records.append(target, record)
+    records.append(target, planted)
+    with pytest.warns(UserWarning, match="different torch-op-bench commits"):
+        rows = analysis.to_rows(analysis.load(tmp_path / "results"))
+    assert "parity_away_err" in plot.known_metrics(rows)  # present in the records
+    out = tmp_path / "out"
+    with pytest.warns(UserWarning) as caught:
+        plot.plot(
+            tmp_path / "results",
+            out,
+            baseline="base",
+            dtype=planted["case"]["dtype"],
+            mode="fwd",
+            metrics=["median_ms", "parity_away_err"],
+        )
+    messages = [str(w.message) for w in caught]
+    assert f"fwd, {planted['case']['dtype']}: no values of parity_away_err: left out" in messages
+    grid = read_csv(out / "grid-fwd.csv")
+    assert {r["metric"] for r in grid} == {"median_ms"}

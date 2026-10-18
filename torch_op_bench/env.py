@@ -106,11 +106,15 @@ def _without_credentials(url: str) -> str:
 
 # The process-wide settings that choose how matmuls round: they change the results
 # (and so parity) of the same code. Read as the process has them when the record is
-# made, i.e. after the implementation ran; None for a setting this torch lacks.
+# made, i.e. after the implementation ran; None for a setting this torch lacks. On
+# builds whose reduced-precision flags are pairs ``(reduced_precision, split_k)``,
+# the flag reads back as its first element and ``<flag>_split_k`` as its second.
 MATMUL_FLAGS = (
     "allow_tf32",
     "allow_bf16_reduced_precision_reduction",
     "allow_fp16_reduced_precision_reduction",
+    "allow_bf16_reduced_precision_reduction_split_k",
+    "allow_fp16_reduced_precision_reduction_split_k",
     "fp32_precision",
 )
 

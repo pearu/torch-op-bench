@@ -228,3 +228,55 @@ def test_default_point_without_spec():
     assert found == {"source": "--point", "params": {"A": 1, "B": 3}}
     recs = [rec(A=1, L="x")]
     assert analysis.default_point(recs, point={"L": "y"})["params"] == {"A": 1, "L": "y"}
+
+
+def test_reduction_setting():
+    def rec(**matmul):
+        return {"env": {"torch": {"matmul": matmul}}}
+
+    on = {"allow_bf16_reduced_precision_reduction": True}
+    on["allow_fp16_reduced_precision_reduction"] = True
+    off = {k: False for k in on}
+    assert analysis.reduction_setting(rec(**on)) == "default"
+    assert analysis.reduction_setting(rec(**off)) == "strict"
+    split_k = {f"{k}_split_k": True for k in on}
+    assert analysis.reduction_setting(rec(**off, **split_k)) == "strict"
+    assert analysis.reduction_setting(rec(**on, **split_k)) == "default"
+    no_split_k = {f"{k}_split_k": False for k in on}
+    assert analysis.reduction_setting(rec(**off, **no_split_k)) == "other"
+    mixed = {**on, "allow_fp16_reduced_precision_reduction": False}
+    assert analysis.reduction_setting(rec(**mixed)) == "other"
+    assert analysis.reduction_setting(rec(allow_tf32=False)) == "other"
+    assert analysis.reduction_setting({"env": None}) is None  # written by the runner
+    recs = [rec(**on), rec(**off), {"env": None}]
+    assert analysis.reduction_mismatches(recs, "default") == [recs[1]]
+
+
+def test_reduction_rows():
+    def rec(impl, median, grad, status="ok"):
+        return {
+            "implementation": impl,
+            "mode": "fwd_bwd",
+            "case": {"params": {"N": 1}, "dtype": "bfloat16", "device": "cuda:0"},
+            "status": status,
+            "times_ms": [median] if status == "ok" else None,
+            "parity": {"metrics": {"grad": grad}} if status == "ok" else None,
+            "info": {"op_decisions": {"x": impl}} if impl == "lce" else {},
+        }
+
+    default = [rec("base", 1.0, 2e-3), rec("lce", 2.0, 1e-3), rec("zero", 1.0, 1e-3)]
+    default.append(rec("away", 1.0, 1e-3) | {"case": {"params": {"N": 2}, "dtype": "bfloat16"}})
+    strict = [rec("base", 1.5, 1e-3), rec("lce", 2.0, 1e-3), rec("zero", 1.0, 0.0)]
+    strict.append(rec("gone", 1.0, 1e-3, status="unavailable"))
+    found = {e["implementation"]: e for e in analysis.reduction_rows(default, strict, {"N": 1})}
+    assert list(found) == ["base", "lce", "zero", "gone"]  # "away" is not at the point
+    base = found["base"]
+    assert base["measured"] and base["time_ratio"] == 1.5
+    assert base["parity"] == {"grad": {"default": 2e-3, "strict": 1e-3, "ratio": 2.0}}
+    assert base["moves"] == ["grad"]
+    assert found["lce"]["moves"] == [] and found["lce"]["parity"]["grad"]["ratio"] == 1.0
+    assert found["lce"]["op_decisions"] == [{"x": "lce"}, {"x": "lce"}]
+    assert found["zero"]["parity"]["grad"]["ratio"] is None  # zero strict, nonzero default
+    assert found["zero"]["moves"] == ["grad"]
+    gone = found["gone"]
+    assert not gone["measured"] and gone["default"] is None and gone["time_ratio"] is None

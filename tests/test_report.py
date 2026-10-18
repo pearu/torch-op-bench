@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 import synth_results as S
@@ -406,3 +407,78 @@ def test_per_case_per_dtype_and_mode(synth, tmp_path):
             assert f"### {mode}, bfloat16: {case}\n\nAt {case}.\n" in part
     # The all-pairs line is for when no pair has a sweep.
     assert "No axis varies around the default point in these records" not in part
+
+
+def test_reduction_section(synth, synth_strict):
+    text = make(synth, strict=synth_strict)
+    assert "## Reduction setting" not in make(synth)  # only with --strict
+    part = section(text, "## Reduction setting")
+    # The check: the one strict record with the default setting is named.
+    impl, mode, dtype = S.STRICT_ODD
+    assert (
+        f"**Warning:** 1 record(s) of RESULTS_STRICT do not have the strict setting in "
+        f"`env.torch.matmul`: {impl} {mode} {dtype} M=128, K=32, N=16, layout=a (default)."
+    ) in part
+    assert "of RESULTS do not" not in part
+    bwd = section(part, "### fwd_bwd, float32", "\n### ")
+    header, _, *body = table_rows(bwd)
+    header = cells(header)
+    rows = {cells(line)[0]: dict(zip(header, cells(line), strict=True)) for line in body}
+    assert list(rows) == ["base", "base_other (control of base)", "compiled", "chunked"]
+    base = rows["base"]
+    assert base["time strict / default"] == "1.20"
+    assert base["grad_rel default"] == "0.00200" and base["grad_rel strict"] == "0.00100"
+    assert base["grad_rel default / strict"] == "2.00"
+    assert base["parity moves"] == "yes: grad_rel, loss_rel_err"
+    other = rows["base_other (control of base)"]
+    assert other["grad_rel default / strict"] == "0.952" and other["parity moves"] == "no"
+    assert rows["chunked"]["parity moves"] == "no"
+    # An entry in one directory only, or unavailable in one: "not measured".
+    assert rows["compiled"]["median ms default"] == "not measured (default: ok, strict: absent)"
+    assert rows["chunked"]["op_decisions"] == "default: —; strict: _mm_accumulates_in_fp32=True"
+    assert base["op_decisions"] == "—"
+    # The reading, computed.
+    assert (
+        "Under the defaults, `base_other`, `chunked` have the strict parity (fp32 "
+        "accumulation or no small-M GEMMs); `base` do not. Not compared (not measured in "
+        "both, or no parity): `compiled`."
+    ) in bwd
+    assert "torch LCE: `chunked`'s default parity equals its strict parity." in bwd
+    fwd = section(part, "### fwd, float32", "\n### ")
+    impl, mode, dtype = S.STRICT_UNAVAILABLE
+    assert "not measured (default: ok, strict: unavailable)" in fwd
+    assert "`base_other`, `compiled`." in fwd and "op_decisions" not in fwd
+    assert "torch LCE" not in fwd  # no entry with op_decisions in fwd
+
+
+def test_reduction_section_warns_about_the_default_set(synth, synth_strict):
+    # The strict set as RESULTS and the default one as --strict: every record warned.
+    text = report.report(synth_strict, baseline="base", strict=synth, mode="fwd_bwd")
+    part = section(text, "## Reduction setting")
+    assert "record(s) of RESULTS do not have the default setting" in part
+    assert "record(s) of RESULTS_STRICT do not have the strict setting" in part
+    assert re.search(r" and \d+ more\.", part)  # the names are capped
+    assert "### fwd_bwd, float32" in part  # the section still renders
+
+
+def test_reduction_cli(synth, synth_strict, capsys):
+    argv = ["report", str(synth), "--baseline", "base", "--strict", str(synth_strict)]
+    assert cli.main([*argv, "--dtype", "bfloat16", "--mode", "fwd_bwd"]) == 0
+    out = capsys.readouterr().out
+    assert "## Reduction setting" in out and "### fwd_bwd, bfloat16" in out
+    assert "### fwd_bwd, float32" not in section(out, "## Reduction setting")
+
+
+def test_decisions_text():
+    assert report.decisions_text([None, None]) == "—"
+    pr = {"source": "m", "_mm_fp32_out_available": True, "_mm_accumulates_in_fp32": False}
+    both = "_mm_fp32_out_available=True, _mm_accumulates_in_fp32=False"
+    assert report.decisions_text([pr, dict(pr)]) == both
+    strict = {**pr, "_mm_accumulates_in_fp32": True}
+    assert report.decisions_text([pr, strict]) == (
+        f"default: {both}; strict: _mm_fp32_out_available=True, _mm_accumulates_in_fp32=True"
+    )
+    ctx = {"source": "c", "is_cuda": True, "use_acc_dtype": True, "alloc_x": False}
+    assert report.decisions_text([ctx, ctx]) == "is_cuda=True, use_acc_dtype=True"
+    gone = {"unavailable": "no module"}
+    assert report.decisions_text([gone, gone]) == "unavailable: no module"

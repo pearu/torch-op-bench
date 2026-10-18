@@ -597,6 +597,204 @@ def _fit_ylabels(fig: Any) -> bool:
     return changed
 
 
+# --- the reduction setting --------------------------------------------------------------------
+
+# The strict bar of a pair: the default's colour, hatched.
+STRICT_HATCH = "///"
+REDUCTION_SETS = ("default", "strict")
+
+
+def reduction_parity(entries: Sequence[Mapping[str, Any]], mode: str) -> str | None:
+    """The parity metric of the reduction figure: the mode's default one when an
+    entry has it in both sets, else the first one some entry has; ``None``: none."""
+    names = sorted({name for e in entries for name in e["parity"]})
+    preferred = DEFAULT_PARITY[mode].removeprefix(analysis.PARITY_PREFIX)
+    if preferred in names:
+        return preferred
+    return names[0] if names else None
+
+
+def _reduction_value(entry: Mapping[str, Any], metric: str, which: str) -> float | None:
+    if not entry["measured"]:
+        return None
+    if metric == "median_ms":
+        return entry[f"median_{which}"]
+    value = entry["parity"].get(metric)
+    return None if value is None else value[which]
+
+
+def reduction_figure(
+    path: Path,
+    entries: Sequence[Mapping[str, Any]],
+    metrics: Sequence[str],
+    point: Mapping[str, Any],
+    palette: Mapping[str, str],
+    title: str,
+    footer: Sequence[str],
+    baseline: str,
+) -> Path:
+    """Per entry a pair of bars, default and strict, for each of ``metrics`` (median
+    time, a parity metric) one panel above the other; the CSV holds the bars."""
+    plt = pyplot()
+    from matplotlib.patches import Patch
+
+    names = [e["implementation"] for e in entries]
+    width = max(PANEL_WIDTH * 1.5, 0.6 * len(names) + 1.5)
+    fig, axes = plt.subplots(
+        len(metrics), 1, figsize=(width, PANEL_HEIGHT * len(metrics)), squeeze=False, sharex=True
+    )
+    plotted = []
+    xs = list(range(len(names)))
+    for ax, metric in zip((row[0] for row in axes), metrics, strict=True):
+        parity = metric != "median_ms"
+        for x, entry in zip(xs, entries, strict=True):
+            color = palette.get(entry["implementation"], "#7f7f7f")
+            for offset, which in zip((-0.2, 0.2), REDUCTION_SETS, strict=True):
+                y = _reduction_value(entry, metric, which)
+                if y is None or (parity and y <= 0):
+                    continue  # nothing to draw (on a log axis, nor a zero)
+                strict_bar = which == "strict"
+                ax.bar(
+                    x + offset,
+                    y,
+                    width=0.4,
+                    color="white" if strict_bar else color,
+                    edgecolor=color,
+                    hatch=STRICT_HATCH if strict_bar else None,
+                )
+                row = entry[which]
+                plotted.append(
+                    {
+                        "figure": path.stem,
+                        "set": which,
+                        "metric": metric if not parity else analysis.PARITY_PREFIX + metric,
+                        "axis": "implementation",
+                        "x": entry["implementation"],
+                        "implementation": entry["implementation"],
+                        "env_name": row.get("env_name"),
+                        "role": role_of(row, entry["implementation"], baseline),
+                        "y": y,
+                        "parity_status": row.get("parity_status"),
+                        "parity_fail": row.get("parity_status") == "fail",
+                        "dtype": entry["dtype"],
+                        "mode": entry["mode"],
+                        "point": analysis.point_text(point),
+                        "work": work_text(row),
+                        "baseline_work": None,
+                    }
+                )
+        label = METRIC_LABELS.get(metric, metric) if not parity else metric
+        ax.set_ylabel(ylabel_text(label))
+        if parity:
+            ax.set_yscale("log")
+        ax.grid(True, axis="y", alpha=0.3)
+    bottom = axes[-1][0]
+    bottom.set_xticks(xs)
+    bottom.set_xticklabels(
+        [
+            n if e["measured"] else f"{n} (not measured)"
+            for n, e in zip(names, entries, strict=True)
+        ],
+        rotation=45,
+        ha="right",
+    )
+    handles = [
+        Patch(facecolor="#7f7f7f", edgecolor="#7f7f7f", label="default"),
+        Patch(facecolor="white", edgecolor="#7f7f7f", hatch=STRICT_HATCH, label="strict"),
+    ]
+    # Bands, top to bottom, as in _figure: title, legend, panels (with their tick
+    # labels), footer, each as high as its text, measured.
+    title_lines = textwrap.wrap(title, int(width * TITLE_CHARS_PER_INCH), break_on_hyphens=False)
+    title_text = fig.text(0.5, 1, "\n".join(title_lines), ha="center", va="top", fontsize="large")
+    legend = fig.legend(
+        handles=handles, loc="upper center", ncol=2, borderaxespad=0, fontsize="small"
+    )
+    lines = [
+        part
+        for line in footer
+        for part in textwrap.wrap(line, int(width * 17), break_on_hyphens=False)
+    ]
+    footer_text = fig.text(0.01, 0, "\n".join(lines), ha="left", va="bottom", fontsize="x-small")
+    renderer = fig.canvas.get_renderer()
+
+    def inches(artist: Any) -> float:
+        return artist.get_window_extent(renderer).height / fig.dpi
+
+    title_h, legend_h, footer_h = inches(title_text), inches(legend), inches(footer_text)
+    labels_h = max(inches(label) for label in bottom.get_xticklabels())
+    height = (
+        MARGIN + title_h + GAP + legend_h + PANEL_HEIGHT * len(metrics) + labels_h + footer_h
+    ) + MARGIN
+    fig.set_size_inches(width, height)
+    title_text.set_y(1 - MARGIN / height)
+    legend.set_bbox_to_anchor((0.5, 1 - (MARGIN + title_h + GAP) / height), fig.transFigure)
+    footer_text.set_y(MARGIN / height)
+    top = 1 - (MARGIN + title_h + GAP + legend_h) / height
+    _layout(fig, (0, (MARGIN + footer_h) / height, 1, top))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=DPI)
+    plt.close(fig)
+    with path.with_suffix(".csv").open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        writer.writeheader()
+        writer.writerows(plotted)
+    return path
+
+
+def plot_reduction(
+    recs: Sequence[Mapping[str, Any]],
+    recs_strict: Sequence[Mapping[str, Any]],
+    out: Path,
+    point: Mapping[str, Any],
+    baseline: str,
+    palette: Mapping[str, str],
+    *,
+    dtypes: Sequence[str],
+    modes: Sequence[str],
+    impls: Sequence[str] | None = None,
+) -> list[Path]:
+    """``reduction-<mode>[-<dtype>].png`` per dtype and mode with entries."""
+    entries = analysis.reduction_rows(recs, recs_strict, point, baseline=baseline)
+    if impls:
+        keep = set(impls) | {baseline}
+        entries = [e for e in entries if e["implementation"] in keep]
+    rows = analysis.to_rows(recs)
+    rows_strict = analysis.to_rows(recs_strict)
+    footer = [
+        f"strict: no reduced-precision reduction in bf16/fp16 GEMMs (hatched); "
+        f"at {analysis.point_text(point)}",
+        provenance(rows, "default"),
+        provenance(rows_strict, "strict"),
+    ]
+    for label, these, expected in (("default", recs, "default"), ("strict", recs_strict, "strict")):
+        odd = analysis.reduction_mismatches(these, expected)
+        if odd:
+            footer.append(f"Warning: {len(odd)} record(s) of the {label} set have another setting.")
+    written = []
+    for d in dtypes:
+        for m in modes:
+            selected = [e for e in entries if e["dtype"] == d and e["mode"] == m]
+            if not selected:
+                continue
+            parity = reduction_parity(selected, m)
+            metrics = ["median_ms", *([parity] if parity else [])]
+            suffix = f"{m}-{d}" if len(dtypes) > 1 else m
+            title = f"{recs[0]['op']} on {recs[0]['device_slug']}: {m}, {d}: default against strict"
+            written.append(
+                reduction_figure(
+                    out / f"reduction-{suffix}.png",
+                    selected,
+                    metrics,
+                    point,
+                    palette,
+                    title,
+                    footer,
+                    baseline,
+                )
+            )
+    return written
+
+
 # --- the command -----------------------------------------------------------------------------
 
 
@@ -638,9 +836,12 @@ def plot(
     impls: Sequence[str] | None = None,
     overlay: str | Path | None = None,
     labels: tuple[str, str] = ("A", "B"),
+    strict: str | Path | None = None,
 ) -> list[Path]:
-    """Write the figures and their CSV sidecars under ``out_dir``; return the PNGs."""
+    """Write the figures and their CSV sidecars under ``out_dir``; return the PNGs.
+    With ``strict`` (a strict run's results), the reduction figures too."""
     recs = _load(results_dir, op, device_slug)
+    recs_strict = [] if strict is None else _load(strict, recs[0]["op"], recs[0]["device_slug"])
     rows = analysis.to_rows(recs)
     axes_all = analysis.axes_of(recs)
     point = analysis.default_point(recs, point=point)["params"]
@@ -651,7 +852,8 @@ def plot(
     # One palette for every figure of this invocation, from a stable order, before
     # --impl narrows the rows: an implementation's colour does not depend on what
     # else is drawn.
-    palette = colors(rows + rows_b, baseline, stable_order(recs))
+    rows_strict = analysis.to_rows(recs_strict) if recs_strict else []
+    palette = colors(rows + rows_b + rows_strict, baseline, stable_order(recs))
     # The controls' markers likewise, from every environment in the records: with
     # --impl, a control keeps the marker its environment has without it (R1-13 F3).
     markers = control_markers(rows + rows_b)
@@ -681,18 +883,20 @@ def plot(
                     stacklevel=2,
                 )
                 continue
-            chosen = list(metrics) if metrics else default_metrics(selected, m)
+            # The rows the grid draws: those of the sweeps around the point.
+            scope = [r for axis in axes for r in analysis.sweeps(selected, point)[axis]]
+            scope = list({id(r): r for r in scope}.values())
+            chosen = list(metrics) if metrics else default_metrics(scope, m)
             # --metric is checked against every row; a mode may lack a metric (fwd has
-            # no gradient errors): left out of that mode, said once per mode and dtype.
-            present = set(known_metrics(selected))
+            # no gradient errors), or have it only away from the sweeps (R1-22 R1): left
+            # out of that mode, said once per mode and dtype.
+            present = set(known_metrics(scope))
             for metric in [c for c in chosen if c not in present]:
                 warnings.warn(f"{m}, {d}: no values of {metric}: left out", stacklevel=2)
             chosen = [c for c in chosen if c in present]
             if not chosen:
                 warnings.warn(f"{m}, {d}: none of the metrics has values: no grid", stacklevel=2)
             suffix = f"{m}-{d}" if len(dtypes) > 1 else m
-            scope = [r for axis in axes for r in analysis.sweeps(selected, point)[axis]]
-            scope = list({id(r): r for r in scope}.values())
             title = f"{recs[0]['op']} on {recs[0]['device_slug']}: {m}, {d}"
             footer = [left_out(scope, chosen), provenance(selected)]
             if chosen:
@@ -761,4 +965,16 @@ def plot(
                         markers=markers,
                     )
                 )
+    if strict is not None:
+        written += plot_reduction(
+            recs,
+            recs_strict,
+            out,
+            point,
+            baseline,
+            palette,
+            dtypes=dtypes,
+            modes=modes,
+            impls=impls,
+        )
     return written

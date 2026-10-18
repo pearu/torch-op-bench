@@ -38,3 +38,13 @@ def synth(tmp_path) -> Path:
     root = tmp_path / "results"
     synth_results.write(root)
     return root
+
+
+@pytest.fixture
+def synth_strict(tmp_path) -> Path:
+    """The strict counterpart of ``synth`` (see ``synth_results.write_strict``)."""
+    import synth_results
+
+    root = tmp_path / "results-strict"
+    synth_results.write_strict(root)
+    return root

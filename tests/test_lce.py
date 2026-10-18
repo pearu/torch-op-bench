@@ -167,6 +167,126 @@ def test_setup_records_options_and_source_hash():
     assert lce.setup_compiled(c) == {"compiled": True}
 
 
+def test_op_decisions_of_the_build():
+    # This build's _ChunkContext, for the case: CPU, bf16 accumulated in fp32.
+    decisions = lce.op_decisions(case("bfloat16"))
+    assert decisions["source"] == f"{lce.CHUNK_CONTEXT}.build"
+    assert decisions["is_cuda"] is False and decisions["use_acc_dtype"] is True
+    assert decisions["forward_uses_cuda_out_dtype"] is False
+    assert decisions["acc_dtype"] == "float32" and decisions["dtype"] == "bfloat16"
+    assert not any(name.startswith("compute_") for name in decisions)
+    assert lce.op_decisions(case("float32"))["use_acc_dtype"] is False
+    info = lce.setup_lce(case("bfloat16"))
+    assert info["op_decisions"] == decisions
+    assert lce.setup_lce_no_override(case("bfloat16"))["op_decisions"] == decisions
+
+
+@pytest.mark.cuda
+def test_op_decisions_on_cuda():
+    decisions = lce.op_decisions(case("bfloat16", device="cuda"))
+    assert decisions["is_cuda"] is True and decisions["forward_uses_cuda_out_dtype"] is True
+
+
+def _fake_lce_module(monkeypatch, **attrs):
+    """A fake torch.nn.modules.linear_cross_entropy holding ``attrs``."""
+    import types
+
+    module = types.ModuleType(lce.CHUNK_CONTEXT.rpartition(".")[0])
+    for name, value in attrs.items():
+        setattr(module, name, value)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    return module
+
+
+def test_op_decisions_of_a_fake_context(monkeypatch):
+    import dataclasses
+    import types
+
+    calls = []
+
+    @dataclasses.dataclass
+    class _ChunkContext:
+        is_cuda: bool
+        acc_dtype: torch.dtype
+        compute_input_grad: bool
+        alloc_weight_grad_chunk: bool  # depends on the gradients asked: left out
+        batch_chunk_size: int  # not a decision: left out
+
+        @classmethod
+        def build(cls, **kwargs):
+            calls.append(kwargs)
+            grads = kwargs["compute_input_grad"]
+            return cls(False, kwargs["acc_dtype"], grads, grads, kwargs["batch_chunk_size"])
+
+    class Options:
+        def _adjust(self, **kwargs):
+            return types.SimpleNamespace(acc_policy="compact", acc_dtype=torch.float32)
+
+    _fake_lce_module(monkeypatch, _ChunkContext=_ChunkContext)
+    monkeypatch.setattr(lce, "_lce_options", Options)
+    c = case("bfloat16", N=4096, H=4096, V=131072)
+    assert lce.op_decisions(c) == {
+        "source": f"{lce.CHUNK_CONTEXT}.build",
+        "is_cuda": False,
+        "acc_dtype": "float32",
+    }
+    assert [k["compute_input_grad"] for k in calls] == [False, True]
+    hidden, weight = calls[0]["input"], calls[0]["linear_weight"]
+    assert hidden.shape == (4096, 4096) and weight.shape == (131072, 4096)
+    assert hidden.stride() == (0, 0) and weight.stride() == (0, 0)  # nothing allocated
+    assert calls[0]["batch_chunk_size"] == 1 and calls[0]["acc_policy"] == "compact"
+
+
+def test_op_decisions_of_the_pr_predicates(monkeypatch):
+    seen = []
+
+    def fp32_out(dtype, device):
+        seen.append((dtype, device))
+        return True
+
+    _fake_lce_module(
+        monkeypatch,
+        _ChunkContext=object,
+        _mm_fp32_out_available=fp32_out,
+        _mm_accumulates_in_fp32=lambda dtype, device: dtype == torch.float32,
+    )
+    assert lce.op_decisions(case("bfloat16")) == {
+        "source": lce.CHUNK_CONTEXT.rpartition(".")[0],
+        "_mm_fp32_out_available": True,
+        "_mm_accumulates_in_fp32": False,
+    }
+    assert seen == [(torch.bfloat16, torch.device("cpu"))]
+    # Only one of them: not the PR's API, so the context is read instead (and fails).
+    _fake_lce_module(monkeypatch, _mm_fp32_out_available=fp32_out)
+    assert "unavailable" in lce.op_decisions(case("bfloat16"))
+
+
+def test_op_decisions_unavailable(monkeypatch):
+    _fake_lce_module(monkeypatch)
+    found = lce.op_decisions(case())
+    assert found == {
+        "unavailable": f"{lce.CHUNK_CONTEXT.rpartition('.')[0]} has neither "
+        f"{', '.join(lce.MM_PREDICATES)} nor _ChunkContext"
+    }
+
+    class Broken:
+        @classmethod
+        def build(cls, **kwargs):
+            raise TypeError("unexpected keyword argument 'linear_bias'")
+
+    _fake_lce_module(monkeypatch, _ChunkContext=Broken)
+    found = lce.op_decisions(case("bfloat16"))
+    assert found["unavailable"].startswith(f"{lce.CHUNK_CONTEXT}.build: TypeError")
+
+    def raising(dtype, device):
+        raise RuntimeError("no device")
+
+    _fake_lce_module(monkeypatch, _mm_fp32_out_available=raising, _mm_accumulates_in_fp32=raising)
+    assert "RuntimeError: no device" in lce.op_decisions(case())["unavailable"]
+    monkeypatch.setitem(sys.modules, lce.CHUNK_CONTEXT.rpartition(".")[0], None)
+    assert "ModuleNotFoundError" in lce.op_decisions(case())["unavailable"]
+
+
 def test_options_unresolved_without_adjust(monkeypatch):
     class Plain:
         acc_policy, acc_dtype, chunking_method, batch_chunk_size = "auto", None, "auto", None

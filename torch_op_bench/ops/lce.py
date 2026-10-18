@@ -455,6 +455,114 @@ def resolved_options(case: Case) -> dict[str, Any]:
     return {**info, "resolved": resolved}
 
 
+# Where torch's LCE keeps its per-call decisions: the eager accumulator's context,
+# built per call from the inputs and the resolved options.
+CHUNK_CONTEXT = "torch.nn.modules.linear_cross_entropy._ChunkContext"
+
+# The capability predicates of PR pytorch#195707 (per the user's review), each of
+# ``(dtype, device)``: whether the GEMMs can write fp32 out, and whether they
+# accumulate in fp32 under the matmul settings in effect. Looked up, never vendored.
+MM_PREDICATES = ("_mm_fp32_out_available", "_mm_accumulates_in_fp32")
+
+
+def _jsonable(value: Any) -> Any:
+    import torch
+
+    if isinstance(value, torch.dtype):
+        return str(value).removeprefix("torch.")
+    if isinstance(value, torch.device):
+        return str(value)
+    return value
+
+
+def _chunk_context_decisions(case: Case, module: Any) -> dict[str, Any]:
+    """The fields of ``_ChunkContext.build`` for the case that do not depend on which
+    gradients are asked: built twice, without and with them, on stride-0 views of
+    the case's shapes and a one-row chunk, so nothing of size N or V x H is allocated.
+    The fields that differ between the two (buffers for the gradients) are left out.
+    """
+    import dataclasses
+
+    import torch
+
+    ctx_cls = module._ChunkContext
+    options = _lce_options()
+    n, h, v = _shape(case)
+    dtype, device = getattr(torch, case.dtype), torch.device(case.device)
+    resolved = options._adjust(
+        num_batches=n, in_features=h, num_classes=v, dtype=dtype, device=device
+    )
+    hidden = torch.zeros((1, 1), dtype=dtype, device=device).expand(n, h)
+    weight = torch.zeros((1, 1), dtype=dtype, device=device).expand(v, h)
+    labels = torch.zeros((1,), dtype=torch.int64, device=device).expand(n)
+    built = []
+    for grads in (False, True):
+        ctx = ctx_cls.build(
+            input=hidden,
+            linear_weight=weight,
+            target=labels,
+            linear_bias=None,
+            weight=None,
+            reduction=CONTRACT["reduction"],
+            ignore_index=IGNORE_INDEX,
+            label_smoothing=CONTRACT["label_smoothing"],
+            batch_chunk_size=1,
+            acc_policy=resolved.acc_policy,
+            acc_dtype=resolved.acc_dtype,
+            compute_input_grad=grads,
+            compute_linear_weight_grad=grads,
+            compute_linear_bias_grad=False,
+        )
+        built.append(
+            {
+                f.name: _jsonable(getattr(ctx, f.name))
+                for f in dataclasses.fields(ctx)
+                if isinstance(getattr(ctx, f.name), (bool, torch.dtype))
+                and not f.name.startswith("compute_")
+            }
+        )
+    without, with_grads = built
+    return {name: value for name, value in without.items() if with_grads.get(name) == value}
+
+
+def op_decisions(case: Case) -> dict[str, Any]:
+    """What torch's LCE decided for the case from what the build exposes (R4).
+
+    The PR's predicates when the build has them, their values for the case's dtype
+    and device under the matmul settings in effect, ``source`` the module they are
+    read from; else the ``_ChunkContext`` decisions (``_chunk_context_decisions``),
+    ``source`` that class; ``{"unavailable": reason}`` when neither is reachable.
+    Read from ``torch.nn.modules.linear_cross_entropy`` only: importing the
+    torch._native module might register the override.
+    """
+    import importlib
+
+    import torch
+
+    module_name, _, class_name = CHUNK_CONTEXT.rpartition(".")
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as exc:
+        return {"unavailable": f"{module_name}: {type(exc).__name__}: {exc}"}
+    dtype, device = getattr(torch, case.dtype), torch.device(case.device)
+    predicates = {name: getattr(module, name, None) for name in MM_PREDICATES}
+    if all(callable(f) for f in predicates.values()):
+        try:
+            values = {name: bool(f(dtype, device)) for name, f in predicates.items()}
+        except Exception as exc:
+            return {"unavailable": f"{module_name} predicates: {type(exc).__name__}: {exc}"}
+        return {"source": module_name, **values}
+    if not hasattr(module, class_name):
+        return {
+            "unavailable": f"{module_name} has neither {', '.join(MM_PREDICATES)} nor {class_name}"
+        }
+    try:
+        decisions = _chunk_context_decisions(case, module)
+    except Exception as exc:
+        return {"unavailable": f"{CHUNK_CONTEXT}.build: {type(exc).__name__}: {exc}"}
+    return {"source": f"{CHUNK_CONTEXT}.build", **decisions}
+
+
 def setup_eager(case: Case) -> dict[str, Any]:
     return {"compiled": False}
 
@@ -535,6 +643,7 @@ def _setup_lce(case: Case) -> dict[str, Any]:
         "compiled": False,
         "options": options,
         "override_registration": registration,
+        "op_decisions": op_decisions(case),
         **lce_source_md5(),
     }
 
