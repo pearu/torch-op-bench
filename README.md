@@ -243,20 +243,21 @@ torch-op-bench run lce --device cuda --env torchtitan=envs/.prefix/torchtitan/bi
 
 What the records say:
 
-- `verify.override_ran`: the profiler saw a `_native::...linear_cross_entropy...` event.
-  `torch_lce` fails with an `error` record if the override was eligible (CUDA sm_80+,
-  bf16 or fp16, options resolved to `compact` with fp32 accumulation) and did not
-  run, and `torch_lce_no_override` fails if it ran. On CPU, below sm_80 or in fp32,
+- `verify.override_ran`: the profiler saw a `_native::...linear_cross_entropy...`
+  event. `torch_lce` fails with an `error` record if the override was eligible (CUDA
+  sm_80+, bf16 or fp16, options resolved to `compact` with fp32 accumulation) and did
+  not run, and `torch_lce_no_override` fails if it ran. On CPU or in fp32,
   `override_ran: false` is simply recorded. On a CUDA device below sm_80 both
   `torch_lce` entries are `unavailable` ("torch's linear_cross_entropy CuTeDSL path
   needs sm_80 or newer; Tesla T4 is sm_75"): there the backward's `torch._native`
-  dispatch fails. On a torch without the override (2.14.1
-  and older), `torch_lce` is `unavailable` with that reason rather than run: it would
-  measure what `torch_lce_no_override` measures, under another name. The error names
-  why a build that has the override did not register it: the CuTeDSL runtime is missing, `TORCH_DISABLE_NATIVE_JIT=1` is set, or
-  the `nvidia-cutlass-dsl` version is not known-good. `info.override_registration`
-  records the same, after `present` (whether the build has the override), and `env.packages` the versions of `nvidia-cutlass-dsl` and
-  `apache-tvm-ffi`.
+  dispatch fails. On a torch without the override (2.14.1 and older), `torch_lce` is
+  `unavailable` with that reason rather than run: it would measure what
+  `torch_lce_no_override` measures, under another name. The error names why a build
+  that has the override did not register it: the CuTeDSL runtime is missing,
+  `TORCH_DISABLE_NATIVE_JIT=1` is set, or the `nvidia-cutlass-dsl` version is not
+  known-good. `info.override_registration` records the same, after `present` (whether
+  the build has the override), and `env.packages` the versions of `nvidia-cutlass-dsl`
+  and `apache-tvm-ffi`.
 - `verify.native_events`, on every entry (baselines, controls and counterparts
   alike): every `torch._native` event seen, not only LCE's. With the LCE override
   disabled, or in fp32, the backward still runs `_native::scatter_add__cutedsl_*`, so
@@ -342,9 +343,10 @@ torch-op-bench commits). Its sections:
 3. **Sweeps**: for each axis varied around the default point, four tables (median,
    peak, time × peak with its ratio to the baseline's in parentheses, parity with
    the failing metrics) with one column per implementation. A cell is `—` when there
-   is no record, or the status when it is not `ok`. When no axis varies around the
-   point (one case, or cases that differ in two axes at once), the default-point
-   table is repeated at every case present instead, one table per case.
+   is no record, or the status when it is not `ok`. For a mode and dtype in which no
+   axis varies around the point (one case, or cases that differ in two axes at
+   once), the default-point table is repeated at every case present instead, one
+   table per case, as `plot` says when it draws nothing for that mode and dtype.
 4. **Environment check**: each control (`torch_eager_<env>`) against its original at
    every point both have, as the time ratio (control / original), the peak
    difference, and the ratio of each parity metric. A time ratio outside [0.95,
