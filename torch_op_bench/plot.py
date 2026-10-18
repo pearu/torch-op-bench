@@ -31,11 +31,13 @@ TITLE_CHARS_PER_INCH = 10
 # The layout, in inches: the margin above the title and below the footer, and the
 # gap between title and legend. Between the legend (or the title) and the first
 # panel, and between the last panel and the footer, the gap is tight_layout's pad,
-# LAYOUT_PAD times the font size (10 pt: 3 pt). A capital letter of the smallest
-# text there (the footer, x-small, 6.9 pt) is about 5 pt high.
+# LAYOUT_PAD times the font size (10 pt: 3 pt). Every such gap is at most a capital
+# letter of the axis font (the tick and axis labels, 10 pt): about 7.3 pt.
 MARGIN = 0.05
 GAP = 3 / 72
 LAYOUT_PAD = 0.3
+# tight_layout passes at most, until the panels stop moving (see _layout).
+LAYOUT_PASSES = 4
 
 # The line styles, by role. The baseline's is fixed here, in every figure, and owes
 # nothing to matplotlib's defaults; a control takes its original's colour.
@@ -523,9 +525,7 @@ def _figure(
         legend.set_bbox_to_anchor((0.5, 1 - (MARGIN + title_h + GAP) / height), fig.transFigure)
     footer_text.set_y(MARGIN / height)
     top = 1 - (MARGIN + title_h + legend_band) / height
-    fig.tight_layout(
-        rect=(0, (MARGIN + footer_h) / height, 1, top), pad=LAYOUT_PAD, h_pad=1.08, w_pad=1.08
-    )
+    _layout(fig, (0, (MARGIN + footer_h) / height, 1, top))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=DPI)
     plt.close(fig)
@@ -534,6 +534,41 @@ def _figure(
         writer.writeheader()
         writer.writerows(plotted)
     return path
+
+
+def _layout(fig: Any, rect: tuple[float, float, float, float]) -> None:
+    """``tight_layout`` into ``rect`` until the panels stop moving.
+
+    One pass is not enough: tight_layout sizes the panels from the tick labels it
+    sees, and a resized panel can get other tick labels ("0.95" for "1.0"), wider
+    ones pushing the y label past the figure's edge. Each pass also wraps a y label
+    longer than its panel, which tight_layout does not count along its length.
+    """
+    previous = None
+    for _ in range(LAYOUT_PASSES):
+        fig.tight_layout(rect=rect, pad=LAYOUT_PAD, h_pad=1.08, w_pad=1.08)
+        fig.canvas.draw()  # the tick labels of the new panel sizes
+        wrapped = _fit_ylabels(fig)
+        positions = [ax.get_position().bounds for ax in fig.axes]
+        if not wrapped and positions == previous:
+            return
+        previous = positions
+
+
+def _fit_ylabels(fig: Any) -> bool:
+    """Wrap each y label that is longer than its panel is high; whether any changed."""
+    renderer = fig.canvas.get_renderer()
+    changed = False
+    for ax in fig.axes:
+        label = ax.yaxis.label
+        text = label.get_text()
+        if not text or label.get_window_extent(renderer).height <= ax.bbox.height:
+            continue
+        words = " ".join(text.split("\n"))
+        lines = text.count("\n") + 2
+        label.set_text("\n".join(textwrap.wrap(words, math.ceil(len(words) / lines) + 1)))
+        changed = True
+    return changed
 
 
 # --- the command -----------------------------------------------------------------------------

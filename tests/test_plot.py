@@ -499,7 +499,7 @@ def cap_height(size):
 
 def rendered_gaps(fig):
     """The white space, in points, between stacked elements, with its bound: a capital
-    letter of the smaller text of the two (the panels' text is their tick labels)."""
+    letter of the axis font (the tick and axis labels), as the user set it (inbox 22)."""
     import matplotlib
 
     renderer = fig.canvas.get_renderer()
@@ -512,21 +512,20 @@ def rendered_gaps(fig):
     last = [ax for ax in fig.axes if bottoms[ax] == min(bottoms.values())]
     panels_top = max(ax.get_tightbbox(renderer).y1 for ax in first)
     panels_bottom = min(ax.get_tightbbox(renderer).y0 for ax in last)
-    panel_text = matplotlib.rcParams["ytick.labelsize"]
+    axis_font = max(
+        FontPropertiesSize(matplotlib.rcParams[name])
+        for name in ("xtick.labelsize", "ytick.labelsize", "axes.labelsize")
+    )
+    bound = cap_height(axis_font)
     box = title.get_window_extent(renderer)
     gaps = {}
-    above, above_size = box.y0, title.get_fontsize()
+    above = box.y0
     if fig.legends:
-        legend = fig.legends[0]
-        size = legend.get_texts()[0].get_fontsize()
-        lbox = legend.get_window_extent(renderer)
-        gaps["title-legend"] = ((box.y0 - lbox.y1) * pt, cap_height(min(above_size, size)))
-        above, above_size = lbox.y0, size
-    bound = cap_height(min(above_size, FontPropertiesSize(panel_text)))
+        lbox = fig.legends[0].get_window_extent(renderer)
+        gaps["title-legend"] = ((box.y0 - lbox.y1) * pt, bound)
+        above = lbox.y0
     gaps["above-panels"] = ((above - panels_top) * pt, bound)
     footer_top = max(t.get_window_extent(renderer).y1 for t in footer)
-    size = min(t.get_fontsize() for t in footer)
-    bound = cap_height(min(size, FontPropertiesSize(panel_text)))
     gaps["panels-footer"] = ((panels_bottom - footer_top) * pt, bound)
     return gaps
 
@@ -567,3 +566,153 @@ def test_gaps_between_bands(synth, tmp_path, monkeypatch, kwargs):
     monkeypatch.undo()
     for fig in closed:
         plt.close(fig)
+
+
+def drawn_texts(fig):
+    """(text, window extent) of every non-empty text the figure draws: tick labels
+    outside the view, which matplotlib keeps but does not draw, are not among them."""
+    from matplotlib.text import Text
+
+    drawn = []
+    draw = Text.draw
+
+    def recording(self, renderer):
+        draw(self, renderer)
+        if self.get_visible() and self.get_text().strip():
+            drawn.append((self.get_text(), self.get_window_extent(renderer)))
+
+    Text.draw = recording
+    try:
+        fig.canvas.draw()
+    finally:
+        Text.draw = draw
+    return drawn
+
+
+def assert_inside(fig, name):
+    page = fig.bbox
+    texts = drawn_texts(fig)
+    assert texts, name
+    for text, box in texts:
+        inside = page.x0 <= box.x0 and box.x1 <= page.x1 and page.y0 <= box.y0 and box.y1 <= page.y1
+        assert inside, (name, text, box, page)
+
+
+def nightly_like_ratios(synth):
+    """Ratio rows of the synthetic set with the nightly's ratios planted along M
+    (I1-6b/nightly, against V): their tick labels widen once the panels are laid
+    out, which pushed the memory ratio's y label past the left edge on dac3e47."""
+    recs = load_quiet(synth)
+    rows = analysis.at(analysis.to_rows(recs), dtype="float32", mode="fwd_bwd")
+    ratios = plot.ratio_rows(rows, "base", analysis.axes_of(recs))
+    planted = {
+        "compiled": ([0.973, 0.869, 0.728], [0.50, 0.416, 0.375], [0.514, 0.48, 0.515]),
+        "chunked": ([0.834, 0.760, 0.660], [0.552, 0.44, 0.386], [0.662, 0.579, 0.585]),
+    }
+    ratios = [r for r in ratios if r["implementation"] in planted]
+    for r in ratios:
+        if (r["K"], r["N"], r["layout"]) == (32, 16, "a"):
+            i = [64, 128, 256].index(r["M"])
+            speedup, memory, product = planted[r["implementation"]]
+            r.update(speedup=speedup[i], memory_ratio=memory[i], time_x_peak_ratio=product[i])
+    return ratios
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"sweep": ["M"]},  # one column: wrapped titles
+        {"sweep": ["M", "K"]},
+        {},  # four columns
+        {"sweep": ["M"], "metrics": ["peak_above_baseline"]},  # one row
+        {"sweep": ["layout"], "metrics": ["parity_grad_rel", "tflops"], "mode": "fwd_bwd"},
+    ],
+    ids=["one-column", "two-columns", "four-columns", "one-row", "str-axis"],
+)
+def test_nothing_clipped(synth, tmp_path, monkeypatch, kwargs):
+    # The user (inbox 22): nothing non-empty may be clipped, in any direction, in
+    # any figure plot writes: every drawn text lies inside the figure.
+    import matplotlib.pyplot as plt
+
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    other = tmp_path / "second"
+    S.write(other)
+    kwargs = {"dtype": "float32", **kwargs}
+    written = draw(synth, tmp_path / "out", overlay=other, **kwargs)
+    assert {p.name.split("-")[0] for p in written} == {"grid", "ratio", "overlay"}
+    monkeypatch.undo()
+    for path, fig in zip(written, closed, strict=True):
+        assert_inside(fig, path.name)
+        plt.close(fig)
+
+
+def test_nothing_clipped_after_relayout(synth, tmp_path, monkeypatch):
+    # The case that clipped on dac3e47: one column, ratios whose tick labels widen
+    # after the first layout pass, long y labels.
+    import matplotlib.pyplot as plt
+
+    closed, close = [], plt.close
+    monkeypatch.setattr(plt, "close", closed.append)
+    path = plot._figure(
+        tmp_path / "ratio.png",
+        [(None, nightly_like_ratios(synth), None)],
+        ["speedup", "memory_ratio", "time_x_peak_ratio"],
+        ["M"],
+        S.DEFAULT,
+        "base",
+        "synth on synthdev: fwd_bwd, float32: against base",
+        ["footer"],
+        ratio_line=True,
+    )
+    monkeypatch.undo()
+    (fig,) = closed
+    assert_inside(fig, path.name)
+    for name, (gap, bound) in rendered_gaps(fig).items():
+        assert -0.5 <= gap <= bound, (name, gap, bound)
+    close(fig)
+
+
+def test_long_ylabel_wraps(tmp_path, monkeypatch):
+    # A y label longer than its panel is wrapped, so it neither runs into the
+    # neighbouring bands nor past the figure.
+    import matplotlib.pyplot as plt
+
+    monkeypatch.setitem(plot.METRIC_LABELS, "median_ms", "a very long label " * 4)
+    rows = [
+        {
+            "implementation": "base",
+            "env_name": "torch",
+            "role": "baseline",
+            "M": m,
+            "median_ms": float(m),
+            "status": "ok",
+            "parity_status": "ok",
+            "dtype": "float32",
+            "mode": "fwd",
+            "K": 32,
+            "N": 16,
+            "layout": "a",
+        }
+        for m in (64, 128, 256)
+    ]
+    closed, close = [], plt.close
+    monkeypatch.setattr(plt, "close", closed.append)
+    plot._figure(
+        tmp_path / "long.png",
+        [(None, rows, None)],
+        ["median_ms"],
+        ["M"],
+        S.DEFAULT,
+        "base",
+        "synth: fwd",
+        ["footer"],
+    )
+    monkeypatch.undo()
+    (fig,) = closed
+    (ax,) = fig.axes
+    renderer = fig.canvas.get_renderer()
+    assert "\n" in ax.yaxis.label.get_text()
+    assert ax.yaxis.label.get_window_extent(renderer).height <= ax.bbox.height
+    assert_inside(fig, "long.png")
+    close(fig)
