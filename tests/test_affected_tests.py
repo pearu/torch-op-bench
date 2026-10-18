@@ -2,6 +2,9 @@
 
 import importlib.util
 import json
+import os
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -207,3 +210,110 @@ def test_command_line(tmp_path):
         text=True,
     )
     assert proc.returncode == 0 and proc.stdout == "all\n"
+
+
+SHELL_SCRIPT = ROOT / "scripts" / "test-affected.sh"
+BASH = shutil.which("bash")
+
+
+def readme_blocks():
+    """The shell blocks of README.md's "Tests" section, as lists of lines."""
+    text = (ROOT / "README.md").read_text()
+    section = text[text.index("\n## Tests\n") :]
+    section = section[: section.index("\n## ", 1)]
+    return [block.splitlines() for block in re.findall(r"```sh\n(.*?)```", section, re.S)]
+
+
+@pytest.fixture
+def checkout(tmp_path):
+    """A repository holding copies of both scripts, on branch `work` from `main`, with
+    the stamp of this interpreter (as `python` on PATH) already written."""
+    root = tmp_path / "checkout"
+    for path in ["envs/liger.yml", "torch_op_bench/plot.py", "pyproject.toml"]:
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text("one\n")
+    (root / "scripts").mkdir()
+    for script in [SCRIPT, SHELL_SCRIPT]:
+        shutil.copy(script, root / "scripts" / script.name)
+    (root / ".gitignore").write_text(".testmondata*\n")
+    git(root, "init", "-q", "-b", "main")
+    git(root, "add", ".")
+    git(root, "commit", "-q", "-m", "init")
+    git(root, "checkout", "-q", "-b", "work")
+    bindir = Path(sys.executable).parent
+    assert (bindir / "python").exists()
+    env = {k: v for k, v in os.environ.items() if k != "PYTHON"}
+    env["PATH"] = f"{bindir}{os.pathsep}{env['PATH']}"
+    subprocess.run(
+        ["python", "scripts/affected-tests.py", "README.md"], cwd=root, env=env, check=True
+    )
+    return root, env
+
+
+def dry_run(checkout, *args):
+    root, env = checkout
+    stamp = (root / ".testmondata.env").read_bytes()
+    proc = subprocess.run(
+        [BASH, str(root / "scripts" / "test-affected.sh"), "--dry-run", *args],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert (root / ".testmondata.env").read_bytes() == stamp
+    assert all(line.startswith("+ ") for line in proc.stdout.splitlines()), proc.stdout
+    return [line[2:] for line in proc.stdout.splitlines()]
+
+
+def test_test_affected_syntax_and_usage():
+    subprocess.run([BASH, "-n", str(SHELL_SCRIPT)], check=True)
+    proc = subprocess.run([BASH, str(SHELL_SCRIPT), "--help"], capture_output=True, text=True)
+    assert proc.returncode == 0 and "--base REF" in proc.stdout and "--dry-run" in proc.stdout
+    for args, message in [(["--base"], "--base needs a value"), (["x"], "unknown argument x")]:
+        proc = subprocess.run([BASH, str(SHELL_SCRIPT), *args], capture_output=True, text=True)
+        assert proc.returncode == 2 and message in proc.stderr
+
+
+def test_test_affected_mapped(checkout):
+    root, _ = checkout
+    (root / "envs/liger.yml").write_text("two\n")
+    commands = dry_run(checkout)
+    assert commands == [
+        "ruff check .",
+        "python -m pytest --testmon",
+        "python -m pytest --testmon-noselect tests/test_envs.py",
+    ]
+    assert commands == readme_blocks()[1]
+    # --base: nothing changed since the uncommitted change, once committed.
+    git(root, "commit", "-q", "-am", "envs")
+    assert dry_run(checkout, "--base", "HEAD") == commands[:2]
+
+
+def test_test_affected_all(checkout):
+    root, _ = checkout
+    (root / "pyproject.toml").write_text("two\n")
+    commands = dry_run(checkout)
+    assert commands == ["ruff check .", "python -m pytest --testmon-noselect"]
+    assert commands == readme_blocks()[2]
+
+
+def test_test_affected_new_environment(checkout):
+    root, _ = checkout
+    (root / ".testmondata.env").write_text("{}\n")
+    assert dry_run(checkout) == ["ruff check .", "python -m pytest --testmon-noselect"]
+
+
+def test_test_affected_testmon_only(checkout):
+    root, _ = checkout
+    (root / "torch_op_bench/plot.py").write_text("two\n")
+    assert dry_run(checkout) == ["ruff check .", "python -m pytest --testmon"]
+
+
+def test_readme_final_run():
+    """The final run: the whole suite through testmon, then CI's own command."""
+    final = readme_blocks()[3]
+    assert final[:2] == ["ruff check .", "pytest --testmon-noselect"]
+    workflow = (ROOT / ".github" / "workflows").glob("*.yml")
+    ci = " ".join(" ".join(path.read_text().split()) for path in workflow)
+    assert f"run: >- {final[2]} " in ci + " "
+    assert "--testmon" not in ci

@@ -480,23 +480,59 @@ scripts/remote-run.sh HOST fetch       # 5. results back into results/
 ```sh
 pip install torch --index-url https://download.pytorch.org/whl/cpu  # if no torch yet
 pip install -e .[dev,plot]
-ruff check .
-pytest --cov=torch_op_bench --cov-report=term-missing
 ```
 
-Tests marked `cuda` run when a CUDA device is present and are skipped otherwise. CI
-runs the CPU tests with a coverage floor. The CUDA test of the Liger entries runs
-once per Liger environment present (`envs/.prefix/liger`, `envs/.prefix/liger-git`,
-or the interpreter in `TOB_LIGER_PYTHON`) and is skipped without one. The torchtitan
-tests (a CPU one and a CUDA one) run the same way, once per torchtitan environment
-present (`envs/.prefix/torchtitan`, `envs/.prefix/torchtitan-git`, or
+While iterating on a change, the implementer and the reviewer run only the tests it
+affects. The full suite, CUDA included, runs once, when the reviewer would accept the
+change with no findings, and CI runs the full CPU suite with the coverage floor on
+every push.
+
+Iterating, `scripts/test-affected.sh [--base REF]` lints, then runs the tests
+`pytest-testmon` selects, then the test files `scripts/affected-tests.py` maps the
+changes since `main` (or REF) to, all in the interpreter `$PYTHON` (default
+`python`); for a change to `envs/` alone, that is
+
+```sh
+ruff check .
+python -m pytest --testmon
+python -m pytest --testmon-noselect tests/test_envs.py
+```
+
+The map covers what testmon cannot see: the code the worker runs in its subprocess,
+the scripts and environment definitions the tests run as files, and the files every
+test depends on (`pyproject.toml` and the shared test helpers), for which it says
+`all`. It also says `all` once for a new interpreter, torch build or GPU, from the
+stamp `.testmondata.env` it keeps beside `.testmondata`. For `all` the script runs
+the whole suite once instead:
+
+```sh
+ruff check .
+python -m pytest --testmon-noselect
+```
+
+The final run, in the interpreter with CUDA and the counterpart environments present:
+the whole suite, which also refreshes testmon's data, then CI's own command.
+
+```sh
+ruff check .
+pytest --testmon-noselect
+pytest --cov=torch_op_bench --cov-report=term-missing --cov-fail-under=90
+```
+
+Tests marked `cuda` run when a CUDA device is present and are skipped otherwise. The
+CUDA test of the Liger entries runs once per Liger environment present
+(`envs/.prefix/liger`, `envs/.prefix/liger-git`, or the interpreter in
+`TOB_LIGER_PYTHON`) and is skipped without one. The torchtitan tests (a CPU one and a
+CUDA one) run the same way, once per torchtitan environment present
+(`envs/.prefix/torchtitan`, `envs/.prefix/torchtitan-git`, or
 `TOB_TORCHTITAN_PYTHON`).
 
 `pytest-testmon` (in `dev`) selects the tests a change affects from the coverage of
 each test it recorded. It does not combine with `pytest-cov` in one run: a run with
-`--testmon` never passes `--cov`, and CI passes `--cov` and never `--testmon`. Its data,
-`.testmondata`, is per interpreter and per checkout: it lives in the checkout root and is
-never shared or committed, so the first run in a fresh copy runs every test.
+`--testmon` never passes `--cov`, and CI passes `--cov` and never `--testmon`. Its
+data, `.testmondata`, is per interpreter and per checkout: it lives in the checkout
+root and is never shared or committed, so the first run in a fresh copy runs every
+test.
 
 ## Licence
 
