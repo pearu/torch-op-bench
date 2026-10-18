@@ -21,5 +21,7 @@ venv/
 .coverage.*
 coverage.xml
 htmlcov/
+# pytest-testmon's data and scripts/affected-tests.py's stamp: per interpreter and checkout.
+.testmondata*
 
 # results/ is tracked: benchmark results are committed.

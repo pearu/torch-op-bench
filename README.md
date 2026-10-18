@@ -492,6 +492,12 @@ tests (a CPU one and a CUDA one) run the same way, once per torchtitan environme
 present (`envs/.prefix/torchtitan`, `envs/.prefix/torchtitan-git`, or
 `TOB_TORCHTITAN_PYTHON`).
 
+`pytest-testmon` (in `dev`) selects the tests a change affects from the coverage of
+each test it recorded. It does not combine with `pytest-cov` in one run: a run with
+`--testmon` never passes `--cov`, and CI passes `--cov` and never `--testmon`. Its data,
+`.testmondata`, is per interpreter and per checkout: it lives in the checkout root and is
+never shared or committed, so the first run in a fresh copy runs every test.
+
 ## Licence
 
 BSD-3-Clause; see `LICENSE`.
