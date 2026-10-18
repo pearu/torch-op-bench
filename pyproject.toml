@@ -17,7 +17,7 @@ dependencies = []
 [project.optional-dependencies]
 # matplotlib only: the reports read records with the standard library, no pandas.
 plot = ["matplotlib"]
-dev = ["pytest", "pytest-cov", "ruff"]
+dev = ["pytest", "pytest-cov", "pytest-testmon>=2.2", "ruff"]
 # Liger in the torch environment itself (§4.2); envs/liger.yml is its own environment.
 liger = ["liger-kernel==0.8.4"]
 # torchtitan in the torch environment itself (§4.2); envs/torchtitan.yml is its own.
