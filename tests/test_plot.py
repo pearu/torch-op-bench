@@ -716,3 +716,50 @@ def test_long_ylabel_wraps(tmp_path, monkeypatch):
     assert ax.yaxis.label.get_window_extent(renderer).height <= ax.bbox.height
     assert_inside(fig, "long.png")
     close(fig)
+
+
+def test_ylabel_text():
+    assert plot.ylabel_text("speedup (baseline / impl time)") == "speedup\n(baseline / impl time)"
+    assert plot.ylabel_text("memory ratio (impl / baseline peak)") == (
+        "memory ratio\n(impl / baseline peak)"
+    )
+    assert plot.ylabel_text("time × peak ratio (impl / baseline)") == (
+        "time × peak ratio\n(impl / baseline)"
+    )
+    assert plot.ylabel_text("median (ms)") == "median\n(ms)"
+    assert plot.ylabel_text("tokens/s") == "tokens/s"
+    assert plot.ylabel_text("grad_rel") == "grad_rel"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"sweep": ["M"]}, {}, {"sweep": ["M"], "metrics": ["median_ms", "tokens_per_s", "tflops"]}],
+    ids=["one-column", "four-columns", "more-metrics"],
+)
+def test_ylabels_split_before_parentheses(synth, tmp_path, monkeypatch, kwargs):
+    # The user (inbox 23): every y label's part in parentheses is on a second line,
+    # always; a label without one stays on one line.
+    import matplotlib.pyplot as plt
+
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    other = tmp_path / "second"
+    S.write(other)
+    written = draw(synth, tmp_path / "out", dtype="float32", overlay=other, **kwargs)
+    assert {p.name.split("-")[0] for p in written} == {"grid", "ratio", "overlay"}
+    monkeypatch.undo()
+    labels = {plot.METRIC_LABELS.get(m, m) for m in plot.METRIC_LABELS}
+    seen = set()
+    for path, fig in zip(written, closed, strict=True):
+        for ax in fig.axes:
+            text = ax.yaxis.label.get_text()
+            source = text.replace("\n", " ")
+            if " (" in source:
+                head, _, tail = source.partition(" (")
+                assert text.split("\n") == [head, f"({tail}"], (path.name, text)
+                seen.add(source)
+            else:
+                assert "\n" not in text, (path.name, text)
+        assert_inside(fig, path.name)
+        plt.close(fig)
+    assert seen and seen <= labels

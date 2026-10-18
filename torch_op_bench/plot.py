@@ -423,7 +423,9 @@ def _draw_panel(
     ax.set_xticks(xs)
     ax.set_xticklabels([str(v) for v in values])
     ax.set_xlabel(axis)
-    ax.set_ylabel(METRIC_LABELS.get(metric, metric.removeprefix(analysis.PARITY_PREFIX)))
+    ax.set_ylabel(
+        ylabel_text(METRIC_LABELS.get(metric, metric.removeprefix(analysis.PARITY_PREFIX)))
+    )
     if metric.startswith(analysis.PARITY_PREFIX):
         ax.set_yscale("log")
     ax.grid(True, alpha=0.3)
@@ -562,8 +564,19 @@ def _layout(fig: Any, rect: tuple[float, float, float, float]) -> None:
         previous = positions
 
 
+def ylabel_text(label: str) -> str:
+    """A y label with its part in parentheses on a second line, e.g. "speedup" over
+    "(baseline / impl time)"; a label without one stays on one line (the user,
+    inbox 23)."""
+    head, sep, tail = label.partition(" (")
+    if not sep or not tail.endswith(")"):
+        return label
+    return f"{head}\n({tail}"
+
+
 def _fit_ylabels(fig: Any) -> bool:
-    """Wrap each y label that is longer than its panel is high; whether any changed."""
+    """Wrap further each y label still longer than its panel is high: its longest
+    line in two, keeping the split before the parentheses; whether any changed."""
     renderer = fig.canvas.get_renderer()
     changed = False
     for ax in fig.axes:
@@ -571,9 +584,13 @@ def _fit_ylabels(fig: Any) -> bool:
         text = label.get_text()
         if not text or label.get_window_extent(renderer).height <= ax.bbox.height:
             continue
-        words = " ".join(text.split("\n"))
-        lines = text.count("\n") + 2
-        label.set_text("\n".join(textwrap.wrap(words, math.ceil(len(words) / lines) + 1)))
+        lines = text.split("\n")
+        longest = max(range(len(lines)), key=lambda i: len(lines[i]))
+        parts = textwrap.wrap(lines[longest], math.ceil(len(lines[longest]) / 2) + 1)
+        if len(parts) < 2:
+            continue  # one word: nothing left to wrap
+        lines[longest : longest + 1] = parts
+        label.set_text("\n".join(lines))
         changed = True
     return changed
 
