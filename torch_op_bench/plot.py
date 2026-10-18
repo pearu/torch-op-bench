@@ -26,6 +26,10 @@ DPI = 150
 # Inches per panel; the bands above and below the panels are sized to their text.
 PANEL_WIDTH, PANEL_HEIGHT = 3.8, 2.8
 MIB = 1024**2
+# The title (suptitle, "large") wraps at this many characters per inch of figure
+# width, each line after the first adding this many inches to the title band.
+TITLE_CHARS_PER_INCH = 10
+TITLE_LINE_HEIGHT = 0.25
 
 # The line styles, by role. The baseline's is fixed here, in every figure, and owes
 # nothing to matplotlib's defaults; a control takes its original's colour.
@@ -467,8 +471,8 @@ def _figure(
                     linestyle=base["linestyle"],
                     linewidth=base["linewidth"],
                 )
-    # Bands in inches, top to bottom: title, legend, panels, footer. The footer wraps
-    # to the figure's width, so the provenance is never cut off.
+    # Bands in inches, top to bottom: title, legend, panels, footer. The title and the
+    # footer wrap to the figure's width, so neither is cut off in a one-column figure.
     columns = max(1, min(4, int(width // 2.2)))
     legend_rows = math.ceil(len(handles) / columns)
     lines = [
@@ -476,11 +480,13 @@ def _figure(
         for line in footer
         for part in textwrap.wrap(line, int(width * 17), break_on_hyphens=False)
     ]
-    title_h, legend_h = 0.45, 0.1 + 0.24 * legend_rows
+    title_lines = textwrap.wrap(title, int(width * TITLE_CHARS_PER_INCH), break_on_hyphens=False)
+    title_h = 0.45 + TITLE_LINE_HEIGHT * (len(title_lines) - 1)
+    legend_h = 0.1 + 0.24 * legend_rows
     footer_h = 0.15 + 0.17 * len(lines)
     height = title_h + legend_h + PANEL_HEIGHT * len(metrics) + footer_h
     fig.set_size_inches(width, height)
-    fig.suptitle(title, y=1 - 0.12 / height, va="top")
+    fig.suptitle("\n".join(title_lines), y=1 - 0.12 / height, va="top")
     if handles:
         fig.legend(
             handles=list(handles.values()),

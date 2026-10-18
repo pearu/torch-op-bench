@@ -432,3 +432,53 @@ def test_markers_independent_of_impl(synth, tmp_path, monkeypatch):
         plot.plot(both, tmp_path / "one", impls=["base_other"], **kwargs)
     assert seen[0] == {"base_alpha": "s", "base_other": "^"}  # all drawn
     assert seen[-1] == {"base_other": "^"}  # alone, the same marker
+
+
+def test_long_title_wraps_in_one_column(synth, tmp_path, monkeypatch):
+    # R1-19 F2: a one-column figure (3.8 in) used to clip its title at both ends.
+    import matplotlib.pyplot as plt
+
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    rows = [r for r in analysis.to_rows(load_quiet(synth)) if r["mode"] == "fwd"]
+    rows = [r for r in rows if r["dtype"] == "float32"]
+    title = "synth on nvidia-geforce-rtx-5060-ti: fwd_bwd, bfloat16: against torch_eager"
+    path = plot._figure(
+        tmp_path / "one.png",
+        [(None, rows, None)],
+        ["median_ms"],
+        ["M"],
+        S.DEFAULT,
+        "base",
+        title,
+        ["footer"],
+    )
+    assert png_size(path)[0] > 0 and path.with_suffix(".csv").exists()
+    (fig,) = closed
+    suptitle = fig._suptitle
+    assert suptitle.get_text().count("\n") >= 1
+    assert suptitle.get_text().replace("\n", " ") == title
+    renderer = fig.canvas.get_renderer()
+    box, page = suptitle.get_window_extent(renderer), fig.bbox
+    assert page.x0 <= box.x0 and box.x1 <= page.x1, (box, page)
+    assert page.y0 <= box.y0 and box.y1 <= page.y1, (box, page)
+    plt.close(fig)
+    # A short title stays on one line.
+    closed.clear()
+    plot._figure(
+        tmp_path / "short.png",
+        [(None, rows, None)],
+        ["median_ms"],
+        ["M"],
+        S.DEFAULT,
+        "base",
+        "synth: fwd",
+        ["footer"],
+    )
+    assert "\n" not in closed[0]._suptitle.get_text()
+    plt.close(closed[0])
+
+
+def load_quiet(synth):
+    with pytest.warns(UserWarning):
+        return analysis.load(synth)
