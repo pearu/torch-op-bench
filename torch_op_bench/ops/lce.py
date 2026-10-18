@@ -524,6 +524,10 @@ def check_device(case: Case) -> None:
 
 def setup_lce(case: Case) -> dict[str, Any]:
     check_device(case)
+    return _setup_lce(case)
+
+
+def _setup_lce(case: Case) -> dict[str, Any]:
     options = resolved_options(case)
     registration = override_registration()
     _STATE.update(case=case, options=options, registration=registration)
@@ -538,13 +542,13 @@ def setup_lce(case: Case) -> dict[str, Any]:
 def setup_lce_no_override(case: Case) -> dict[str, Any]:
     import torch
 
-    check_device(case)  # before the process-wide disabling
+    check_device(case)  # before the process-wide disabling; _setup_lce does not repeat it
 
     # Disabling ops a build does not have raises nothing (torch 2.14.1, 2.16.0a0);
     # override_present tells the reader whether the disabling did anything.
     torch.backends.python_native.disable_operations(*OVERRIDE_OPS)
     return {
-        **setup_lce(case),
+        **_setup_lce(case),
         "override_disabled": list(OVERRIDE_OPS),
         "override_present": lce_override_present(),
     }

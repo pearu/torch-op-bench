@@ -353,6 +353,12 @@ def test_setup_below_sm80_is_unavailable(monkeypatch, name):
         setup(case("bfloat16", device="cuda"))
     assert raised.value.reason == SM75 == str(raised.value)
     assert disabled == []  # refused before the process-wide disabling
+    # One check per setup (R1-19 O3), the one before the disabling.
+    calls = []
+    real = lce.check_device
+    monkeypatch.setattr(lce, "check_device", lambda c: calls.append(c) or real(c))
+    setup(case("bfloat16"))
+    assert len(calls) == 1
     # CPU and sm_80+ pass the check (the rest of setup is tested elsewhere).
     lce.check_device(case("bfloat16"))
     _plant_device(monkeypatch, (8, 0), "NVIDIA A100")
@@ -1020,7 +1026,11 @@ def test_cuda_small_case_through_runner(tmp_path):
 @pytest.mark.cuda
 @pytest.mark.parametrize("name", ["torch_lce", "torch_lce_no_override"])
 def test_cuda_below_sm80_record(monkeypatch, name):
-    # ey has no sub-sm_80 device: the capability is planted, in process.
+    # ey has no sub-sm_80 device: the capability is planted, in process. CUDA is
+    # initialised first: its lazy init reads the capability and warns about the
+    # planted one, which -W error::UserWarning turns into an error when this test
+    # runs alone.
+    torch.cuda.init()
     monkeypatch.setattr(lce, "lce_override_present", lambda: True)
     _plant_device(monkeypatch, (7, 5))
     c = Case({"N": 1024, "H": 1024, "V": 32768, "ignore_frac": "0"}, "bfloat16", "cuda")
