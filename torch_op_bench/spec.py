@@ -97,6 +97,19 @@ class Case:
         return cls(params=dict(data["params"]), dtype=data["dtype"], device=data["device"])
 
 
+class Unavailable(Exception):
+    """Raised by an implementation's ``setup`` when it cannot run the case here.
+
+    E.g. a device its op does not support. The worker records ``unavailable`` with
+    the exception's message as the reason, as for an implementation whose
+    ``available()`` says no; ``error`` stays for failures nobody foresaw.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 def _always_available() -> bool | str:
     return True
 
@@ -117,8 +130,9 @@ class Implementation:
     what it needs itself, so that the spec stays importable without it.
     ``env_vars`` are set in the worker before torch is imported; ``env_name`` names
     the environment (interpreter) the worker runs in. ``setup(case)`` runs once in
-    the worker before anything is measured; it may return a dict of what the
-    implementation only knows at run time (resolved options, a source hash, whether
+    the worker before anything is measured; it raises ``Unavailable`` when the case
+    cannot run here (e.g. on a device the op does not support), and may return a
+    dict of what the implementation only knows at run time (resolved options, a source hash, whether
     it compiled), merged over ``info`` into the record's ``info``. ``verify(fn)`` receives the timed
     zero-argument callable, may run it (e.g. under a profiler) and returns a
     JSON-serialisable dict for the record or ``None``; it raises if the intended

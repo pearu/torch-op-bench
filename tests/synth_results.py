@@ -230,3 +230,21 @@ def write(results_dir: str | Path) -> Path:
     failed["verify"] = None
     records.append(second, failed)
     return first.parent
+
+
+def subset(results_dir: str | Path, out: str | Path, *wheres: dict) -> Path:
+    """The records of ``results_dir`` whose case matches one of ``wheres`` (each
+    completed from the default point), as one file under ``out``; returns ``out``."""
+    import warnings
+
+    from torch_op_bench import analysis
+
+    points = [{**DEFAULT, **where} for where in wheres]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        recs = analysis.load(results_dir)
+    target = Path(out) / "synth" / SLUG / "20261017T120000Z-host-a.jsonl"
+    for record in recs:
+        if record["case"]["params"] in points:
+            records.append(target, {k: v for k, v in record.items() if k != analysis.SOURCE})
+    return Path(out)

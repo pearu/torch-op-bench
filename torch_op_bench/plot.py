@@ -26,6 +26,18 @@ DPI = 150
 # Inches per panel; the bands above and below the panels are sized to their text.
 PANEL_WIDTH, PANEL_HEIGHT = 3.8, 2.8
 MIB = 1024**2
+# The title ("large") wraps at this many characters per inch of figure width.
+TITLE_CHARS_PER_INCH = 10
+# The layout, in inches: the margin above the title and below the footer, and the
+# gap between title and legend. Between the legend (or the title) and the first
+# panel, and between the last panel and the footer, the gap is tight_layout's pad,
+# LAYOUT_PAD times the font size (10 pt: 3 pt). Every such gap is at most a capital
+# letter of the axis font (the tick and axis labels, 10 pt): about 7.3 pt.
+MARGIN = 0.05
+GAP = 3 / 72
+LAYOUT_PAD = 0.3
+# tight_layout passes at most, until the panels stop moving (see _layout).
+LAYOUT_PASSES = 4
 
 # The line styles, by role. The baseline's is fixed here, in every figure, and owes
 # nothing to matplotlib's defaults; a control takes its original's colour.
@@ -63,11 +75,13 @@ METRIC_LABELS = {
     "tflops": "TFLOP/s",
     "peak_above_baseline": "peak above baseline (MiB)",
     "peak_bytes": "peak (MiB)",
+    "time_x_peak": "time × peak (ms·MiB)",
     "speedup": "speedup (baseline / impl time)",
     "memory_ratio": "memory ratio (impl / baseline peak)",
     "throughput_ratio": "throughput ratio (impl / baseline)",
+    "time_x_peak_ratio": "time × peak ratio (impl / baseline)",
 }
-NUMERIC = ("median_ms", "min_ms", "mean_ms", "iqr_ms", "tokens_per_s", "tflops")
+NUMERIC = ("median_ms", "min_ms", "mean_ms", "iqr_ms", "tokens_per_s", "tflops", "time_x_peak")
 MEMORY = ("peak_above_baseline", "peak_bytes")
 DEFAULT_PARITY = {"fwd_bwd": "parity_grad_hidden_rel_l2", "fwd": "parity_loss_rel_err"}
 
@@ -218,7 +232,8 @@ def work_text(row: Row) -> str | None:
 
 
 def ratio_rows(rows: Sequence[Row], baseline: str, axes: Sequence[str]) -> list[Row]:
-    """Each ok row with ``speedup``, ``memory_ratio`` and ``throughput_ratio`` against
+    """Each ok row with ``speedup``, ``memory_ratio``, ``throughput_ratio`` and
+    ``time_x_peak_ratio`` against
     the baseline's ok row at the same point, and both rows' work (``work``,
     ``baseline_work``); the baseline's own rows left out."""
     base = {
@@ -238,6 +253,7 @@ def ratio_rows(rows: Sequence[Row], baseline: str, axes: Sequence[str]) -> list[
                     "speedup": None,
                     "memory_ratio": None,
                     "throughput_ratio": None,
+                    "time_x_peak_ratio": None,
                     "baseline_work": None,
                 }
             )
@@ -250,6 +266,7 @@ def ratio_rows(rows: Sequence[Row], baseline: str, axes: Sequence[str]) -> list[
                     row.get("peak_above_baseline"), ref.get("peak_above_baseline")
                 ),
                 "throughput_ratio": _div(row.get("tokens_per_s"), ref.get("tokens_per_s")),
+                "time_x_peak_ratio": _div(row.get("time_x_peak"), ref.get("time_x_peak")),
                 "baseline_work": work_text(ref),
             }
         )
@@ -406,7 +423,9 @@ def _draw_panel(
     ax.set_xticks(xs)
     ax.set_xticklabels([str(v) for v in values])
     ax.set_xlabel(axis)
-    ax.set_ylabel(METRIC_LABELS.get(metric, metric.removeprefix(analysis.PARITY_PREFIX)))
+    ax.set_ylabel(
+        ylabel_text(METRIC_LABELS.get(metric, metric.removeprefix(analysis.PARITY_PREFIX)))
+    )
     if metric.startswith(analysis.PARITY_PREFIX):
         ax.set_yscale("log")
     ax.grid(True, alpha=0.3)
@@ -462,31 +481,53 @@ def _figure(
                     linestyle=base["linestyle"],
                     linewidth=base["linewidth"],
                 )
-    # Bands in inches, top to bottom: title, legend, panels, footer. The footer wraps
-    # to the figure's width, so the provenance is never cut off.
+    # Bands in inches, top to bottom: title, legend, panels, footer. The title and the
+    # footer wrap to the figure's width, so neither is cut off in a one-column figure.
+    # Each band is as high as its rendered text, measured, and the bands are stacked
+    # with GAP between them, so the white space between title, legend, panels and
+    # footer is at most about the height of a capital letter of that text.
     columns = max(1, min(4, int(width // 2.2)))
-    legend_rows = math.ceil(len(handles) / columns)
     lines = [
         part
         for line in footer
         for part in textwrap.wrap(line, int(width * 17), break_on_hyphens=False)
     ]
-    title_h, legend_h = 0.45, 0.1 + 0.24 * legend_rows
-    footer_h = 0.15 + 0.17 * len(lines)
-    height = title_h + legend_h + PANEL_HEIGHT * len(metrics) + footer_h
-    fig.set_size_inches(width, height)
-    fig.suptitle(title, y=1 - 0.12 / height, va="top")
+    title_lines = textwrap.wrap(title, int(width * TITLE_CHARS_PER_INCH), break_on_hyphens=False)
+    # fig.text, not fig.suptitle: tight_layout makes room for a suptitle on top of
+    # its rect, which would count the title band twice.
+    title_text = fig.text(
+        0.5, 1, "\n".join(title_lines), ha="center", va="top", fontsize="large", gid="title"
+    )
+    legend = None
     if handles:
-        fig.legend(
+        legend = fig.legend(
             handles=list(handles.values()),
             loc="upper center",
             ncol=columns,
-            bbox_to_anchor=(0.5, 1 - title_h / height),
+            bbox_to_anchor=(0.5, 1),
+            borderaxespad=0,
             fontsize="small",
         )
-    for k, line in enumerate(lines):
-        fig.text(0.01, (0.08 + 0.17 * (len(lines) - 1 - k)) / height, line, fontsize="x-small")
-    fig.tight_layout(rect=(0, footer_h / height, 1, 1 - (title_h + legend_h) / height))
+    footer_text = fig.text(
+        0.01, 0, "\n".join(lines), ha="left", va="bottom", fontsize="x-small", gid="footer"
+    )
+    renderer = fig.canvas.get_renderer()
+
+    def inches(artist: Any) -> float:
+        return artist.get_window_extent(renderer).height / fig.dpi if artist else 0.0
+
+    title_h, legend_h, footer_h = inches(title_text), inches(legend), inches(footer_text)
+    legend_band = GAP + legend_h if legend is not None else 0.0  # below the title
+    # tight_layout keeps LAYOUT_PAD (a fraction of the font size) between its rect
+    # and the panels' outer edges (tick labels, axis labels): that is the gap there.
+    height = MARGIN + title_h + legend_band + PANEL_HEIGHT * len(metrics) + footer_h + MARGIN
+    fig.set_size_inches(width, height)
+    title_text.set_y(1 - MARGIN / height)
+    if legend is not None:
+        legend.set_bbox_to_anchor((0.5, 1 - (MARGIN + title_h + GAP) / height), fig.transFigure)
+    footer_text.set_y(MARGIN / height)
+    top = 1 - (MARGIN + title_h + legend_band) / height
+    _layout(fig, (0, (MARGIN + footer_h) / height, 1, top))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=DPI)
     plt.close(fig)
@@ -495,6 +536,65 @@ def _figure(
         writer.writeheader()
         writer.writerows(plotted)
     return path
+
+
+def _layout(fig: Any, rect: tuple[float, float, float, float]) -> None:
+    """``tight_layout`` into ``rect`` until the panels stop moving.
+
+    One pass is not enough: tight_layout sizes the panels from the tick labels it
+    sees, and a resized panel can get other tick labels ("0.95" for "1.0"), wider
+    ones pushing the y label past the figure's edge. Each pass also wraps a y label
+    longer than its panel, which tight_layout does not count along its length.
+    """
+    previous = None
+    for _ in range(LAYOUT_PASSES):
+        fig.tight_layout(rect=rect, pad=LAYOUT_PAD, h_pad=1.08, w_pad=1.08)
+        fig.canvas.draw()  # the tick labels of the new panel sizes
+        wrapped = _fit_ylabels(fig)
+        # In pixels; tight_layout's own rounding moves panels by a fraction of one.
+        width, height = fig.bbox.width, fig.bbox.height
+        positions = [
+            value * size
+            for ax in fig.axes
+            for value, size in zip(ax.get_position().bounds, (width, height) * 2, strict=True)
+        ]
+        if not wrapped and previous is not None:
+            if max(abs(a - b) for a, b in zip(positions, previous, strict=True)) < 0.5:
+                return
+        previous = positions
+    # The passes ran out with a change (a label just wrapped) no tight_layout has seen.
+    fig.tight_layout(rect=rect, pad=LAYOUT_PAD, h_pad=1.08, w_pad=1.08)
+
+
+def ylabel_text(label: str) -> str:
+    """A y label with its part in parentheses on a second line, e.g. "speedup" over
+    "(baseline / impl time)"; a label without one stays on one line (the user,
+    inbox 23)."""
+    head, sep, tail = label.partition(" (")
+    if not sep or not tail.endswith(")"):
+        return label
+    return f"{head}\n({tail}"
+
+
+def _fit_ylabels(fig: Any) -> bool:
+    """Wrap further each y label still longer than its panel is high: its longest
+    line in two, keeping the split before the parentheses; whether any changed."""
+    renderer = fig.canvas.get_renderer()
+    changed = False
+    for ax in fig.axes:
+        label = ax.yaxis.label
+        text = label.get_text()
+        if not text or label.get_window_extent(renderer).height <= ax.bbox.height:
+            continue
+        lines = text.split("\n")
+        longest = max(range(len(lines)), key=lambda i: len(lines[i]))
+        parts = textwrap.wrap(lines[longest], math.ceil(len(lines[longest]) / 2) + 1)
+        if len(parts) < 2:
+            continue  # one word: nothing left to wrap
+        lines[longest : longest + 1] = parts
+        label.set_text("\n".join(lines))
+        changed = True
+    return changed
 
 
 # --- the command -----------------------------------------------------------------------------
@@ -532,6 +632,7 @@ def plot(
     dtype: str | None = None,
     mode: str | None = None,
     baseline: str = "torch_eager",
+    point: Mapping[str, str] | None = None,
     metrics: Sequence[str] | None = None,
     sweep: Sequence[str] | None = None,
     impls: Sequence[str] | None = None,
@@ -542,7 +643,7 @@ def plot(
     recs = _load(results_dir, op, device_slug)
     rows = analysis.to_rows(recs)
     axes_all = analysis.axes_of(recs)
-    point = analysis.default_point(recs)["params"]
+    point = analysis.default_point(recs, point=point)["params"]
     rows_b: list[Row] = []
     if overlay is not None:
         recs_b = _load(overlay, op or recs[0]["op"], device_slug)
@@ -576,32 +677,41 @@ def plot(
             if not axes:
                 warnings.warn(
                     f"{m}, {d}: no axis varies around the default point "
-                    f"{', '.join(f'{k}={v}' for k, v in point.items())}: no figures",
+                    f"{analysis.point_text(point)}: no figures (report has a table per case)",
                     stacklevel=2,
                 )
                 continue
             chosen = list(metrics) if metrics else default_metrics(selected, m)
+            # --metric is checked against every row; a mode may lack a metric (fwd has
+            # no gradient errors): left out of that mode, said once per mode and dtype.
+            present = set(known_metrics(selected))
+            for metric in [c for c in chosen if c not in present]:
+                warnings.warn(f"{m}, {d}: no values of {metric}: left out", stacklevel=2)
+            chosen = [c for c in chosen if c in present]
+            if not chosen:
+                warnings.warn(f"{m}, {d}: none of the metrics has values: no grid", stacklevel=2)
             suffix = f"{m}-{d}" if len(dtypes) > 1 else m
             scope = [r for axis in axes for r in analysis.sweeps(selected, point)[axis]]
             scope = list({id(r): r for r in scope}.values())
             title = f"{recs[0]['op']} on {recs[0]['device_slug']}: {m}, {d}"
             footer = [left_out(scope, chosen), provenance(selected)]
-            written.append(
-                _figure(
-                    out / f"grid-{suffix}.png",
-                    [(None, selected, None)],
-                    chosen,
-                    axes,
-                    point,
-                    baseline,
-                    title,
-                    footer,
-                    palette=palette,
-                    markers=markers,
+            if chosen:
+                written.append(
+                    _figure(
+                        out / f"grid-{suffix}.png",
+                        [(None, selected, None)],
+                        chosen,
+                        axes,
+                        point,
+                        baseline,
+                        title,
+                        footer,
+                        palette=palette,
+                        markers=markers,
+                    )
                 )
-            )
             ratios = ratio_rows(selected, baseline, axes_all)
-            ratio_metrics = ["speedup", "memory_ratio"]
+            ratio_metrics = ["speedup", "memory_ratio", "time_x_peak_ratio"]
             # Within a case every implementation usually has the same work, so the
             # throughput ratio would repeat the speedup (R1-12 R2).
             if work_differs(ratios):
@@ -624,7 +734,7 @@ def plot(
                     ratio_line=True,
                 )
             )
-            if overlay is not None:
+            if overlay is not None and chosen:
                 selected_b = analysis.at(rows_b, dtype=d, mode=m)
                 scope_b = [r for axis in axes for r in analysis.sweeps(selected_b, point)[axis]]
                 scope_b = list({id(r): r for r in scope_b}.values())

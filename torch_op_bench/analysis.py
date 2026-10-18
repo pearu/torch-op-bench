@@ -18,6 +18,8 @@ from . import records
 Record = dict[str, Any]
 Row = dict[str, Any]
 
+MIB = 1024**2
+
 # Where a record came from: the file name, kept beside the record for its host part.
 SOURCE = "_source"
 
@@ -33,6 +35,7 @@ RESULTS = [
     "peak_bytes",
     "baseline_bytes",
     "peak_above_baseline",
+    "time_x_peak",
     "tokens",
     "flops",
     "tokens_per_s",
@@ -203,6 +206,7 @@ def flatten(
     median_s = timing["median"] / 1e3 if timing["median"] else None
     tokens, flops = work.get("tokens"), work.get("flops")
     parity = record.get("parity") or {}
+    above = None if on_cpu or peak is None or baseline is None else peak - baseline
     row.update(
         {
             "status": record.get("status"),
@@ -214,9 +218,8 @@ def flatten(
             "iqr_ms": timing["iqr"],
             "peak_bytes": peak,
             "baseline_bytes": baseline,
-            "peak_above_baseline": (
-                None if on_cpu or peak is None or baseline is None else peak - baseline
-            ),
+            "peak_above_baseline": above,
+            "time_x_peak": time_x_peak(timing["median"], above),
             "tokens": tokens,
             "flops": flops,
             "tokens_per_s": tokens / median_s if tokens is not None and median_s else None,
@@ -253,6 +256,16 @@ def flatten(
     return row
 
 
+def time_x_peak(median_ms: float | None, peak_above_baseline: int | None) -> float | None:
+    """Elapsed time × peak memory, in ms·MiB: the median time and the peak above the
+    process baseline, as the peak columns are. The user's comparison (Statement
+    §6 step 6b): a counterpart that is faster by holding more memory, or smaller by
+    taking longer, does not win on it unless the product drops."""
+    if median_ms is None or peak_above_baseline is None:
+        return None
+    return median_ms * peak_above_baseline / MIB
+
+
 def varying_info(recs: Iterable[Mapping[str, Any]]) -> list[str]:
     """The (dotted) ``info`` keys whose values differ among the ``ok`` records:
     within one implementation or across implementations. A key that some records
@@ -286,22 +299,101 @@ def columns_of(rows: Sequence[Row], axes: Sequence[str], info_keys: Sequence[str
 # --- the default point and the sweeps around it -----------------------------------------
 
 
-def default_point(recs: Sequence[Mapping[str, Any]], spec: Any = None) -> dict[str, Any]:
-    """``{"source": "spec" | "inferred", "params": {axis: value}}``.
+def point_text(params: Mapping[str, Any]) -> str:
+    return ", ".join(f"{name}={value}" for name, value in params.items())
 
-    From the op's ``defaults`` when its spec resolves (here, or given); else the
-    most common value of each axis over the ``ok`` records (ties: the first seen).
+
+def _has_ok(recs: Sequence[Mapping[str, Any]], params: Mapping[str, Any]) -> bool:
+    return any(
+        r.get("status") == "ok"
+        and all(r["case"]["params"].get(name) == value for name, value in params.items())
+        for r in recs
+    )
+
+
+def _inferred(recs: Sequence[Mapping[str, Any]], spec: Any = None) -> dict[str, Any]:
+    """The most common value of each axis over the ``ok`` records (ties: the first
+    seen); when no ``ok`` record is at that combination, the most common case. The
+    axes in the spec's order when it is given."""
+    ok = [r for r in recs if r.get("status") == "ok"] or list(recs)
+    params: dict[str, Any] = {}
+    for name in axes_of(ok, spec, resolve=False):
+        counts = collections.Counter(r["case"]["params"].get(name) for r in ok)
+        params[name] = counts.most_common(1)[0][0]
+    if ok and not _has_ok(recs, params):
+        cases = collections.Counter(json.dumps(r["case"]["params"], sort_keys=True) for r in ok)
+        common = json.loads(cases.most_common(1)[0][0])
+        params = {name: common.get(name) for name in params}
+    return params
+
+
+def default_point(
+    recs: Sequence[Mapping[str, Any]],
+    spec: Any = None,
+    *,
+    point: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """``{"source": ..., "params": {axis: value}}``: the point the report and the
+    figures centre on.
+
+    ``point`` (``--point``, axis to the value as text) wins for the axes it names,
+    ``source`` ``"--point"``. The rest is the op's ``defaults`` when its spec
+    resolves (here, or given) and some ``ok`` record is at them, ``source``
+    ``"spec"``; else the most common value of each axis over the ``ok`` records
+    (ties: the first seen), ``source`` ``"inferred"``, or, when the spec's point has
+    no records, ``"inferred (the spec's default point ... has no records)"``.
     """
     if spec is None and recs:
         spec = spec_of(recs[0])
     if spec is not None:
-        return {"source": "spec", "params": dict(spec.default_point)}
-    ok = [r for r in recs if r.get("status") == "ok"] or list(recs)
-    params: dict[str, Any] = {}
-    for name in axes_of(ok, resolve=False):
-        counts = collections.Counter(r["case"]["params"].get(name) for r in ok)
-        params[name] = counts.most_common(1)[0][0]
-    return {"source": "inferred", "params": params}
+        params = dict(spec.default_point)
+        if _has_ok(recs, params) or not recs:
+            found = {"source": "spec", "params": params}
+        else:
+            found = {
+                "source": (
+                    f"inferred (the spec's default point {point_text(params)} has no records)"
+                ),
+                "params": _inferred(recs, spec),
+            }
+    else:
+        found = {"source": "inferred", "params": _inferred(recs)}
+    if point:
+        params = dict(found["params"])
+        for name, value in point.items():
+            if name not in params:
+                known = ", ".join(params) or "none"
+                raise ValueError(f"--point: unknown axis {name!r}; known: {known}")
+            params[name] = _parse_value(recs, spec, name, value)
+        found = {"source": "--point", "params": params}
+    return found
+
+
+def _parse_value(recs: Sequence[Mapping[str, Any]], spec: Any, name: str, value: str) -> Any:
+    """``value`` in the kind of axis ``name``: the spec's when it resolves, else the
+    kind of the values the records hold."""
+    if spec is not None:
+        for axis in spec.axes:
+            if axis.name == name:
+                return axis.parse(value)
+    seen = [r["case"]["params"].get(name) for r in recs]
+    if seen and all(isinstance(v, int) and not isinstance(v, bool) for v in seen):
+        return int(value)
+    return value
+
+
+def parse_point(text: str | Sequence[str] | None) -> dict[str, str] | None:
+    """``AXIS=VALUE,...`` (repeatable) to ``{axis: value}``, values as text."""
+    if not text:
+        return None
+    parts = [text] if isinstance(text, str) else list(text)
+    found: dict[str, str] = {}
+    for item in (p for part in parts for p in part.split(",")):
+        name, sep, value = item.partition("=")
+        if not sep or not name.strip() or not value.strip():
+            raise ValueError(f"--point: expected AXIS=VALUE, got {item!r}")
+        found[name.strip()] = value.strip()
+    return found
 
 
 def sweeps(rows: Sequence[Row], point: Mapping[str, Any]) -> dict[str, list[Row]]:

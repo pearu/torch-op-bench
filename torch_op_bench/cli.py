@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from . import env, runner
+from . import analysis, env, runner
 from .spec import MODES, OpSpec, resolve_op
 
 
@@ -136,6 +136,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         dtype=args.dtype,
         mode=args.mode,
         baseline=args.baseline,
+        point=analysis.parse_point(args.point),
         command=["torch-op-bench", *args.argv],
     )
     if args.out:
@@ -159,6 +160,7 @@ def cmd_plot(args: argparse.Namespace) -> int:
         dtype=args.dtype,
         mode=args.mode,
         baseline=args.baseline,
+        point=analysis.parse_point(args.point),
         metrics=_split(args.metric),
         sweep=_split(args.sweep),
         impls=_split(args.impl),
@@ -178,6 +180,13 @@ def _selection(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mode", choices=MODES, help="one mode (default: each in turn)")
     parser.add_argument(
         "--baseline", default="torch_eager", help="the implementation others are compared with"
+    )
+    parser.add_argument(
+        "--point",
+        action="append",
+        metavar="AXIS=VALUE,...",
+        help="the point to centre on (default: the op's defaults, or inferred); the axes "
+        "it does not name keep theirs",
     )
 
 

@@ -169,8 +169,8 @@ counterpart:
 |---|---|
 | `torch_eager` | `F.cross_entropy(F.linear(hidden, weight), labels)`; the baseline and the control |
 | `torch_compiled` | the same under `torch.compile(fullgraph=True)` |
-| `torch_lce` | `F.linear_cross_entropy(..., options=LinearCrossEntropyOptions())`, with the `torch._native` (CuTeDSL) override where eligible |
-| `torch_lce_no_override` | the same with the override ops disabled: the eager accumulator |
+| `torch_lce` | `F.linear_cross_entropy(..., options=LinearCrossEntropyOptions())`, with the `torch._native` (CuTeDSL) override where eligible; `unavailable` on a torch without the override (`torch/_native/ops/linear_cross_entropy`): every release up to 2.14.1, the newest on 2026-10-17; nightlies only |
+| `torch_lce_no_override` | the same with the override ops disabled: the eager accumulator; available wherever `F.linear_cross_entropy` is (2.13 on), and `info.override_present` says whether there was an override to disable |
 | `liger` (env `liger`) | Liger-Kernel's `liger_fused_linear_cross_entropy(hidden, weight, labels, ignore_index=-100, reduction="mean", accum_dtype=torch.float32)`, `fwd_bwd` only |
 | `liger_native_accum` (env `liger`) | the same with `accum_dtype=None`, Liger's default: the weight gradient accumulated in the parameter dtype; `fwd_bwd` only |
 | `torch_eager_liger` (env `liger`) | `torch_eager` in the `liger` environment, the control |
@@ -243,15 +243,21 @@ torch-op-bench run lce --device cuda --env torchtitan=envs/.prefix/torchtitan/bi
 
 What the records say:
 
-- `verify.override_ran`: the profiler saw a `_native::...linear_cross_entropy...` event.
-  `torch_lce` fails with an `error` record if the override was eligible (CUDA sm_80+,
-  bf16 or fp16, options resolved to `compact` with fp32 accumulation) and did not
-  run, and `torch_lce_no_override` fails if it ran. On CPU, below sm_80 or in fp32,
-  `override_ran: false` is simply recorded. The error names why the override was not
-  registered: the CuTeDSL runtime is missing, `TORCH_DISABLE_NATIVE_JIT=1` is set, or
-  the `nvidia-cutlass-dsl` version is not known-good. `info.override_registration`
-  records the same, and `env.packages` the versions of `nvidia-cutlass-dsl` and
-  `apache-tvm-ffi`.
+- `verify.override_ran`: the profiler saw a `_native::...linear_cross_entropy...`
+  event. `torch_lce` fails with an `error` record if the override was eligible (CUDA
+  sm_80+, bf16 or fp16, options resolved to `compact` with fp32 accumulation) and did
+  not run, and `torch_lce_no_override` fails if it ran. On CPU or in fp32,
+  `override_ran: false` is simply recorded. On a CUDA device below sm_80 both
+  `torch_lce` entries are `unavailable` ("torch's linear_cross_entropy CuTeDSL path
+  needs sm_80 or newer; Tesla T4 is sm_75"): there the backward's `torch._native`
+  dispatch fails. On a torch without the override (2.14.1 and older), `torch_lce` is
+  `unavailable` with that reason rather than run: it would measure what
+  `torch_lce_no_override` measures, under another name. The error names why a build
+  that has the override did not register it: the CuTeDSL runtime is missing,
+  `TORCH_DISABLE_NATIVE_JIT=1` is set, or the `nvidia-cutlass-dsl` version is not
+  known-good. `info.override_registration` records the same, after `present` (whether
+  the build has the override), and `env.packages` the versions of `nvidia-cutlass-dsl`
+  and `apache-tvm-ffi`.
 - `verify.native_events`, on every entry (baselines, controls and counterparts
   alike): every `torch._native` event seen, not only LCE's. With the LCE override
   disabled, or in fp32, the backward still runs `_native::scatter_add__cutedsl_*`, so
@@ -284,7 +290,7 @@ concatenation; `torch_op_bench.records.read(directory)` reads a tree and
 | `case`, `case_key`, `device_slug` | `{params, dtype, device}` (device normalised: `cuda` is `cuda:0`); its stable key; results subdirectory |
 | `implementation`, `mode`, `env_name`, `python` | what ran, where |
 | `settings` | `warmup`, `repeat`, `flush_l2`, `seed`, `timeout` |
-| `status`, `reason`, `traceback`, `stderr` | `ok`, `unavailable` or `error`, and why |
+| `status`, `reason`, `traceback`, `stderr` | `ok`, `unavailable` or `error`, and why; `unavailable` has two sources, the implementation's `available()` (a package or an API missing) and its `setup` raising `spec.Unavailable` (the case cannot run here, e.g. a device the op does not support), both before anything is timed and without a traceback; `error` is for failures nobody foresaw |
 | `times_ms` | all timing samples, in milliseconds (statistics are derived, `records.stats`) |
 | `memory` | `peak_bytes`, `baseline_bytes` (inputs allocated); `null` on CPU |
 | `parity` | `status` (`ok`, `fail`, `skipped`), `reason`, `metrics`, `tolerances`, `failed` |
@@ -298,7 +304,16 @@ The resume and merge key is (op, device slug, case key, implementation, mode).
 Two commands read a results directory, never an op's code: they work for any op,
 and `report` needs nothing but this package. Each takes `--op` and `--device-slug`
 (required only when the directory holds several), `--dtype` and `--mode` (default:
-each in turn), and `--baseline` (default `torch_eager`).
+each in turn), `--baseline` (default `torch_eager`), and `--point AXIS=VALUE,...`.
+
+The point both centre on is the op's `defaults`. When the op cannot be imported, or
+no `ok` record is at its defaults (a small run of a case or two elsewhere), it is
+inferred: the most common value of each axis over the `ok` records, or the most
+common case when no record is at that combination. The report names the source:
+"The default point is inferred (the spec's default point N=4096, H=4096, V=131072,
+ignore_frac=0 has no records)." `--point` sets it instead, for the axes it names,
+the others keeping theirs, e.g. `--point V=32768` to centre the tables and figures
+on the V=32768 sweep.
 
 ```sh
 torch-op-bench report results --out report.md
@@ -316,17 +331,22 @@ torch-op-bench commits). Its sections:
    12 characters of the commit of a git install), the torch-op-bench commit, and
    the matmul settings. It says so when the commits differ, or when one environment
    holds several builds.
-2. **At the default point** (the op's `defaults`, or the most common value of each
-   axis when the op cannot be imported), per mode and dtype: one row per
+2. **At the default point** (see above), per mode and dtype: one row per
    implementation, the baseline first and each control right after its original,
    with its environment, median and IQR, time against the baseline, tokens/s,
-   TFLOP/s, peak memory above baseline and against the baseline's, parity and its
+   TFLOP/s, peak memory above baseline and against the baseline's, **time × peak**
+   (median ms × peak above baseline in MiB, in ms·MiB) and against the baseline's,
+   parity and its
    metrics, `override_ran`, and each `info` field that differs between records (e.g.
    `torchtitan_api`, `compile`, `accum_dtype`), so a difference cannot hide in
    `info`.
-3. **Sweeps**: for each axis varied around the default point, three tables (median,
-   peak, parity with the failing metrics) with one column per implementation. A cell
-   is `—` when there is no record, or the status when it is not `ok`.
+3. **Sweeps**: for each axis varied around the default point, four tables (median,
+   peak, time × peak with its ratio to the baseline's in parentheses, parity with
+   the failing metrics) with one column per implementation. A cell is `—` when there
+   is no record, or the status when it is not `ok`. For a mode and dtype in which no
+   axis varies around the point (one case, or cases that differ in two axes at
+   once), the default-point table is repeated at every case present instead, one
+   table per case, as `plot` says when it draws nothing for that mode and dtype.
 4. **Environment check**: each control (`torch_eager_<env>`) against its original at
    every point both have, as the time ratio (control / original), the peak
    difference, and the ratio of each parity metric. A time ratio outside [0.95,
@@ -341,6 +361,13 @@ torch-op-bench commits). Its sections:
 
 Numbers have 3 significant digits and memory is in MiB with one decimal.
 
+Time × peak is there because the comparison that matters for a fused kernel is
+elapsed time *and* memory together: a counterpart that is faster by holding more,
+or smaller by taking longer, does not win on it unless the product drops (the
+user's comparison; the other one, time at equal peak memory, needs variants of an
+entry and is not here yet). The environment check still compares time and peak
+separately.
+
 `plot` (`pip install -e .[plot]`; matplotlib, with the Agg backend, so no display
 is needed) writes PNGs at 150 dpi, per mode (and per dtype, as `-<dtype>`, when the
 results hold several):
@@ -348,14 +375,19 @@ results hold several):
 - `grid-<mode>.png`: rows are metrics (by default median time, tokens/s, peak above
   baseline and one parity error, the op's `grad_hidden` or `loss` error when it has
   one), columns are the swept axes (int axes on a log scale);
-- `ratio-<mode>.png`: speedup (baseline time / time) and memory ratio against the
-  baseline, with the baseline as the line at 1. A throughput ratio is drawn only
+- `ratio-<mode>.png`: speedup (baseline time / time), memory ratio and time × peak
+  ratio (`time_x_peak_ratio`, impl / baseline) against the baseline, with the
+  baseline as the line at 1. A throughput ratio is drawn only
   when some implementation's work differs from the baseline's at a point; otherwise
   it is the speedup again;
 - `overlay-<mode>.png`, with `--overlay`: the grid of both directories on the same
   axes, the first solid and the second dashed, e.g. one device under two torch
   builds; its footer counts what each set leaves out, and gives each set's
   provenance, under the labels.
+
+When no axis varies around the point, `plot` draws nothing and says so on stderr,
+once per mode and dtype, and exits 0; the report's per-case tables are then the
+result.
 
 Every figure draws the baseline black, dashed and thick, and a control dotted and
 thin in its original's colour, with one marker per environment, so two controls of
@@ -424,7 +456,7 @@ scripts/remote-run.sh HOST fetch       # 5. results back into results/
   override) or `torch-stable` (`envs/torch-stable.yml`, the PyPI release). Take the
   nightly to measure what torch `main` does now, and the release to measure what
   users have. torch 2.14.1 has `F.linear_cross_entropy` but not its CuTeDSL
-  override, so on sm_80+ `torch_lce` ends in an `error` record there. torch-op-bench
+  override, so `torch_lce` is `unavailable` there. torch-op-bench
   runs from that environment's interpreter, so it is the `torch` environment and
   needs no `--env torch=...`.
 - **`run`** starts `torch-op-bench run lce --device cuda` with `nohup` and

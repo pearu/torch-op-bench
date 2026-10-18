@@ -39,11 +39,11 @@ def test_figures_and_backend(synth, tmp_path):
     import matplotlib
 
     assert matplotlib.get_backend().lower() == "agg"
-    # 4 swept axes x 3.8 in wide; 4 metrics x 2.8 in, plus the title, one legend row
-    # and two footer lines, high; at 150 dpi.
+    # 4 swept axes x 3.8 in wide; 4 metrics x 2.8 in, plus the title, legend and
+    # footer bands (measured: test_gaps_between_bands), high; at 150 dpi.
     width, height = png_size(tmp_path / "out" / "grid-fwd_bwd.png")
     assert width == 4 * 3.8 * 150
-    assert height == round((0.45 + 0.1 + 0.24 + 4 * 2.8 + 0.15 + 2 * 0.17) * 150)
+    assert 4 * 2.8 * 150 < height < (4 * 2.8 + 1.2) * 150
     for path in written:
         assert path.with_suffix(".csv").exists()
 
@@ -83,7 +83,8 @@ def test_ratio_csv(synth, tmp_path):
     rows = read_csv(tmp_path / "ratio-fwd_bwd.csv")
     # Every implementation has the baseline's work at each point: no throughput row,
     # which would repeat the speedup (R1-12 R2).
-    assert list(dict.fromkeys(r["metric"] for r in rows)) == ["speedup", "memory_ratio"]
+    metrics = ["speedup", "memory_ratio", "time_x_peak_ratio"]
+    assert list(dict.fromkeys(r["metric"] for r in rows)) == metrics
     assert all(r["work"] == r["baseline_work"] for r in rows)
     for r in rows:
         params = dict(item.split("=") for item in r["point"].split(", "))
@@ -106,6 +107,16 @@ def test_ratio_csv(synth, tmp_path):
     assert memory[("chunked", "M", "64")] == pytest.approx(0.25)
     expected = 1 + S.PEAK_DEVIATION / S.peak_above("base", {**S.DEFAULT, "M": 256})
     assert memory[("base_other", "M", "256")] == pytest.approx(expected)
+    product = {
+        (r["implementation"], r["axis"], r["x"]): float(r["y"])
+        for r in rows
+        if r["metric"] == "time_x_peak_ratio"
+    }
+    # chunked: twice the time at a quarter of the peak; compiled: half the time.
+    assert product[("chunked", "N", "8")] == pytest.approx(2.0 * 0.25)
+    assert product[("compiled", "M", "64")] == pytest.approx(0.5)
+    assert product[("base_other", "M", "128")] == pytest.approx(S.DEVIATION)
+    assert product[("base_other", "M", "256")] == pytest.approx(expected)
 
 
 def test_dtypes_suffix_and_overlay(synth, tmp_path):
@@ -266,6 +277,26 @@ def test_no_sweep(synth, tmp_path):
     assert any("different torch-op-bench commits" in m for m in messages)
 
 
+def test_without_the_default_point(synth, tmp_path, capsys):
+    # Two cases that differ in two axes (I1-6 on ex): no sweep figure, said per mode
+    # and dtype, and exit code 0.
+    two = S.subset(synth, tmp_path / "two", {"M": 64}, {"K": 16})
+    with pytest.warns(UserWarning) as caught:
+        assert (
+            cli.main(["plot", str(two), "--out", str(tmp_path / "out"), "--baseline", "base"]) == 0
+        )
+    messages = [str(w.message) for w in caught if "no axis varies" in str(w.message)]
+    assert len(messages) == 2 * 2
+    assert all(m.endswith("no figures (report has a table per case)") for m in messages)
+    assert capsys.readouterr().out == ""
+    # --point centres on another point: around K=16 the synthetic set varies K only.
+    written = draw(synth, tmp_path / "point", dtype="float32", mode="fwd_bwd", point={"K": "16"})
+    assert [p.name for p in written] == ["grid-fwd_bwd.png", "ratio-fwd_bwd.png"]
+    rows = read_csv(tmp_path / "point" / "grid-fwd_bwd.csv")
+    assert {r["axis"] for r in rows} == {"K"}
+    assert {r["x"] for r in rows} == {"16", "32"}
+
+
 def test_controls_of_one_original_differ():
     # Two controls of torch_eager in two environments: the same colour and line,
     # so their markers differ (R1-12 F1), one per environment, stable by name.
@@ -401,3 +432,367 @@ def test_markers_independent_of_impl(synth, tmp_path, monkeypatch):
         plot.plot(both, tmp_path / "one", impls=["base_other"], **kwargs)
     assert seen[0] == {"base_alpha": "s", "base_other": "^"}  # all drawn
     assert seen[-1] == {"base_other": "^"}  # alone, the same marker
+
+
+def test_long_title_wraps_in_one_column(synth, tmp_path, monkeypatch):
+    # R1-19 F2: a one-column figure (3.8 in) used to clip its title at both ends.
+    import matplotlib.pyplot as plt
+
+    closed, close = [], plt.close
+    monkeypatch.setattr(plt, "close", closed.append)
+    rows = [r for r in analysis.to_rows(load_quiet(synth)) if r["mode"] == "fwd"]
+    rows = [r for r in rows if r["dtype"] == "float32"]
+    title = "synth on nvidia-geforce-rtx-5060-ti: fwd_bwd, bfloat16: against torch_eager"
+    path = plot._figure(
+        tmp_path / "one.png",
+        [(None, rows, None)],
+        ["median_ms"],
+        ["M"],
+        S.DEFAULT,
+        "base",
+        title,
+        ["footer"],
+    )
+    assert png_size(path)[0] > 0 and path.with_suffix(".csv").exists()
+    (fig,) = closed
+    suptitle = title_artist(fig)
+    assert suptitle.get_text().count("\n") >= 1
+    assert suptitle.get_text().replace("\n", " ") == title
+    renderer = fig.canvas.get_renderer()
+    box, page = suptitle.get_window_extent(renderer), fig.bbox
+    assert page.x0 <= box.x0 and box.x1 <= page.x1, (box, page)
+    assert page.y0 <= box.y0 and box.y1 <= page.y1, (box, page)
+    close(fig)
+    # A short title stays on one line.
+    closed.clear()
+    plot._figure(
+        tmp_path / "short.png",
+        [(None, rows, None)],
+        ["median_ms"],
+        ["M"],
+        S.DEFAULT,
+        "base",
+        "synth: fwd",
+        ["footer"],
+    )
+    assert "\n" not in title_artist(closed[0]).get_text()
+    close(closed[0])
+
+
+def load_quiet(synth):
+    with pytest.warns(UserWarning):
+        return analysis.load(synth)
+
+
+def title_artist(fig):
+    # 8792191 drew the title with fig.suptitle; now it is the text with gid "title".
+    found = [t for t in fig.texts if t.get_gid() == "title"]
+    return found[0] if found else fig._suptitle
+
+
+def cap_height(size):
+    """A capital letter's height, in points, of text of ``size`` (DejaVu Sans: 0.73 em)."""
+    from matplotlib.font_manager import FontProperties
+
+    return 0.73 * FontProperties(size=size).get_size_in_points()
+
+
+def rendered_gaps(fig):
+    """The white space, in points, between stacked elements, with its bound: a capital
+    letter of the axis font (the tick and axis labels), as the user set it (inbox 22)."""
+    import matplotlib
+
+    renderer = fig.canvas.get_renderer()
+    pt = 72 / fig.dpi
+    title = title_artist(fig)
+    footer = [t for t in fig.texts if t is not title]
+    tops = {ax: ax.get_position().y1 for ax in fig.axes}
+    bottoms = {ax: ax.get_position().y0 for ax in fig.axes}
+    first = [ax for ax in fig.axes if tops[ax] == max(tops.values())]
+    last = [ax for ax in fig.axes if bottoms[ax] == min(bottoms.values())]
+    panels_top = max(ax.get_tightbbox(renderer).y1 for ax in first)
+    panels_bottom = min(ax.get_tightbbox(renderer).y0 for ax in last)
+    axis_font = max(
+        FontPropertiesSize(matplotlib.rcParams[name])
+        for name in ("xtick.labelsize", "ytick.labelsize", "axes.labelsize")
+    )
+    bound = cap_height(axis_font)
+    box = title.get_window_extent(renderer)
+    gaps = {}
+    above = box.y0
+    if fig.legends:
+        lbox = fig.legends[0].get_window_extent(renderer)
+        gaps["title-legend"] = ((box.y0 - lbox.y1) * pt, bound)
+        above = lbox.y0
+    gaps["above-panels"] = ((above - panels_top) * pt, bound)
+    footer_top = max(t.get_window_extent(renderer).y1 for t in footer)
+    gaps["panels-footer"] = ((panels_bottom - footer_top) * pt, bound)
+    return gaps
+
+
+def FontPropertiesSize(size):
+    from matplotlib.font_manager import FontProperties
+
+    return FontProperties(size=size).get_size_in_points()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"sweep": ["M"]},  # one column: the title wraps
+        {},  # four columns
+        {"sweep": ["M", "K"], "impls": ["base"]},  # two columns, the baseline alone
+    ],
+    ids=["one-column", "four-columns", "two-columns"],
+)
+def test_gaps_between_bands(synth, tmp_path, monkeypatch, kwargs):
+    # The user (inbox 21): the white space between title, legend and first panel,
+    # and between last panel and footer, is at most about a capital letter's height
+    # of the text around it, in every figure plot writes.
+    import matplotlib.pyplot as plt
+
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    other = tmp_path / "second"
+    S.write(other)
+    written = draw(synth, tmp_path / "out", dtype="float32", overlay=other, **kwargs)
+    assert {p.name.split("-")[0] for p in written} == {"grid", "ratio", "overlay"}
+    assert len(closed) == len(written)
+    for path, fig in zip(written, closed, strict=True):
+        for name, (gap, bound) in rendered_gaps(fig).items():
+            assert -0.5 <= gap <= bound, (path.name, name, gap, bound)
+    if kwargs.get("sweep") == ["M"]:  # the ratio and overlay titles wrap at 3.8 in
+        assert any("\n" in title_artist(fig).get_text() for fig in closed)
+    monkeypatch.undo()
+    for fig in closed:
+        plt.close(fig)
+
+
+def drawn_texts(fig):
+    """(text, window extent) of every non-empty text the figure draws: tick labels
+    outside the view, which matplotlib keeps but does not draw, are not among them."""
+    from matplotlib.text import Text
+
+    drawn = []
+    draw = Text.draw
+
+    def recording(self, renderer):
+        draw(self, renderer)
+        if self.get_visible() and self.get_text().strip():
+            drawn.append((self.get_text(), self.get_window_extent(renderer)))
+
+    Text.draw = recording
+    try:
+        fig.canvas.draw()
+    finally:
+        Text.draw = draw
+    return drawn
+
+
+def assert_inside(fig, name):
+    page = fig.bbox
+    texts = drawn_texts(fig)
+    assert texts, name
+    for text, box in texts:
+        inside = page.x0 <= box.x0 and box.x1 <= page.x1 and page.y0 <= box.y0 and box.y1 <= page.y1
+        assert inside, (name, text, box, page)
+
+
+def nightly_like_ratios(synth):
+    """Ratio rows of the synthetic set with the nightly's ratios planted along M
+    (I1-6b/nightly, against V): their tick labels widen once the panels are laid
+    out, which pushed the memory ratio's y label past the left edge on dac3e47."""
+    recs = load_quiet(synth)
+    rows = analysis.at(analysis.to_rows(recs), dtype="float32", mode="fwd_bwd")
+    ratios = plot.ratio_rows(rows, "base", analysis.axes_of(recs))
+    planted = {
+        "compiled": ([0.973, 0.869, 0.728], [0.50, 0.416, 0.375], [0.514, 0.48, 0.515]),
+        "chunked": ([0.834, 0.760, 0.660], [0.552, 0.44, 0.386], [0.662, 0.579, 0.585]),
+    }
+    ratios = [r for r in ratios if r["implementation"] in planted]
+    for r in ratios:
+        if (r["K"], r["N"], r["layout"]) == (32, 16, "a"):
+            i = [64, 128, 256].index(r["M"])
+            speedup, memory, product = planted[r["implementation"]]
+            r.update(speedup=speedup[i], memory_ratio=memory[i], time_x_peak_ratio=product[i])
+    return ratios
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"sweep": ["M"]},  # one column: wrapped titles
+        {"sweep": ["M", "K"]},
+        {},  # four columns
+        {"sweep": ["M"], "metrics": ["peak_above_baseline"]},  # one row
+        {"sweep": ["layout"], "metrics": ["parity_grad_rel", "tflops"], "mode": "fwd_bwd"},
+    ],
+    ids=["one-column", "two-columns", "four-columns", "one-row", "str-axis"],
+)
+def test_nothing_clipped(synth, tmp_path, monkeypatch, kwargs):
+    # The user (inbox 22): nothing non-empty may be clipped, in any direction, in
+    # any figure plot writes: every drawn text lies inside the figure.
+    import matplotlib.pyplot as plt
+
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    other = tmp_path / "second"
+    S.write(other)
+    kwargs = {"dtype": "float32", **kwargs}
+    written = draw(synth, tmp_path / "out", overlay=other, **kwargs)
+    assert {p.name.split("-")[0] for p in written} == {"grid", "ratio", "overlay"}
+    monkeypatch.undo()
+    for path, fig in zip(written, closed, strict=True):
+        assert_inside(fig, path.name)
+        plt.close(fig)
+
+
+def test_nothing_clipped_after_relayout(synth, tmp_path, monkeypatch):
+    # The case that clipped on dac3e47: one column, ratios whose tick labels widen
+    # after the first layout pass, long y labels.
+    import matplotlib.pyplot as plt
+
+    closed, close = [], plt.close
+    monkeypatch.setattr(plt, "close", closed.append)
+    path = plot._figure(
+        tmp_path / "ratio.png",
+        [(None, nightly_like_ratios(synth), None)],
+        ["speedup", "memory_ratio", "time_x_peak_ratio"],
+        ["M"],
+        S.DEFAULT,
+        "base",
+        "synth on synthdev: fwd_bwd, float32: against base",
+        ["footer"],
+        ratio_line=True,
+    )
+    monkeypatch.undo()
+    (fig,) = closed
+    assert_inside(fig, path.name)
+    for name, (gap, bound) in rendered_gaps(fig).items():
+        assert -0.5 <= gap <= bound, (name, gap, bound)
+    close(fig)
+
+
+def test_long_ylabel_wraps(tmp_path, monkeypatch):
+    # A y label longer than its panel is wrapped, so it neither runs into the
+    # neighbouring bands nor past the figure.
+    import matplotlib.pyplot as plt
+
+    monkeypatch.setitem(plot.METRIC_LABELS, "median_ms", "a very long label " * 4)
+    rows = [
+        {
+            "implementation": "base",
+            "env_name": "torch",
+            "role": "baseline",
+            "M": m,
+            "median_ms": float(m),
+            "status": "ok",
+            "parity_status": "ok",
+            "dtype": "float32",
+            "mode": "fwd",
+            "K": 32,
+            "N": 16,
+            "layout": "a",
+        }
+        for m in (64, 128, 256)
+    ]
+    closed, close = [], plt.close
+    monkeypatch.setattr(plt, "close", closed.append)
+    plot._figure(
+        tmp_path / "long.png",
+        [(None, rows, None)],
+        ["median_ms"],
+        ["M"],
+        S.DEFAULT,
+        "base",
+        "synth: fwd",
+        ["footer"],
+    )
+    monkeypatch.undo()
+    (fig,) = closed
+    (ax,) = fig.axes
+    renderer = fig.canvas.get_renderer()
+    assert "\n" in ax.yaxis.label.get_text()
+    assert ax.yaxis.label.get_window_extent(renderer).height <= ax.bbox.height
+    assert_inside(fig, "long.png")
+    close(fig)
+
+
+def test_ylabel_text():
+    assert plot.ylabel_text("speedup (baseline / impl time)") == "speedup\n(baseline / impl time)"
+    assert plot.ylabel_text("memory ratio (impl / baseline peak)") == (
+        "memory ratio\n(impl / baseline peak)"
+    )
+    assert plot.ylabel_text("time × peak ratio (impl / baseline)") == (
+        "time × peak ratio\n(impl / baseline)"
+    )
+    assert plot.ylabel_text("median (ms)") == "median\n(ms)"
+    assert plot.ylabel_text("tokens/s") == "tokens/s"
+    assert plot.ylabel_text("grad_rel") == "grad_rel"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"sweep": ["M"]}, {}, {"sweep": ["M"], "metrics": ["median_ms", "tokens_per_s", "tflops"]}],
+    ids=["one-column", "four-columns", "more-metrics"],
+)
+def test_ylabels_split_before_parentheses(synth, tmp_path, monkeypatch, kwargs):
+    # The user (inbox 23): every y label's part in parentheses is on a second line,
+    # always; a label without one stays on one line.
+    import matplotlib.pyplot as plt
+
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    other = tmp_path / "second"
+    S.write(other)
+    written = draw(synth, tmp_path / "out", dtype="float32", overlay=other, **kwargs)
+    assert {p.name.split("-")[0] for p in written} == {"grid", "ratio", "overlay"}
+    monkeypatch.undo()
+    labels = {plot.METRIC_LABELS.get(m, m) for m in plot.METRIC_LABELS}
+    seen = set()
+    for path, fig in zip(written, closed, strict=True):
+        for ax in fig.axes:
+            text = ax.yaxis.label.get_text()
+            source = text.replace("\n", " ")
+            if " (" in source:
+                head, _, tail = source.partition(" (")
+                assert text.split("\n") == [head, f"({tail}"], (path.name, text)
+                seen.add(source)
+            else:
+                assert "\n" not in text, (path.name, text)
+        assert_inside(fig, path.name)
+        plt.close(fig)
+    assert seen and seen <= labels
+
+
+def test_metric_a_mode_lacks(synth, tmp_path, capsys):
+    # R1-21 F1: --metric parity_grad_rel without --mode used to end in a usage error
+    # (an empty log-scale fwd panel) and write nothing. fwd has no gradient errors:
+    # its grid is left out with a warning, fwd_bwd's is drawn.
+    out = tmp_path / "out"
+    argv = ["plot", str(synth), "--out", str(out), "--baseline", "base"]
+    with pytest.warns(UserWarning) as caught:
+        assert cli.main([*argv, "--metric", "parity_grad_rel"]) == 0
+    messages = [str(w.message) for w in caught]
+    for dtype in S.DTYPES:
+        assert f"fwd, {dtype}: no values of parity_grad_rel: left out" in messages
+        assert f"fwd, {dtype}: none of the metrics has values: no grid" in messages
+        assert not (out / f"grid-fwd-{dtype}.png").exists()
+        assert (out / f"ratio-fwd-{dtype}.png").exists()
+        grid = out / f"grid-fwd_bwd-{dtype}.png"
+        assert png_size(grid)[0] > 0
+        assert {r["metric"] for r in read_csv(grid.with_suffix(".csv"))} == {"parity_grad_rel"}
+    assert not any("fwd_bwd" in m and "no values" in m for m in messages)
+    # One metric fwd has, one it lacks: fwd's grid has the one, with a warning.
+    out = tmp_path / "two"
+    argv = ["plot", str(synth), "--out", str(out), "--baseline", "base", "--dtype", "float32"]
+    with pytest.warns(UserWarning) as caught:
+        assert cli.main([*argv, "--metric", "parity_grad_rel,median_ms"]) == 0
+    assert "fwd, float32: no values of parity_grad_rel: left out" in [
+        str(w.message) for w in caught
+    ]
+    assert {r["metric"] for r in read_csv(out / "grid-fwd.csv")} == {"median_ms"}
+    assert {r["metric"] for r in read_csv(out / "grid-fwd_bwd.csv")} == {
+        "parity_grad_rel",
+        "median_ms",
+    }

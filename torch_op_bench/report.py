@@ -20,6 +20,13 @@ from .spec import MODES
 
 MIB = 1024**2
 MISSING = "—"
+NO_SWEEP = "No axis varies around the default point"
+# How "The default point is ..." names analysis.default_point's source.
+SOURCES = {
+    "spec": "the op's defaults",
+    "inferred": "inferred from the records",
+    "--point": "set by --point",
+}
 # A varying info value longer than this is cut in the tables (the record has it
 # whole), so one long list cannot make the table unreadable.
 INFO_WIDTH = 40
@@ -225,12 +232,14 @@ def render_default(
         "TFLOP/s",
         "peak above baseline, MiB",
         "peak above baseline / baseline's",
+        "time × peak, ms·MiB",
+        "time × peak / baseline's",
         "parity",
         *(p.removeprefix(analysis.PARITY_PREFIX) for p in parity),
         "override_ran",
         *(c.removeprefix(analysis.INFO_PREFIX) for c in info),
     ]
-    numeric = [False, False, False, *[True] * 7, False, *[True] * len(parity), False]
+    numeric = [False, False, False, *[True] * 9, False, *[True] * len(parity), False]
     numeric += [False] * len(info)
     body = []
     for name in analysis.implementations(here, baseline):
@@ -252,14 +261,15 @@ def render_default(
                         base_ok and base_ok.get("peak_above_baseline"),
                     )
                 ),
+                sig3(row.get("time_x_peak")),
+                sig3(ratio(row.get("time_x_peak"), base_ok and base_ok.get("time_x_peak"))),
                 parity_text(row),
                 *(sig3(row.get(p)) for p in parity),
                 text(row.get("override_ran")),
                 *(text(row.get(c), INFO_WIDTH) for c in info),
             ]
         )
-    point_text = ", ".join(f"{k}={v}" for k, v in point.items())
-    lines = [f"### {title}", "", f"At {point_text}.", ""]
+    lines = [f"### {title}", "", f"At {analysis.point_text(point)}.", ""]
     if base_ok is None:
         lines += [f"The baseline `{baseline}` has no `ok` record here: no ratios.", ""]
     lines.append(table(header, body, numeric))
@@ -269,7 +279,7 @@ def render_default(
 # --- 3. the sweeps --------------------------------------------------------------------
 
 
-def _cell(row: Row | None, what: str) -> str:
+def _cell(row: Row | None, what: str, base: Row | None = None) -> str:
     if row is None:
         return MISSING
     if what == "parity":
@@ -278,14 +288,21 @@ def _cell(row: Row | None, what: str) -> str:
         return text(row.get("status"))
     if what == "median":
         return sig3(row.get("median_ms"))
+    if what == "time_x_peak":
+        # The product and, after it, its ratio to the baseline's at the same value.
+        value = row.get("time_x_peak")
+        base_value = base.get("time_x_peak") if base and base.get("status") == "ok" else None
+        quotient = ratio(value, base_value)
+        return sig3(value) + ("" if quotient is None else f" ({sig3(quotient)})")
     return mib(row.get("peak_above_baseline"))
 
 
 def render_sweeps(
     rows: Sequence[Row], point: Mapping[str, Any], baseline: str, *, title: str
 ) -> str:
-    """For each axis that varies around the default point: median, peak and parity,
-    one row per axis value and one column per implementation."""
+    """For each axis that varies around the default point: median, peak, time × peak
+    (with its ratio to the baseline's) and parity, one row per axis value and one
+    column per implementation."""
     names = analysis.implementations(rows, baseline)
     parts = []
     for axis, swept in analysis.sweeps(rows, point).items():
@@ -296,10 +313,17 @@ def render_sweeps(
         for what, label in (
             ("median", "median ms"),
             ("peak", "peak above baseline, MiB"),
+            ("time_x_peak", "time × peak, ms·MiB (/ baseline's)"),
             ("parity", "parity"),
         ):
             body = [
-                [str(value), *(_cell(by_key.get((value, name)), what) for name in names)]
+                [
+                    str(value),
+                    *(
+                        _cell(by_key.get((value, name)), what, by_key.get((value, baseline)))
+                        for name in names
+                    ),
+                ]
                 for value in values
             ]
             numbers = all(isinstance(v, (int, float)) for v in values)
@@ -313,6 +337,25 @@ def render_sweeps(
     if not parts:
         return ""
     return "\n".join(parts)
+
+
+def render_per_case(
+    rows: Sequence[Row], axes: Sequence[str], baseline: str, dtype: str, mode: str
+) -> str:
+    """The default-point table at every case present, for records whose cases do not
+    form a sweep (one case, or cases that differ in more than one axis)."""
+    cases = sorted({analysis.case_of(row, axes)[1:] for row in rows}, key=_case_order)
+    parts = []
+    for values in cases:
+        here = dict(zip(axes, values, strict=True))
+        title = f"{mode}, {dtype}: {analysis.point_text(here)}"
+        parts.append(render_default(rows, here, baseline, title=title))
+    return "\n".join(parts)
+
+
+def _case_order(values: tuple) -> tuple:
+    # Numbers before text, each ascending, so a case order never depends on the files.
+    return tuple((0, v, "") if isinstance(v, (int, float)) else (1, 0, str(v)) for v in values)
 
 
 # --- 4. the environment check ------------------------------------------------------------
@@ -511,6 +554,7 @@ def report(
     dtype: str | None = None,
     mode: str | None = None,
     baseline: str = "torch_eager",
+    point: Mapping[str, str] | None = None,
     command: Sequence[str] | None = None,
 ) -> str:
     """The markdown report of a results directory."""
@@ -523,7 +567,7 @@ def report(
     _one({r["device_slug"] for r in recs}, "device slug", "choose one with --device-slug")
     rows = analysis.to_rows(recs)
     axes = analysis.axes_of(recs)
-    point = analysis.default_point(recs)
+    point = analysis.default_point(recs, point=point)
     dtypes = [dtype] if dtype else list(dict.fromkeys(row["dtype"] for row in rows))
     modes = [mode] if mode else [m for m in MODES if any(row["mode"] == m for row in rows)]
 
@@ -538,24 +582,33 @@ def report(
     for warning in caught:
         lines += [f"**Warning:** {warning.message}", ""]
     lines.append(render_provenance(recs, rows))
-    source = "the op's defaults" if point["source"] == "spec" else "inferred from the records"
+    source = SOURCES.get(point["source"], point["source"])
     lines += ["## At the default point", "", f"The default point is {source}.", ""]
     for d in dtypes:
         for m in modes:
             selected = analysis.at(rows, dtype=d, mode=m)
             lines.append(render_default(selected, point["params"], baseline, title=f"{m}, {d}"))
     lines += ["## Sweeps", ""]
-    swept = [
-        render_sweeps(
-            analysis.at(rows, dtype=d, mode=m), point["params"], baseline, title=f"{m}, {d}"
-        )
-        for d in dtypes
-        for m in modes
-    ]
-    if any(swept):
-        lines += [part for part in swept if part]
+    # Per (dtype, mode), as plot decides: the sweeps around the point, or, when no
+    # axis varies there, the default-point table at every case present.
+    pairs = []
+    for d in dtypes:
+        for m in modes:
+            selected = analysis.at(rows, dtype=d, mode=m)
+            if selected:
+                swept = render_sweeps(selected, point["params"], baseline, title=f"{m}, {d}")
+                pairs.append((d, m, selected, swept))
+    if not any(swept for *_, swept in pairs):
+        # No pair has a sweep: one line for all of them.
+        lines += [f"{NO_SWEEP} in these records: one table per case instead.", ""]
+        lines += [render_per_case(sel, axes, baseline, d, m) for d, m, sel, _ in pairs]
     else:
-        lines += ["No axis varies around the default point in these records.", ""]
+        for d, m, selected, swept in pairs:
+            if swept:
+                lines.append(swept)
+                continue
+            lines += [f"**{m}, {d}:** {NO_SWEEP.lower()}: one table per case instead.", ""]
+            lines.append(render_per_case(selected, axes, baseline, d, m))
     scope = [row for row in rows if row["dtype"] in dtypes and row["mode"] in modes]
     lines.append(render_environment_check(scope, axes))
     lines.append(render_not_measured(scope, axes))

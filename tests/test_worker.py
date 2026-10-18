@@ -68,6 +68,29 @@ def test_run_payload_unavailable(tests_dir):
     assert record["times_ms"] is None
 
 
+def test_setup_raises_unavailable(tests_dir, monkeypatch):
+    import toy_op
+
+    from torch_op_bench.spec import Unavailable
+
+    def unsupported(case):
+        raise Unavailable("toy needs a device it does not have")
+
+    timed = []
+    monkeypatch.setattr(toy_op.TOY.implementation("plain"), "setup", unsupported)
+    monkeypatch.setattr(worker, "_parity", lambda *args: timed.append(args))
+    data = payload(tests_dir, "plain")
+    record = worker.run_payload(data)
+    assert record["status"] == "unavailable"
+    assert record["reason"] == "toy needs a device it does not have"
+    assert record["traceback"] is None
+    assert timed == []
+    for field in ("times_ms", "memory", "parity", "verify"):
+        assert record[field] is None, field
+    assert record["info"] == data["info"]
+    assert record["env_from"] == "worker" and record["env"]["packages"]["pytest"]
+
+
 def test_run_payload_error(tests_dir):
     record = worker.run_payload(payload(tests_dir, "broken"))
     assert record["status"] == "error"
