@@ -487,6 +487,11 @@ affects. The full suite, CUDA included, runs once, when the reviewer would accep
 change with no findings, and CI runs the full CPU suite with the coverage floor on
 every push.
 
+This project's stable test interface, which tools outside it may name, is two
+commands: `scripts/test-affected.sh [--base REF] [-- PATH...]` to iterate, and
+`pytest --testmon-noselect` (under `COVERAGE_CORE=ctrace`) for the final run, both
+described below. Their names and arguments stay as they are.
+
 Iterating, `scripts/test-affected.sh [--base REF] [-- PATH...]` lints, then runs the
 tests `pytest-testmon` selects, then the test files `scripts/affected-tests.py` maps
 the changed paths to, all in the interpreter `$PYTHON` (default `python`). The
@@ -537,6 +542,10 @@ line by switching coverage's context per test, and coverage's default core on Py
 3.14, `sysmon`, records a line for the first test that runs it only. Its data,
 `.testmondata`, is per interpreter and per checkout: it lives in the checkout root
 and is never shared or committed, so the first run in a fresh copy runs every test.
+
+A pytest marker expression (`-m`, such as `-m "not cuda"`) makes testmon turn its own
+selection off, so that run is the whole suite less the deselected tests;
+`--testmon-forceselect` in place of `--testmon` keeps the selection under `-m`.
 
 ## Licence
 
