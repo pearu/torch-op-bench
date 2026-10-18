@@ -549,9 +549,16 @@ def _layout(fig: Any, rect: tuple[float, float, float, float]) -> None:
         fig.tight_layout(rect=rect, pad=LAYOUT_PAD, h_pad=1.08, w_pad=1.08)
         fig.canvas.draw()  # the tick labels of the new panel sizes
         wrapped = _fit_ylabels(fig)
-        positions = [ax.get_position().bounds for ax in fig.axes]
-        if not wrapped and positions == previous:
-            return
+        # In pixels; tight_layout's own rounding moves panels by a fraction of one.
+        width, height = fig.bbox.width, fig.bbox.height
+        positions = [
+            value * size
+            for ax in fig.axes
+            for value, size in zip(ax.get_position().bounds, (width, height) * 2, strict=True)
+        ]
+        if not wrapped and previous is not None:
+            if max(abs(a - b) for a, b in zip(positions, previous, strict=True)) < 0.5:
+                return
         previous = positions
 
 
