@@ -39,11 +39,11 @@ def test_figures_and_backend(synth, tmp_path):
     import matplotlib
 
     assert matplotlib.get_backend().lower() == "agg"
-    # 4 swept axes x 3.8 in wide; 4 metrics x 2.8 in, plus the title, one legend row
-    # and two footer lines, high; at 150 dpi.
+    # 4 swept axes x 3.8 in wide; 4 metrics x 2.8 in, plus the title, legend and
+    # footer bands (measured: test_gaps_between_bands), high; at 150 dpi.
     width, height = png_size(tmp_path / "out" / "grid-fwd_bwd.png")
     assert width == 4 * 3.8 * 150
-    assert height == round((0.45 + 0.1 + 0.24 + 4 * 2.8 + 0.15 + 2 * 0.17) * 150)
+    assert 4 * 2.8 * 150 < height < (4 * 2.8 + 1.2) * 150
     for path in written:
         assert path.with_suffix(".csv").exists()
 
@@ -438,7 +438,7 @@ def test_long_title_wraps_in_one_column(synth, tmp_path, monkeypatch):
     # R1-19 F2: a one-column figure (3.8 in) used to clip its title at both ends.
     import matplotlib.pyplot as plt
 
-    closed = []
+    closed, close = [], plt.close
     monkeypatch.setattr(plt, "close", closed.append)
     rows = [r for r in analysis.to_rows(load_quiet(synth)) if r["mode"] == "fwd"]
     rows = [r for r in rows if r["dtype"] == "float32"]
@@ -455,14 +455,14 @@ def test_long_title_wraps_in_one_column(synth, tmp_path, monkeypatch):
     )
     assert png_size(path)[0] > 0 and path.with_suffix(".csv").exists()
     (fig,) = closed
-    suptitle = fig._suptitle
+    suptitle = title_artist(fig)
     assert suptitle.get_text().count("\n") >= 1
     assert suptitle.get_text().replace("\n", " ") == title
     renderer = fig.canvas.get_renderer()
     box, page = suptitle.get_window_extent(renderer), fig.bbox
     assert page.x0 <= box.x0 and box.x1 <= page.x1, (box, page)
     assert page.y0 <= box.y0 and box.y1 <= page.y1, (box, page)
-    plt.close(fig)
+    close(fig)
     # A short title stays on one line.
     closed.clear()
     plot._figure(
@@ -475,10 +475,95 @@ def test_long_title_wraps_in_one_column(synth, tmp_path, monkeypatch):
         "synth: fwd",
         ["footer"],
     )
-    assert "\n" not in closed[0]._suptitle.get_text()
-    plt.close(closed[0])
+    assert "\n" not in title_artist(closed[0]).get_text()
+    close(closed[0])
 
 
 def load_quiet(synth):
     with pytest.warns(UserWarning):
         return analysis.load(synth)
+
+
+def title_artist(fig):
+    # 8792191 drew the title with fig.suptitle; now it is the text with gid "title".
+    found = [t for t in fig.texts if t.get_gid() == "title"]
+    return found[0] if found else fig._suptitle
+
+
+def cap_height(size):
+    """A capital letter's height, in points, of text of ``size`` (DejaVu Sans: 0.73 em)."""
+    from matplotlib.font_manager import FontProperties
+
+    return 0.73 * FontProperties(size=size).get_size_in_points()
+
+
+def rendered_gaps(fig):
+    """The white space, in points, between stacked elements, with its bound: a capital
+    letter of the smaller text of the two (the panels' text is their tick labels)."""
+    import matplotlib
+
+    renderer = fig.canvas.get_renderer()
+    pt = 72 / fig.dpi
+    title = title_artist(fig)
+    footer = [t for t in fig.texts if t is not title]
+    tops = {ax: ax.get_position().y1 for ax in fig.axes}
+    bottoms = {ax: ax.get_position().y0 for ax in fig.axes}
+    first = [ax for ax in fig.axes if tops[ax] == max(tops.values())]
+    last = [ax for ax in fig.axes if bottoms[ax] == min(bottoms.values())]
+    panels_top = max(ax.get_tightbbox(renderer).y1 for ax in first)
+    panels_bottom = min(ax.get_tightbbox(renderer).y0 for ax in last)
+    panel_text = matplotlib.rcParams["ytick.labelsize"]
+    box = title.get_window_extent(renderer)
+    gaps = {}
+    above, above_size = box.y0, title.get_fontsize()
+    if fig.legends:
+        legend = fig.legends[0]
+        size = legend.get_texts()[0].get_fontsize()
+        lbox = legend.get_window_extent(renderer)
+        gaps["title-legend"] = ((box.y0 - lbox.y1) * pt, cap_height(min(above_size, size)))
+        above, above_size = lbox.y0, size
+    bound = cap_height(min(above_size, FontPropertiesSize(panel_text)))
+    gaps["above-panels"] = ((above - panels_top) * pt, bound)
+    footer_top = max(t.get_window_extent(renderer).y1 for t in footer)
+    size = min(t.get_fontsize() for t in footer)
+    bound = cap_height(min(size, FontPropertiesSize(panel_text)))
+    gaps["panels-footer"] = ((panels_bottom - footer_top) * pt, bound)
+    return gaps
+
+
+def FontPropertiesSize(size):
+    from matplotlib.font_manager import FontProperties
+
+    return FontProperties(size=size).get_size_in_points()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"sweep": ["M"]},  # one column: the title wraps
+        {},  # four columns
+        {"sweep": ["M", "K"], "impls": ["base"]},  # two columns, the baseline alone
+    ],
+    ids=["one-column", "four-columns", "two-columns"],
+)
+def test_gaps_between_bands(synth, tmp_path, monkeypatch, kwargs):
+    # The user (inbox 21): the white space between title, legend and first panel,
+    # and between last panel and footer, is at most about a capital letter's height
+    # of the text around it, in every figure plot writes.
+    import matplotlib.pyplot as plt
+
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    other = tmp_path / "second"
+    S.write(other)
+    written = draw(synth, tmp_path / "out", dtype="float32", overlay=other, **kwargs)
+    assert {p.name.split("-")[0] for p in written} == {"grid", "ratio", "overlay"}
+    assert len(closed) == len(written)
+    for path, fig in zip(written, closed, strict=True):
+        for name, (gap, bound) in rendered_gaps(fig).items():
+            assert -0.5 <= gap <= bound, (path.name, name, gap, bound)
+    if kwargs.get("sweep") == ["M"]:  # the ratio and overlay titles wrap at 3.8 in
+        assert any("\n" in title_artist(fig).get_text() for fig in closed)
+    monkeypatch.undo()
+    for fig in closed:
+        plt.close(fig)

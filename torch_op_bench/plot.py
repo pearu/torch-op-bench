@@ -26,10 +26,16 @@ DPI = 150
 # Inches per panel; the bands above and below the panels are sized to their text.
 PANEL_WIDTH, PANEL_HEIGHT = 3.8, 2.8
 MIB = 1024**2
-# The title (suptitle, "large") wraps at this many characters per inch of figure
-# width, each line after the first adding this many inches to the title band.
+# The title ("large") wraps at this many characters per inch of figure width.
 TITLE_CHARS_PER_INCH = 10
-TITLE_LINE_HEIGHT = 0.25
+# The layout, in inches: the margin above the title and below the footer, and the
+# gap between title and legend. Between the legend (or the title) and the first
+# panel, and between the last panel and the footer, the gap is tight_layout's pad,
+# LAYOUT_PAD times the font size (10 pt: 3 pt). A capital letter of the smallest
+# text there (the footer, x-small, 6.9 pt) is about 5 pt high.
+MARGIN = 0.05
+GAP = 3 / 72
+LAYOUT_PAD = 0.3
 
 # The line styles, by role. The baseline's is fixed here, in every figure, and owes
 # nothing to matplotlib's defaults; a control takes its original's colour.
@@ -473,31 +479,53 @@ def _figure(
                 )
     # Bands in inches, top to bottom: title, legend, panels, footer. The title and the
     # footer wrap to the figure's width, so neither is cut off in a one-column figure.
+    # Each band is as high as its rendered text, measured, and the bands are stacked
+    # with GAP between them, so the white space between title, legend, panels and
+    # footer is at most about the height of a capital letter of that text.
     columns = max(1, min(4, int(width // 2.2)))
-    legend_rows = math.ceil(len(handles) / columns)
     lines = [
         part
         for line in footer
         for part in textwrap.wrap(line, int(width * 17), break_on_hyphens=False)
     ]
     title_lines = textwrap.wrap(title, int(width * TITLE_CHARS_PER_INCH), break_on_hyphens=False)
-    title_h = 0.45 + TITLE_LINE_HEIGHT * (len(title_lines) - 1)
-    legend_h = 0.1 + 0.24 * legend_rows
-    footer_h = 0.15 + 0.17 * len(lines)
-    height = title_h + legend_h + PANEL_HEIGHT * len(metrics) + footer_h
-    fig.set_size_inches(width, height)
-    fig.suptitle("\n".join(title_lines), y=1 - 0.12 / height, va="top")
+    # fig.text, not fig.suptitle: tight_layout makes room for a suptitle on top of
+    # its rect, which would count the title band twice.
+    title_text = fig.text(
+        0.5, 1, "\n".join(title_lines), ha="center", va="top", fontsize="large", gid="title"
+    )
+    legend = None
     if handles:
-        fig.legend(
+        legend = fig.legend(
             handles=list(handles.values()),
             loc="upper center",
             ncol=columns,
-            bbox_to_anchor=(0.5, 1 - title_h / height),
+            bbox_to_anchor=(0.5, 1),
+            borderaxespad=0,
             fontsize="small",
         )
-    for k, line in enumerate(lines):
-        fig.text(0.01, (0.08 + 0.17 * (len(lines) - 1 - k)) / height, line, fontsize="x-small")
-    fig.tight_layout(rect=(0, footer_h / height, 1, 1 - (title_h + legend_h) / height))
+    footer_text = fig.text(
+        0.01, 0, "\n".join(lines), ha="left", va="bottom", fontsize="x-small", gid="footer"
+    )
+    renderer = fig.canvas.get_renderer()
+
+    def inches(artist: Any) -> float:
+        return artist.get_window_extent(renderer).height / fig.dpi if artist else 0.0
+
+    title_h, legend_h, footer_h = inches(title_text), inches(legend), inches(footer_text)
+    legend_band = GAP + legend_h if legend is not None else 0.0  # below the title
+    # tight_layout keeps LAYOUT_PAD (a fraction of the font size) between its rect
+    # and the panels' outer edges (tick labels, axis labels): that is the gap there.
+    height = MARGIN + title_h + legend_band + PANEL_HEIGHT * len(metrics) + footer_h + MARGIN
+    fig.set_size_inches(width, height)
+    title_text.set_y(1 - MARGIN / height)
+    if legend is not None:
+        legend.set_bbox_to_anchor((0.5, 1 - (MARGIN + title_h + GAP) / height), fig.transFigure)
+    footer_text.set_y(MARGIN / height)
+    top = 1 - (MARGIN + title_h + legend_band) / height
+    fig.tight_layout(
+        rect=(0, (MARGIN + footer_h) / height, 1, top), pad=LAYOUT_PAD, h_pad=1.08, w_pad=1.08
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=DPI)
     plt.close(fig)
