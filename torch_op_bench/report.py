@@ -20,6 +20,7 @@ from .spec import MODES
 
 MIB = 1024**2
 MISSING = "—"
+NO_SWEEP = "No axis varies around the default point"
 # How "The default point is ..." names analysis.default_point's source.
 SOURCES = {
     "spec": "the op's defaults",
@@ -588,25 +589,26 @@ def report(
             selected = analysis.at(rows, dtype=d, mode=m)
             lines.append(render_default(selected, point["params"], baseline, title=f"{m}, {d}"))
     lines += ["## Sweeps", ""]
-    swept = [
-        render_sweeps(
-            analysis.at(rows, dtype=d, mode=m), point["params"], baseline, title=f"{m}, {d}"
-        )
-        for d in dtypes
-        for m in modes
-    ]
-    if any(swept):
-        lines += [part for part in swept if part]
+    # Per (dtype, mode), as plot decides: the sweeps around the point, or, when no
+    # axis varies there, the default-point table at every case present.
+    pairs = []
+    for d in dtypes:
+        for m in modes:
+            selected = analysis.at(rows, dtype=d, mode=m)
+            if selected:
+                swept = render_sweeps(selected, point["params"], baseline, title=f"{m}, {d}")
+                pairs.append((d, m, selected, swept))
+    if not any(swept for *_, swept in pairs):
+        # No pair has a sweep: one line for all of them.
+        lines += [f"{NO_SWEEP} in these records: one table per case instead.", ""]
+        lines += [render_per_case(sel, axes, baseline, d, m) for d, m, sel, _ in pairs]
     else:
-        lines += [
-            "No axis varies around the default point in these records: one table per case instead.",
-            "",
-        ]
-        for d in dtypes:
-            for m in modes:
-                lines.append(
-                    render_per_case(analysis.at(rows, dtype=d, mode=m), axes, baseline, d, m)
-                )
+        for d, m, selected, swept in pairs:
+            if swept:
+                lines.append(swept)
+                continue
+            lines += [f"**{m}, {d}:** {NO_SWEEP.lower()}: one table per case instead.", ""]
+            lines.append(render_per_case(selected, axes, baseline, d, m))
     scope = [row for row in rows if row["dtype"] in dtypes and row["mode"] in modes]
     lines.append(render_environment_check(scope, axes))
     lines.append(render_not_measured(scope, axes))

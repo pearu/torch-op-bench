@@ -380,3 +380,29 @@ def test_provenance_builds():
     assert "different torch-op-bench commits" not in text
     runner_only = {"device_slug": "d", "env_name": "e", "timestamp": "t", "env": None}
     assert "| e |" not in report.render_provenance([runner_only], [])
+
+
+def test_per_case_per_dtype_and_mode(synth, tmp_path):
+    # R1-19 F1: float32 sweeps around the point, bfloat16 has only two cases that
+    # differ in two axes. Both appear under Sweeps, each in its own way.
+    from torch_op_bench import records
+
+    with pytest.warns(UserWarning, match=MERGE_WARNING):
+        recs = analysis.load(synth)
+    cases = [{**S.DEFAULT, "M": 64}, {**S.DEFAULT, "K": 16}]
+    target = tmp_path / "mixed" / "synth" / S.SLUG / "x-host.jsonl"
+    for r in recs:
+        if r["case"]["dtype"] == "float32" or r["case"]["params"] in cases:
+            records.append(target, {k: v for k, v in r.items() if k != analysis.SOURCE})
+    text = report.report(tmp_path / "mixed", baseline="base")
+    part = section(text, "## Sweeps")
+    assert "#### fwd_bwd, float32: median ms against M" in part
+    assert "#### fwd, float32: median ms against K" in part
+    assert "### fwd_bwd, float32: M=" not in part  # float32 has sweeps, no per-case
+    for mode in ["fwd", "fwd_bwd"]:
+        note = f"**{mode}, bfloat16:** no axis varies around the default point: one table"
+        assert note in part
+        for case in ["M=64, K=32, N=16, layout=a", "M=128, K=16, N=16, layout=a"]:
+            assert f"### {mode}, bfloat16: {case}\n\nAt {case}.\n" in part
+    # The all-pairs line is for when no pair has a sweep.
+    assert "No axis varies around the default point in these records" not in part
