@@ -11,8 +11,9 @@ While iterating: `ruff check .`, then the tests pytest-testmon selects
 changes since REF to, unconditionally (`pytest --testmon-noselect FILE...`).
 When the map says `all` (a change every test depends on, or a new interpreter,
 torch build or GPU), the whole suite once instead of both. Each pytest run
-records testmon's data. The exit status is lint's, else the first failing
-pytest's.
+records testmon's data, under COVERAGE_CORE=ctrace (with Python 3.14's
+default core, testmon's data misses tests). The exit status is lint's, else the
+first failing pytest's.
 
 options:
   --base REF   the changes since the merge base of REF and HEAD, uncommitted and
@@ -61,6 +62,14 @@ run() {
     [ -n "$dry_run" ] || "$@"
 }
 
+# testmon records which test ran each line by switching coverage's context per test;
+# coverage's sysmon core (Python 3.14's default) records a line for the first test
+# that runs it only, so testmon would miss the others.
+run_pytest() {
+    echo "+ COVERAGE_CORE=ctrace $python -m pytest $*"
+    [ -n "$dry_run" ] || COVERAGE_CORE=ctrace "$python" -m pytest "$@"
+}
+
 run ruff check .
 implied="$("$python" scripts/affected-tests.py --base "$base" ${dry_run:+--dry-run})"
 tests=()
@@ -68,11 +77,11 @@ tests=()
 
 status=0
 if [ "${tests[*]-}" = "all" ]; then
-    run "$python" -m pytest --testmon-noselect || status=$?
+    run_pytest --testmon-noselect || status=$?
 else
-    run "$python" -m pytest --testmon || status=$?
+    run_pytest --testmon || status=$?
     if [ ${#tests[@]} -gt 0 ]; then
-        run "$python" -m pytest --testmon-noselect "${tests[@]}" || {
+        run_pytest --testmon-noselect "${tests[@]}" || {
             s=$?
             [ "$status" -ne 0 ] || status=$s
         }

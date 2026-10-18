@@ -494,8 +494,8 @@ changes since `main` (or REF) to, all in the interpreter `$PYTHON` (default
 
 ```sh
 ruff check .
-python -m pytest --testmon
-python -m pytest --testmon-noselect tests/test_envs.py
+COVERAGE_CORE=ctrace python -m pytest --testmon
+COVERAGE_CORE=ctrace python -m pytest --testmon-noselect tests/test_envs.py
 ```
 
 The map covers what testmon cannot see: the code the worker runs in its subprocess,
@@ -507,7 +507,7 @@ the whole suite once instead:
 
 ```sh
 ruff check .
-python -m pytest --testmon-noselect
+COVERAGE_CORE=ctrace python -m pytest --testmon-noselect
 ```
 
 The final run, in the interpreter with CUDA and the counterpart environments present:
@@ -515,7 +515,7 @@ the whole suite, which also refreshes testmon's data, then CI's own command.
 
 ```sh
 ruff check .
-pytest --testmon-noselect
+COVERAGE_CORE=ctrace pytest --testmon-noselect
 pytest --cov=torch_op_bench --cov-report=term-missing --cov-fail-under=90
 ```
 
@@ -529,10 +529,12 @@ CUDA one) run the same way, once per torchtitan environment present
 
 `pytest-testmon` (in `dev`) selects the tests a change affects from the coverage of
 each test it recorded. It does not combine with `pytest-cov` in one run: a run with
-`--testmon` never passes `--cov`, and CI passes `--cov` and never `--testmon`. Its
-data, `.testmondata`, is per interpreter and per checkout: it lives in the checkout
-root and is never shared or committed, so the first run in a fresh copy runs every
-test.
+`--testmon` never passes `--cov`, and CI passes `--cov` and never `--testmon`. A run
+with `--testmon` sets `COVERAGE_CORE=ctrace`: testmon records which test ran each
+line by switching coverage's context per test, and coverage's default core on Python
+3.14, `sysmon`, records a line for the first test that runs it only. Its data,
+`.testmondata`, is per interpreter and per checkout: it lives in the checkout root
+and is never shared or committed, so the first run in a fresh copy runs every test.
 
 ## Licence
 

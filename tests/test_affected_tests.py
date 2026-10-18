@@ -280,8 +280,8 @@ def test_test_affected_mapped(checkout):
     commands = dry_run(checkout)
     assert commands == [
         "ruff check .",
-        "python -m pytest --testmon",
-        "python -m pytest --testmon-noselect tests/test_envs.py",
+        "COVERAGE_CORE=ctrace python -m pytest --testmon",
+        "COVERAGE_CORE=ctrace python -m pytest --testmon-noselect tests/test_envs.py",
     ]
     assert commands == readme_blocks()[1]
     # --base: nothing changed since the uncommitted change, once committed.
@@ -293,27 +293,69 @@ def test_test_affected_all(checkout):
     root, _ = checkout
     (root / "pyproject.toml").write_text("two\n")
     commands = dry_run(checkout)
-    assert commands == ["ruff check .", "python -m pytest --testmon-noselect"]
+    assert commands == ["ruff check .", "COVERAGE_CORE=ctrace python -m pytest --testmon-noselect"]
     assert commands == readme_blocks()[2]
 
 
 def test_test_affected_new_environment(checkout):
     root, _ = checkout
     (root / ".testmondata.env").write_text("{}\n")
-    assert dry_run(checkout) == ["ruff check .", "python -m pytest --testmon-noselect"]
+    assert dry_run(checkout) == [
+        "ruff check .",
+        "COVERAGE_CORE=ctrace python -m pytest --testmon-noselect",
+    ]
 
 
 def test_test_affected_testmon_only(checkout):
     root, _ = checkout
     (root / "torch_op_bench/plot.py").write_text("two\n")
-    assert dry_run(checkout) == ["ruff check .", "python -m pytest --testmon"]
+    assert dry_run(checkout) == ["ruff check .", "COVERAGE_CORE=ctrace python -m pytest --testmon"]
 
 
 def test_readme_final_run():
     """The final run: the whole suite through testmon, then CI's own command."""
     final = readme_blocks()[3]
-    assert final[:2] == ["ruff check .", "pytest --testmon-noselect"]
+    assert final[:2] == ["ruff check .", "COVERAGE_CORE=ctrace pytest --testmon-noselect"]
     workflow = (ROOT / ".github" / "workflows").glob("*.yml")
     ci = " ".join(" ".join(path.read_text().split()) for path in workflow)
     assert f"run: >- {final[2]} " in ci + " "
     assert "--testmon" not in ci
+
+
+def test_test_affected_selects_every_test_of_a_changed_line(tmp_path):
+    """For real, in a small project: after a change to a line two tests run, testmon
+    selects both (not only the first that ran it, as with coverage's sysmon core)."""
+    root = tmp_path / "project"
+    (root / "scripts").mkdir(parents=True)
+    (root / "tests").mkdir()
+    for script in [SCRIPT, SHELL_SCRIPT]:
+        shutil.copy(script, root / "scripts" / script.name)
+    (root / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\ntestpaths = ["tests"]\npythonpath = ["."]\n'
+    )
+    (root / "m.py").write_text("def f():\n    return 1\n\n\ndef g():\n    return 2\n")
+    (root / "tests/test_m.py").write_text(
+        "import m\n\n\ndef test_a():\n    assert m.f() == 1\n\n\n"
+        "def test_b():\n    assert m.f() == 1\n\n\ndef test_c():\n    assert m.g() == 2\n"
+    )
+    (root / ".gitignore").write_text(".testmondata*\n__pycache__/\n.pytest_cache/\n")
+    git(root, "init", "-q", "-b", "main")
+    git(root, "add", ".")
+    git(root, "commit", "-q", "-m", "init")
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHON", "COVERAGE_CORE")}
+    env["PYTHON"] = sys.executable
+
+    def ran():
+        proc = subprocess.run(
+            [BASH, str(root / "scripts/test-affected.sh"), "--base", "HEAD"],
+            capture_output=True,
+            text=True,
+            env={**env, "PYTEST_ADDOPTS": "-v -p no:randomly"},
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        return sorted(set(re.findall(r"test_m\.py::(test_\w+) PASSED", proc.stdout)))
+
+    assert ran() == ["test_a", "test_b", "test_c"]  # the first run: all
+    assert ran() == []
+    (root / "m.py").write_text("def f():\n    return 3 - 2\n\n\ndef g():\n    return 2\n")
+    assert ran() == ["test_a", "test_b"]
