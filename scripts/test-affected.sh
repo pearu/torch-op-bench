@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
     cat <<'USAGE'
-usage: scripts/test-affected.sh [--base REF] [--dry-run]
+usage: scripts/test-affected.sh [--base REF] [--dry-run] [-- PATH...]
 
 While iterating: `ruff check .`, then the tests pytest-testmon selects
 (`pytest --testmon`), then the test files scripts/affected-tests.py maps the
@@ -19,6 +19,8 @@ options:
   --base REF   the changes since the merge base of REF and HEAD, uncommitted and
                untracked ones too (default main)
   --dry-run    print the commands, run none, and leave the stamp alone
+  -- PATH...   the changed paths, instead of git's (e.g. `git diff --name-only`
+               of a change applied to a copy without .git)
   -h, --help   this message
 
 The interpreter is $PYTHON (default python): the one whose tests run and whose
@@ -35,6 +37,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python="${PYTHON:-python}"
 base="main"
 dry_run=""
+paths=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -46,6 +49,11 @@ while [ $# -gt 0 ]; do
         --dry-run)
             dry_run=1
             shift
+            ;;
+        --)
+            shift
+            paths=("$@")
+            break
             ;;
         -h | --help)
             usage
@@ -71,7 +79,7 @@ run_pytest() {
 }
 
 run ruff check .
-implied="$("$python" scripts/affected-tests.py --base "$base" ${dry_run:+--dry-run})"
+implied="$("$python" scripts/affected-tests.py --base "$base" ${dry_run:+--dry-run} -- "${paths[@]}")"
 tests=()
 [ -z "$implied" ] || mapfile -t tests <<<"$implied"
 

@@ -487,10 +487,12 @@ affects. The full suite, CUDA included, runs once, when the reviewer would accep
 change with no findings, and CI runs the full CPU suite with the coverage floor on
 every push.
 
-Iterating, `scripts/test-affected.sh [--base REF]` lints, then runs the tests
-`pytest-testmon` selects, then the test files `scripts/affected-tests.py` maps the
-changes since `main` (or REF) to, all in the interpreter `$PYTHON` (default
-`python`); for a change to `envs/` alone, that is
+Iterating, `scripts/test-affected.sh [--base REF] [-- PATH...]` lints, then runs the
+tests `pytest-testmon` selects, then the test files `scripts/affected-tests.py` maps
+the changed paths to, all in the interpreter `$PYTHON` (default `python`). The
+changed paths are those since `main` (or REF), or the PATHs given, such as the
+`git diff --name-only` of a change applied to a copy without `.git`. For a change to
+`envs/` alone, that is
 
 ```sh
 ruff check .
@@ -498,12 +500,12 @@ COVERAGE_CORE=ctrace python -m pytest --testmon
 COVERAGE_CORE=ctrace python -m pytest --testmon-noselect tests/test_envs.py
 ```
 
-The map covers what testmon cannot see: the code the worker runs in its subprocess,
+The map covers what testmon cannot see: every module the worker subprocess imports,
 the scripts and environment definitions the tests run as files, and the files every
 test depends on (`pyproject.toml` and the shared test helpers), for which it says
-`all`. It also says `all` once for a new interpreter, torch build or GPU, from the
-stamp `.testmondata.env` it keeps beside `.testmondata`. For `all` the script runs
-the whole suite once instead:
+`all`. It also says `all` once for a new interpreter, a new or rebuilt torch, or a
+new GPU, from the stamp `.testmondata.env` it keeps beside `.testmondata`. For `all`
+the script runs the whole suite once instead:
 
 ```sh
 ruff check .

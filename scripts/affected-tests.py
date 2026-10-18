@@ -12,7 +12,8 @@ main) and HEAD: the branch's commits, the uncommitted changes and untracked file
 
 It also prints `all` when the interpreter differs from the one the stamp
 .testmondata.env (beside .testmondata) records, and then rewrites the stamp; a new
-torch build or GPU therefore runs everything once. --dry-run leaves the stamp alone.
+or rebuilt torch, or a new GPU, therefore runs everything once. --dry-run leaves the
+stamp alone.
 """
 
 import argparse
@@ -30,20 +31,26 @@ WORKER = ["tests/test_worker.py", "tests/test_runner.py", "tests/test_cli.py", "
 
 # (changed path patterns, implied tests): fnmatch patterns, where `*` crosses `/`.
 MAP = [
-    # The worker runs these in a subprocess, where testmon records nothing.
+    # Every module the worker subprocess imports: the worker runs them where testmon
+    # records nothing. tests/test_affected_tests.py checks the list against the worker.
     (
         [
+            "torch_op_bench/__init__.py",
             "torch_op_bench/worker.py",
             "torch_op_bench/runner.py",
             "torch_op_bench/measure.py",
+            "torch_op_bench/env.py",
+            "torch_op_bench/records.py",
+            "torch_op_bench/spec.py",
             "torch_op_bench/ops/*",
         ],
         WORKER,
     ),
-    # The tests run setup-env.sh through bash.
+    # Per script, the tests that run it through bash or in a subprocess.
+    (["scripts/remote-run.sh"], ["tests/test_remote_run.py"]),
     (["scripts/setup-env.sh"], ["tests/test_remote_run.py", "tests/test_envs.py"]),
-    # The tests run the scripts through bash.
-    (["scripts/*"], ["tests/test_remote_run.py"]),
+    (["scripts/test-affected.sh"], ["tests/test_affected_tests.py"]),
+    (["scripts/affected-tests.py"], ["tests/test_affected_tests.py"]),
     # The tests read the definitions as files, or setup-env.sh runs them.
     (["envs/*"], ["tests/test_envs.py"]),
     # Every test depends on these: the configuration and the shared test helpers.
@@ -85,12 +92,19 @@ def environment():
     import torch
 
     gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+    # A development build rebuilt in place keeps its version and commit: the size and
+    # mtime of the loaded extension tell it apart.
+    library = {}
+    for path in sorted(Path(torch._C.__file__).parent.glob("_C*.so")):
+        stat = path.stat()
+        library[path.name] = [stat.st_size, stat.st_mtime_ns]
     return {
         "executable": sys.executable,
         "torch": torch.__version__,
         "git_version": torch.version.git_version,
         "cuda": torch.version.cuda,
         "gpu": gpu,
+        "torch_C": library,
     }
 
 
