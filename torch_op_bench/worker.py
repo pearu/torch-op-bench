@@ -9,9 +9,9 @@ applied the implementation's environment variables.
 
 Payload keys: ``op`` (the reference resolved by ``spec.resolve_op``), ``op_name``,
 ``case`` (``Case.to_dict``), ``implementation``, ``mode``, ``settings`` (``warmup``,
-``repeat``, ``flush_l2``, ``seed``, ``timeout``), ``pythonpath`` (entries prepended
-to ``sys.path``), ``env_name``, ``env_vars``, ``packages``, ``device_slug``,
-``work``, ``info``.
+``repeat``, ``flush_l2``, ``seed``, ``timeout``, ``matmul_reduction``), ``pythonpath``
+(entries prepended to ``sys.path``), ``env_name``, ``env_vars``, ``packages``,
+``device_slug``, ``work``, ``info``.
 """
 
 from __future__ import annotations
@@ -26,6 +26,31 @@ from typing import Any
 
 from . import env, records
 from .spec import Case, Implementation, OpSpec, Unavailable, resolve_op, to_json
+
+# ``--matmul-reduction``: ``default`` leaves torch's matmul settings alone; ``strict``
+# turns off the reduced-precision reduction of bf16 and fp16 GEMMs.
+MATMUL_REDUCTIONS = ("default", "strict")
+REDUCED_PRECISION_FLAGS = (
+    "allow_bf16_reduced_precision_reduction",
+    "allow_fp16_reduced_precision_reduction",
+)
+
+
+def apply_matmul_reduction(setting: str) -> None:
+    """Set the process-wide matmul reduction for ``setting``; ``default`` touches
+    nothing. ``strict`` sets each reduced-precision flag to ``(False, True)`` (no
+    reduced-precision reduction, split-K still allowed) on builds whose flags are
+    pairs, else to ``False``. ``(False, False)`` is not offered: it needs cuBLASLt."""
+    if setting not in MATMUL_REDUCTIONS:
+        raise ValueError(f"matmul_reduction must be one of {MATMUL_REDUCTIONS}, not {setting!r}")
+    if setting == "default":
+        return
+    import torch
+
+    flags = torch.backends.cuda.matmul
+    for name in REDUCED_PRECISION_FLAGS:
+        pairs = hasattr(flags, f"{name}_split_k")
+        setattr(flags, name, (False, True) if pairs else False)
 
 
 def base_record(payload: dict[str, Any], python: str) -> dict[str, Any]:
@@ -74,6 +99,8 @@ def run_payload(payload: dict[str, Any]) -> dict[str, Any]:
         mode = payload["mode"]
         if mode not in impl.modes:
             raise ValueError(f"implementation {impl.name!r} does not support mode {mode!r}")
+        # Before anything of the implementation runs; read back into env.torch.matmul.
+        apply_matmul_reduction(payload["settings"].get("matmul_reduction", "default"))
         available = impl.available()
         if available is True:
             try:

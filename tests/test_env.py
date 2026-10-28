@@ -32,6 +32,12 @@ def test_matmul_precision(monkeypatch):
         "allow_fp16_reduced_precision_reduction": (
             torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
         ),
+        "allow_bf16_reduced_precision_reduction_split_k": getattr(
+            torch.backends.cuda.matmul, "allow_bf16_reduced_precision_reduction_split_k", None
+        ),
+        "allow_fp16_reduced_precision_reduction_split_k": getattr(
+            torch.backends.cuda.matmul, "allow_fp16_reduced_precision_reduction_split_k", None
+        ),
         "fp32_precision": getattr(torch.backends.cuda.matmul, "fp32_precision", None),
         "float32_matmul_precision": torch.get_float32_matmul_precision(),
     }
@@ -47,6 +53,29 @@ def test_matmul_precision(monkeypatch):
     # A setting this torch lacks is None, not an error.
     monkeypatch.setattr(env, "MATMUL_FLAGS", ("allow_tf32", "no_such_flag"))
     assert env.matmul_precision()["no_such_flag"] is None
+
+
+def test_matmul_precision_pairs_and_no_pairs(monkeypatch):
+    import fake_matmul
+
+    flags = fake_matmul.PairFlags()
+    flags.allow_bf16_reduced_precision_reduction = (False, True)
+    flags.allow_fp16_reduced_precision_reduction = (True, False)
+    monkeypatch.setattr(torch.backends.cuda, "matmul", flags)
+    matmul = env.matmul_precision()
+    assert matmul["allow_bf16_reduced_precision_reduction"] is False
+    assert matmul["allow_bf16_reduced_precision_reduction_split_k"] is True
+    assert matmul["allow_fp16_reduced_precision_reduction"] is True
+    assert matmul["allow_fp16_reduced_precision_reduction_split_k"] is False
+    assert matmul["fp32_precision"] == "ieee"
+    # A build without pairs: the split-K fields are None, the flags as they are.
+    monkeypatch.setattr(torch.backends.cuda, "matmul", fake_matmul.old_flags())
+    matmul = env.matmul_precision()
+    assert matmul["allow_bf16_reduced_precision_reduction"] is True
+    assert matmul["allow_bf16_reduced_precision_reduction_split_k"] is None
+    assert matmul["allow_fp16_reduced_precision_reduction_split_k"] is None
+    assert matmul["fp32_precision"] is None
+    assert json.loads(json.dumps(matmul)) == matmul
 
 
 def test_torch_without_cuda(monkeypatch):

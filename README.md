@@ -103,6 +103,27 @@ implementation names; `torch` defaults to the running one), `--pythonpath DIR` a
 An interrupted run resumes: rerunning the same command skips every
 (case, implementation, mode) that already has an `ok` record, unless `--force`.
 
+`--matmul-reduction default|strict` (default `default`) chooses the matmul setting
+every worker runs under. `default` touches nothing: torch's defaults, under which
+bf16 and fp16 GEMMs may reduce in reduced precision, and the sweeps run under them,
+for a fair comparison. `strict` makes each worker set, before the implementation's
+setup, `torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction` and
+`allow_fp16_reduced_precision_reduction` to `(False, True)` (no reduced-precision
+reduction, split-K still allowed) on builds whose flags are pairs, and to `False`
+on older ones; `(False, False)` is not offered, since it needs cuBLASLt. The setting
+is in `settings.matmul_reduction`, and what was in effect is read back into
+`env.torch.matmul`. Since the resume key does not hold the setting, a strict run
+goes to a results directory of its own: `run --matmul-reduction strict` refuses
+`results/` and requires `--results`, by convention `results-strict/` beside
+`results/`. The strict run is the counterfactual, one per GPU at the default point,
+for every entry in both modes; the sweeps are never run strict:
+
+```sh
+torch-op-bench run lce --device cuda --env liger=PYTHON --env torchtitan=PYTHON \
+    --case N=4096 --matmul-reduction strict --results results-strict
+torch-op-bench report results --strict results-strict --out report.md
+```
+
 ## Add an op
 
 An op is an `OpSpec` (see `torch_op_bench/spec.py`), addressed either by a short name
@@ -269,6 +290,15 @@ What the records say:
 - `info`: the contract's constants, `compiled`, and for `torch_lce*` the resolved
   `options` and `lce_source_md5`. That is an md5 of torch's LCE source files, which
   the build hash misses when an editable install's Python files are edited.
+- `info.op_decisions`, for `torch_lce*`: what torch's LCE decided for the case, read
+  from what the build exposes, nothing vendored, `source` naming where. With PR
+  pytorch#195707 (as reviewed), the values of `_mm_fp32_out_available(dtype,
+  device)` and `_mm_accumulates_in_fp32(dtype, device)` under the matmul setting in
+  effect; before it, the fields of `_ChunkContext.build` for the case that do not
+  depend on which gradients are asked (`is_cuda`, `use_acc_dtype`,
+  `forward_uses_cuda_out_dtype`, the dtypes, ...), built on stride-0 views of the
+  case's shapes, so nothing of its size is allocated; `{"unavailable": reason}`
+  when neither is there.
 - `memory.peak_bytes - memory.baseline_bytes` includes the cuBLAS workspace that the
   first matmul in a process allocates, about 30 MB.
 
@@ -295,7 +325,7 @@ concatenation; `torch_op_bench.records.read(directory)` reads a tree and
 | `memory` | `peak_bytes`, `baseline_bytes` (inputs allocated); `null` on CPU |
 | `parity` | `status` (`ok`, `fail`, `skipped`), `reason`, `metrics`, `tolerances`, `failed` |
 | `verify`, `work`, `info` | what `verify` returned; work units; the implementation's info |
-| `env`, `env_from`, `env_error` | provenance of the worker's interpreter (`worker`), or of the parent's when the worker produced no record (`runner`, without torch); why `env` is `null` if collecting it failed; `env.packages` maps each of the implementation's `packages` to its version (`null` if not installed), or, for a package installed from a VCS URL, to `{version, url, commit, requested}` from its `direct_url.json`; `env.package_root` the directory the worker imported torch-op-bench from; `env.torch.matmul` the process-wide settings that choose how matmuls round (`allow_tf32`, `allow_bf16_reduced_precision_reduction`, `allow_fp16_reduced_precision_reduction`, `fp32_precision`, `float32_matmul_precision`), as the worker had them after the run: they change parity (bf16 reduced-precision reduction, on by default, doubles the `grad_hidden` error of chunked LCE at 128-row chunks) |
+| `env`, `env_from`, `env_error` | provenance of the worker's interpreter (`worker`), or of the parent's when the worker produced no record (`runner`, without torch); why `env` is `null` if collecting it failed; `env.packages` maps each of the implementation's `packages` to its version (`null` if not installed), or, for a package installed from a VCS URL, to `{version, url, commit, requested}` from its `direct_url.json`; `env.package_root` the directory the worker imported torch-op-bench from; `env.torch.matmul` the process-wide settings that choose how matmuls round (`allow_tf32`, `allow_bf16_reduced_precision_reduction`, `allow_fp16_reduced_precision_reduction`, and, on builds whose reduced-precision flags are pairs `(reduced_precision, split_k)`, `allow_bf16_reduced_precision_reduction_split_k` and `allow_fp16_reduced_precision_reduction_split_k` (`null` otherwise), `fp32_precision`, `float32_matmul_precision`), as the worker had them after the run (`run --matmul-reduction strict` sets the reduced-precision ones): they change parity (bf16 reduced-precision reduction, on by default, doubles the `grad_hidden` error of chunked LCE at 128-row chunks) |
 
 The resume and merge key is (op, device slug, case key, implementation, mode).
 
@@ -347,7 +377,23 @@ torch-op-bench commits). Its sections:
    axis varies around the point (one case, or cases that differ in two axes at
    once), the default-point table is repeated at every case present instead, one
    table per case, as `plot` says when it draws nothing for that mode and dtype.
-4. **Environment check**: each control (`torch_eager_<env>`) against its original at
+4. **Reduction setting**, only with `--strict RESULTS_STRICT` (the results of a
+   `run --matmul-reduction strict`): first a check that every record of `RESULTS`
+   has the default setting and every record of `RESULTS_STRICT` the strict one
+   (read from `env.torch.matmul`; a record the runner wrote has none and is not
+   checked), else a warning naming the records that do not, and the section still
+   renders. Then per mode and dtype, at the default point, one row per entry: the
+   median of each and the time ratio strict / default; for each parity metric both
+   values and the ratio default / strict; "parity moves", yes with the metrics
+   named when a ratio is outside [0.9, 1.1] (the environment check's band); and,
+   for the torch LCE entries, `info.op_decisions`, the values in one cell. An entry
+   absent from one directory, or not `ok` in one, says "not measured" and why.
+   Below each table a computed reading: "Under the defaults, `<entries>` have the
+   strict parity (fp32 accumulation or no small-M GEMMs); `<entries>` do not."
+   and, for each torch LCE entry, whether its default parity equals its strict
+   parity: the check that, once PR pytorch#195707 lands as reviewed, torch LCE
+   accumulates in fp32 under the defaults while Liger and torchtitan do not.
+5. **Environment check**: each control (`torch_eager_<env>`) against its original at
    every point both have, as the time ratio (control / original), the peak
    difference, and the ratio of each parity metric. A time ratio outside [0.95,
    1.05], a difference beyond 64 MiB or a parity ratio outside [0.9, 1.1] is named
@@ -356,7 +402,7 @@ torch-op-bench commits). Its sections:
    torch build can move the error of the same code (by 23 % in `grad_hidden` at one
    shape between torch 2.14 and 2.16), so a parity comparison across environments
    needs this too. A parity metric on one side only is reported as such.
-5. **Not measured**: every `error` and `unavailable` record, grouped by the first
+6. **Not measured**: every `error` and `unavailable` record, grouped by the first
    line of its reason.
 
 Numbers have 3 significant digits and memory is in MiB with one decimal.
@@ -383,7 +429,12 @@ results hold several):
 - `overlay-<mode>.png`, with `--overlay`: the grid of both directories on the same
   axes, the first solid and the second dashed, e.g. one device under two torch
   builds; its footer counts what each set leaves out, and gives each set's
-  provenance, under the labels.
+  provenance, under the labels;
+- `reduction-<mode>.png`, with `--strict RESULTS_STRICT`: per entry at the default
+  point a pair of bars, default (filled) and strict (hatched), for the median time
+  and for the mode's parity metric (`grad_hidden` or `loss` error), as the report's
+  "Reduction setting" compares them, each on a linear axis from zero, so the bars'
+  lengths compare as the values do. It is drawn also when nothing is swept.
 
 When no axis varies around the point, `plot` draws nothing and says so on stderr,
 once per mode and dtype, and exits 0; the report's per-case tables are then the
@@ -465,10 +516,16 @@ scripts/remote-run.sh HOST fetch       # 5. results back into results/
   same `run` again (after a disconnect, or after an error) resumes: the triples
   recorded `ok` are skipped. Arguments after `--` go to `torch-op-bench run`;
   `--gpu N` sets `CUDA_VISIBLE_DEVICES`; `--op` names another op.
-- **`fetch`** copies the host's `results/` into this checkout's `results/` without
-  deleting anything on either side (the files are append-only, with new names per
-  run), then prints the start of each fetched slug's report as a check. Commit the
-  new files yourself, one commit per host run:
+  `--matmul-reduction strict` runs the strict point into `results-strict/` instead
+  (`--matmul-reduction strict --results "$D"/results-strict` on the host), e.g.
+  `run --matmul-reduction strict --envs liger,torchtitan -- --case N=4096`. Both
+  choose the results directory, so neither `--results` nor `--matmul-reduction`
+  is accepted after `--`.
+- **`fetch`** copies the host's `results/`, and `results-strict/` when it has one,
+  into this checkout's `results/` and `results-strict/` without deleting anything
+  on either side (the files are append-only, with new names per run), then prints
+  the start of each fetched slug's report as a check. Commit the new files
+  yourself, one commit per host run:
   `results/<op>/<slug>/<timestamp>-<host>.jsonl`.
 - **`shell`** opens a shell on the host in the scratch directory, with `env.sh`
   sourced.

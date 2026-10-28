@@ -226,3 +226,66 @@ def test_subprocess_cuda_memory(tests_dir):
     assert record["memory"]["peak_bytes"] > record["memory"]["baseline_bytes"]
     assert record["parity"]["status"] == "ok"
     assert record["env"]["torch"]["devices"]
+
+
+@pytest.mark.parametrize("pairs", [True, False])
+def test_apply_matmul_reduction(monkeypatch, pairs):
+    import fake_matmul
+    import torch
+
+    flags = fake_matmul.PairFlags() if pairs else fake_matmul.old_flags()
+    monkeypatch.setattr(torch.backends.cuda, "matmul", flags)
+    worker.apply_matmul_reduction("default")  # touches nothing
+    assert flags.allow_bf16_reduced_precision_reduction is True
+    assert flags.allow_fp16_reduced_precision_reduction is True
+    worker.apply_matmul_reduction("strict")
+    for name in fake_matmul.PAIR_FLAGS:
+        if pairs:
+            assert flags.pairs[name] == (False, True)  # split-K kept: no cuBLASLt needed
+        else:
+            assert getattr(flags, name) is False
+    with pytest.raises(ValueError, match="matmul_reduction must be one of"):
+        worker.apply_matmul_reduction("loose")
+
+
+@pytest.mark.parametrize("pairs", [True, False])
+def test_run_payload_strict(tests_dir, monkeypatch, pairs):
+    import fake_matmul
+    import torch
+
+    flags = fake_matmul.PairFlags() if pairs else fake_matmul.old_flags()
+    monkeypatch.setattr(torch.backends.cuda, "matmul", flags)
+    seen = {}
+    real_measure = worker._measure
+
+    def measure(*args):  # where the implementation's setup runs
+        seen["at_setup"] = flags.allow_bf16_reduced_precision_reduction
+        return real_measure(*args)
+
+    monkeypatch.setattr(worker, "_measure", measure)
+    data = payload(tests_dir)
+    data["settings"] = {**SETTINGS, "matmul_reduction": "strict"}
+    record = worker.run_payload(data)
+    assert record["status"] == "ok", record["traceback"]
+    assert seen["at_setup"] is False  # set before the implementation's setup
+    assert record["settings"]["matmul_reduction"] == "strict"
+    matmul = record["env"]["torch"]["matmul"]
+    assert matmul["allow_bf16_reduced_precision_reduction"] is False
+    assert matmul["allow_fp16_reduced_precision_reduction"] is False
+    split_k = matmul["allow_bf16_reduced_precision_reduction_split_k"]
+    assert split_k is (True if pairs else None)
+
+
+def test_run_payload_default_touches_no_flag(tests_dir, monkeypatch):
+    import fake_matmul
+    import torch
+
+    flags = fake_matmul.PairFlags()
+    flags.allow_fp16_reduced_precision_reduction = (True, False)  # not the default
+    monkeypatch.setattr(torch.backends.cuda, "matmul", flags)
+    record = worker.run_payload(payload(tests_dir))  # no matmul_reduction: default
+    assert record["status"] == "ok", record["traceback"]
+    assert flags.pairs == {
+        "allow_bf16_reduced_precision_reduction": (True, True),
+        "allow_fp16_reduced_precision_reduction": (True, False),
+    }

@@ -12,6 +12,7 @@ from typing import Any
 
 from . import analysis, env, runner
 from .spec import MODES, OpSpec, resolve_op
+from .worker import MATMUL_REDUCTIONS
 
 
 def _split(items: Sequence[str] | None) -> list[str]:
@@ -52,7 +53,27 @@ def _load(op: str, pythonpath: Sequence[str]) -> OpSpec:
     return resolve_op(op)
 
 
+DEFAULT_RESULTS = "results"
+
+
+def _results_dir(args: argparse.Namespace) -> str:
+    """``--results``, or ``results``; a strict run must name another directory: the
+    resume key does not hold the matmul setting, so a strict run in ``results`` would
+    skip, or be mixed with, the default run's records."""
+    results = args.results or DEFAULT_RESULTS
+    if args.matmul_reduction != "default" and (
+        args.results is None or Path(results).resolve() == Path(DEFAULT_RESULTS).resolve()
+    ):
+        raise ValueError(
+            f"--matmul-reduction {args.matmul_reduction} needs a results directory of its "
+            f"own, not {DEFAULT_RESULTS}/: pass --results (by convention "
+            f"{DEFAULT_RESULTS}-{args.matmul_reduction}/)"
+        )
+    return results
+
+
 def cmd_run(args: argparse.Namespace) -> int:
+    results = _results_dir(args)
     spec = _load(args.op, args.pythonpath)
     env_map = runner.parse_env_map(args.env)
     cases = runner.enumerate_cases(
@@ -70,6 +91,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         flush_l2=args.flush_l2,
         seed=args.seed,
         timeout=args.timeout,
+        matmul_reduction=args.matmul_reduction,
     )
     slug = args.device_slug or runner.device_slug(args.device, env_map["torch"])
     written = runner.run_sweep(
@@ -77,7 +99,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         args.op,
         runs,
         settings=settings,
-        results_dir=args.results,
+        results_dir=results,
         slug=slug,
         env_map=env_map,
         pythonpath=args.pythonpath,
@@ -85,9 +107,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     counts = Counter(record["status"] for record in written)
     summary = ", ".join(f"{counts[s]} {s}" for s in ("ok", "unavailable", "error") if counts[s])
-    print(
-        f"{len(written)} new records ({summary or 'none'}) under {args.results}/{spec.name}/{slug}/"
-    )
+    print(f"{len(written)} new records ({summary or 'none'}) under {results}/{spec.name}/{slug}/")
     return 0
 
 
@@ -138,6 +158,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         baseline=args.baseline,
         point=analysis.parse_point(args.point),
         command=["torch-op-bench", *args.argv],
+        strict=args.strict,
     )
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
@@ -166,6 +187,7 @@ def cmd_plot(args: argparse.Namespace) -> int:
         impls=_split(args.impl),
         overlay=args.overlay,
         labels=(args.label_a, args.label_b),
+        strict=args.strict,
     )
     for path in written:
         print(f"wrote {path} and {path.with_suffix('.csv').name}")
@@ -187,6 +209,12 @@ def _selection(parser: argparse.ArgumentParser) -> None:
         metavar="AXIS=VALUE,...",
         help="the point to centre on (default: the op's defaults, or inferred); the axes "
         "it does not name keep theirs",
+    )
+    parser.add_argument(
+        "--strict",
+        metavar="RESULTS_STRICT",
+        help="the results directory of a `run --matmul-reduction strict`: compare it with "
+        "RESULTS at the default point (the reduction setting)",
     )
 
 
@@ -230,7 +258,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--timeout", type=float, default=runner.Settings.timeout, help="seconds per worker"
     )
-    run.add_argument("--results", default="results", help="results directory (default: results)")
+    run.add_argument(
+        "--matmul-reduction",
+        choices=MATMUL_REDUCTIONS,
+        default="default",
+        help="default: torch's matmul settings as they are; strict: no reduced-precision "
+        "reduction in bf16/fp16 GEMMs (needs --results other than results)",
+    )
+    run.add_argument("--results", help="results directory (default: results)")
     run.add_argument("--force", action="store_true", help="rerun triples already recorded ok")
     run.add_argument(
         "--env",

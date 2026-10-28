@@ -25,6 +25,7 @@ def test_run_sweep_and_resume(tests_dir, tmp_path, capsys):
         "flush_l2": True,
         "seed": 3,
         "timeout": 120.0,
+        "matmul_reduction": "default",
     }
     assert run_cli(tests_dir, tmp_path, *args) == 0
     assert "(2 unavailable)" in capsys.readouterr().out
@@ -65,6 +66,35 @@ def test_run_bad_arguments(tests_dir, tmp_path, bad, capsys):
         run_cli(tests_dir, tmp_path, *bad)
     assert exc.value.code == 2
     assert "error:" in capsys.readouterr().err
+
+
+def test_run_strict(tests_dir, tmp_path, capsys):
+    # The worker, a subprocess, sets the flags and reads them back into the record.
+    args = ["--impl", "plain", "--mode", "fwd", "--case", "M=8", "--dtype", "float32"]
+    args += ["--repeat", "1", "--warmup", "0", "--matmul-reduction", "strict"]
+    strict = tmp_path / "results-strict"
+    assert run_cli(tests_dir, strict, *args) == 0
+    (record,) = records.read(strict)
+    assert record["status"] == "ok", record["traceback"]
+    assert record["settings"]["matmul_reduction"] == "strict"
+    matmul = record["env"]["torch"]["matmul"]
+    assert matmul["allow_bf16_reduced_precision_reduction"] is False
+    assert matmul["allow_fp16_reduced_precision_reduction"] is False
+
+
+@pytest.mark.parametrize("results", [None, "results", "./results"])
+def test_run_strict_refuses_the_default_results(tests_dir, tmp_path, monkeypatch, results, capsys):
+    monkeypatch.chdir(tmp_path)
+    args = ["run", "toy_op:TOY", "--pythonpath", str(tests_dir), "--matmul-reduction", "strict"]
+    if results is not None:
+        args += ["--results", results]
+    with pytest.raises(SystemExit) as exc:
+        cli.main(args)
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--matmul-reduction strict needs a results directory of its own" in err
+    assert "results-strict/" in err
+    assert not (tmp_path / "results").exists()
 
 
 def test_unknown_op(capsys):

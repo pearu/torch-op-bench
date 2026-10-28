@@ -23,6 +23,15 @@ memory ``peak_above``. Planted, for the tests to find:
   (``DUPLICATE``), which merge drops;
 - the ``other`` environment's records come from another torch-op-bench commit,
   so merge warns.
+
+``write_strict`` writes the strict counterpart at the default point (the records
+of ``run --matmul-reduction strict``), every implementation but ``compiled``
+(``STRICT_ABSENT``), each ``STRICT_TIME`` times slower. Planted: ``base``'s parity
+halves under strict (``STRICT_PARITY``: it moves); ``base_other``'s grows 5 %
+(within the band); ``chunked``'s stays, and its records carry ``op_decisions``
+(``STRICT_DECISIONS``) as torch LCE's do; ``base_other`` is ``unavailable`` in
+``fwd`` ``float32`` (``STRICT_UNAVAILABLE``); one record has the default setting
+(``STRICT_ODD``).
 """
 
 from __future__ import annotations
@@ -155,7 +164,11 @@ def _record(impl: str, mode: str, dtype: str, params: dict, when: datetime.datet
             "version": environment["version"],
             "git_version": environment["git_version"],
             "cuda": "13.0",
-            "matmul": {"allow_bf16_reduced_precision_reduction": True, "allow_tf32": False},
+            "matmul": {
+                "allow_bf16_reduced_precision_reduction": True,
+                "allow_fp16_reduced_precision_reduction": True,
+                "allow_tf32": False,
+            },
         },
         "torch_op_bench": {"version": "0.1.0", "hash": environment["hash"], "dirty": False},
         "packages": dict(environment["packages"]),
@@ -248,3 +261,45 @@ def subset(results_dir: str | Path, out: str | Path, *wheres: dict) -> Path:
         if record["case"]["params"] in points:
             records.append(target, {k: v for k, v in record.items() if k != analysis.SOURCE})
     return Path(out)
+
+
+STRICT_TIME = 1.2
+STRICT_ABSENT = "compiled"
+STRICT_PARITY = {"base": 0.5, "base_other": 1.05, "chunked": 1.0}
+STRICT_DECISIONS = {"source": "synth", "_mm_accumulates_in_fp32": True, "other_field": 1}
+STRICT_UNAVAILABLE = ("base_other", "fwd", "float32")
+STRICT_ODD = ("base", "fwd", "bfloat16")
+STRICT_MATMUL = {
+    "allow_bf16_reduced_precision_reduction": False,
+    "allow_fp16_reduced_precision_reduction": False,
+    "allow_bf16_reduced_precision_reduction_split_k": True,
+    "allow_fp16_reduced_precision_reduction_split_k": True,
+    "allow_tf32": False,
+}
+
+
+def write_strict(results_dir: str | Path) -> Path:
+    """Write the strict set under ``results_dir``; return ``<results>/synth/<slug>``."""
+    when = datetime.datetime(2026, 10, 17, 13, 0, tzinfo=datetime.timezone.utc)
+    path = records.result_path(results_dir, "synth", SLUG, timestamp=when, host="host-a")
+    for impl, (_, modes, *_) in IMPLS.items():
+        if impl == STRICT_ABSENT:
+            continue
+        for mode in modes:
+            for dtype in DTYPES:
+                record = _record(impl, mode, dtype, dict(DEFAULT), when)
+                record["settings"]["matmul_reduction"] = "strict"
+                if (impl, mode, dtype) != STRICT_ODD:
+                    record["env"]["torch"]["matmul"] = dict(STRICT_MATMUL)
+                if impl == "chunked":
+                    record["info"]["op_decisions"] = dict(STRICT_DECISIONS)
+                if (impl, mode, dtype) == STRICT_UNAVAILABLE:
+                    record.update(status="unavailable", reason="not here", times_ms=None)
+                    record.update(memory=None, parity=None, verify=None)
+                else:
+                    record["times_ms"] = [STRICT_TIME * t for t in record["times_ms"]]
+                    metrics = record["parity"]["metrics"]
+                    for name in metrics:
+                        metrics[name] *= STRICT_PARITY[impl]
+                records.append(path, record)
+    return path.parent

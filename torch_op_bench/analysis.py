@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from . import records
+from .spec import MODES
 
 Record = dict[str, Any]
 Row = dict[str, Any]
@@ -448,3 +449,129 @@ def implementations(rows: Sequence[Row], baseline: str | None = None) -> list[st
             anchor = following[-1] if following else original
             order.insert(order.index(anchor) + 1, control)
     return order
+
+
+# --- the reduction setting: the default run against the strict one -----------------------
+
+# The process-wide flags ``run --matmul-reduction`` sets, read back from
+# ``env.torch.matmul``: on under torch's defaults, off under ``strict``.
+REDUCTION_FLAGS = (
+    "allow_bf16_reduced_precision_reduction",
+    "allow_fp16_reduced_precision_reduction",
+)
+# A parity metric "moves" between the two settings outside this band of ratios: the
+# environment check's band for a parity metric (report.PARITY_RATIO_RANGE).
+PARITY_RATIO_RANGE = (0.9, 1.1)
+
+
+def reduction_setting(record: Mapping[str, Any]) -> str | None:
+    """``default`` (both flags on), ``strict`` (both off) or ``other``, from the record's
+    ``env.torch.matmul``, split-K allowed in the first two; ``None`` for a record
+    without it (made by the runner: nothing ran)."""
+    matmul = _get(record, "env", "torch", "matmul")
+    if not isinstance(matmul, Mapping):
+        return None
+    reduced = [matmul.get(name) for name in REDUCTION_FLAGS]
+    if any(matmul.get(f"{name}_split_k") is False for name in REDUCTION_FLAGS):
+        return "other"
+    if all(value is True for value in reduced):
+        return "default"
+    if all(value is False for value in reduced):
+        return "strict"
+    return "other"
+
+
+def reduction_mismatches(recs: Iterable[Mapping[str, Any]], expected: str) -> list[Row]:
+    """The records whose setting is known and is not ``expected``."""
+    return [r for r in recs if reduction_setting(r) not in (None, expected)]
+
+
+def _parity_values(row: Row | None) -> dict[str, float]:
+    if row is None:
+        return {}
+    return {
+        k.removeprefix(PARITY_PREFIX): v
+        for k, v in row.items()
+        if k.startswith(PARITY_PREFIX) and k not in ("parity_status", "parity_failed")
+        if v is not None
+    }
+
+
+def reduction_rows(
+    recs_default: Sequence[Mapping[str, Any]],
+    recs_strict: Sequence[Mapping[str, Any]],
+    point: Mapping[str, Any],
+    *,
+    baseline: str | None = None,
+) -> list[dict[str, Any]]:
+    """Per dtype, mode and implementation at ``point``, in display order: its row in
+    each set (``None`` when absent), whether both are ``ok`` (``measured``), the
+    median of each and the time ratio strict / default, and per parity metric of
+    both rows the two values and their ratio default / strict (1 when equal, ``None``
+    for a zero strict value against a nonzero default); ``moves`` the metrics whose
+    ratio is outside ``PARITY_RATIO_RANGE`` or ``None``; ``op_decisions`` of each
+    record's ``info``, when it has one."""
+    axes = axes_of([*recs_default, *recs_strict])
+    sets = []
+    for recs in (recs_default, recs_strict):
+        here = {}
+        for record in recs:
+            row = flatten(record, axes=axes)
+            if all(row.get(k) == v for k, v in point.items()):
+                row["op_decisions"] = (record.get("info") or {}).get("op_decisions")
+                here[(row["dtype"], row["mode"], row["implementation"])] = row
+        sets.append(here)
+    found = []
+    union = [*sets[0].values(), *sets[1].values()]
+    for dtype in dict.fromkeys(row["dtype"] for row in union):
+        for mode in [m for m in MODES if any(r["mode"] == m for r in union)]:
+            selected = at(union, dtype=dtype, mode=mode)
+            if not selected:
+                continue
+            for name in implementations(selected, baseline):
+                key = (dtype, mode, name)
+                default, strict = sets[0].get(key), sets[1].get(key)
+                measured = all(r is not None and r.get("status") == "ok" for r in (default, strict))
+                entry: dict[str, Any] = {
+                    "implementation": name,
+                    "dtype": dtype,
+                    "mode": mode,
+                    "role": (default or strict).get("role"),
+                    "control_of": (default or strict).get("control_of"),
+                    "default": default,
+                    "strict": strict,
+                    "measured": measured,
+                    "median_default": None,
+                    "median_strict": None,
+                    "time_ratio": None,
+                    "parity": {},
+                    "moves": [],
+                    "op_decisions": [
+                        None if r is None else r["op_decisions"] for r in (default, strict)
+                    ],
+                }
+                if measured:
+                    entry.update(
+                        median_default=default.get("median_ms"),
+                        median_strict=strict.get("median_ms"),
+                        time_ratio=_ratio(strict.get("median_ms"), default.get("median_ms")),
+                    )
+                    entry["parity"], entry["moves"] = _parity_moves(default, strict)
+                found.append(entry)
+    return found
+
+
+def _ratio(a: Any, b: Any) -> float | None:
+    return None if a is None or b is None or b == 0 else a / b
+
+
+def _parity_moves(default: Row, strict: Row) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    a, b = _parity_values(default), _parity_values(strict)
+    parity, moves = {}, []
+    low, high = PARITY_RATIO_RANGE
+    for name in sorted(set(a) & set(b)):
+        value = 1.0 if a[name] == b[name] else _ratio(a[name], b[name])
+        parity[name] = {"default": a[name], "strict": b[name], "ratio": value}
+        if value is None or not low <= value <= high:
+            moves.append(name)
+    return parity, moves

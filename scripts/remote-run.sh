@@ -21,12 +21,14 @@ subcommands:
              with scripts/setup-env.sh; show their provenance, nvidia-smi and
              `torch-op-bench list OP`
   run        start `torch-op-bench run OP --device cuda` detached (nohup, setsid),
-             RUN-ARGS after `--`; returns at once; rerun after a disconnect to
-             resume (recorded ok triples are skipped)
+             RUN-ARGS after `--`, into REMOTE_DIR/results/ (results-strict/ with
+             --matmul-reduction strict); returns at once; rerun after a disconnect
+             to resume (recorded ok triples are skipped)
   status     whether the run is alive, the end of its log, records per status
   wait       follow the log until the run ends; exit with its status
-  fetch      copy REMOTE_DIR/results/ into this checkout's results/ (never deletes
-             anything on HOST) and show the first lines of each slug's report
+  fetch      copy REMOTE_DIR/results/ and results-strict/ (when there) into this
+             checkout's results/ and results-strict/ (never deletes anything on
+             HOST) and show the first lines of each new slug's report
   shell      an interactive shell on HOST in REMOTE_DIR with env.sh sourced
 
 options:
@@ -37,6 +39,10 @@ options:
                        (e.g. liger,torchtitan)
   --gpu N              CUDA_VISIBLE_DEVICES=N on HOST for run (default: all)
   --op OP              the op to run, list and report (default lce)
+  --matmul-reduction default|strict
+                       run under torch's matmul defaults (default), or strict: no
+                       reduced-precision reduction in bf16/fp16 GEMMs, into
+                       results-strict/ (the resume key does not hold the setting)
   --allow-dirty        push uncommitted changes (development only: the records then
                        name a commit that is not what ran)
   --dry-run            print every local and remote command, run none
@@ -59,6 +65,7 @@ torch_env="torch-nightly"
 envs=()
 gpu=""
 op="lce"
+matmul_reduction="default"
 allow_dirty=0
 dry_run=0
 run_args=()
@@ -68,9 +75,10 @@ while (($#)); do
             usage
             exit 0
             ;;
-        --dir | --torch-env | --envs | --gpu | --op)
+        --dir | --torch-env | --envs | --gpu | --op | --matmul-reduction)
             [[ $# -ge 2 ]] || die "$1 needs a value"
             case "$1" in
+                --matmul-reduction) matmul_reduction="$2" ;;
                 --dir) remote_dir="$2" ;;
                 --torch-env) torch_env="$2" ;;
                 --envs) IFS=, read -r -a more <<<"$2" && envs+=("${more[@]}") ;;
@@ -118,6 +126,19 @@ case "$torch_env" in
     *) die "--torch-env must be torch-nightly or torch-stable, not $torch_env" ;;
 esac
 [[ -z "$gpu" || "$gpu" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "--gpu takes GPU indices, not $gpu"
+case "$matmul_reduction" in
+    default) results_name="results" ;;
+    strict) results_name="results-strict" ;;
+    *) die "--matmul-reduction must be default or strict, not $matmul_reduction" ;;
+esac
+# Both choose the results directory: a strict run must not land in results/.
+for arg in "${run_args[@]}"; do
+    case "$arg" in
+        --results | --results=* | --matmul-reduction | --matmul-reduction=*)
+            die "${arg%%=*} is remote-run.sh's own option (before --), not a RUN-ARG"
+            ;;
+    esac
+done
 if ((${#run_args[@]})) && [[ "$subcommand" != run ]]; then
     die "RUN-ARGS (after --) are for run only"
 fi
@@ -322,6 +343,10 @@ cmd_run() {
     for arg in "${run_args[@]}"; do
         args+=" $(printf '%q' "$arg")"
     done
+    local reduction_arg=""
+    if [[ "$matmul_reduction" != default ]]; then
+        reduction_arg=" --matmul-reduction $matmul_reduction"
+    fi
     local visible=""
     if [[ -n "$gpu" ]]; then
         visible="export CUDA_VISIBLE_DEVICES=$gpu"
@@ -332,10 +357,10 @@ if [ -f run.pid ] && kill -0 \"\$(cat run.pid)\" 2>/dev/null; then
     echo \"a run is in progress (pid \$(cat run.pid)): status or wait\" >&2
     exit 1
 fi
-mkdir -p logs results
+mkdir -p logs $results_name
 $(env_args_script)
 log=\"\$D/logs/\$(date -u +%Y%m%dT%H%M%SZ).log\"
-cmd=($torch_python -m torch_op_bench.cli run $(printf '%q' "$op") --device cuda --results \"\$D\"/results \"\${env_args[@]}\"$args)
+cmd=($torch_python -m torch_op_bench.cli run $(printf '%q' "$op") --device cuda --results \"\$D\"/$results_name$reduction_arg \"\${env_args[@]}\"$args)
 printf '%q ' \"\${cmd[@]}\" > \"\$log\"
 printf '\\n' >> \"\$log\"
 rm -f run.status
@@ -375,16 +400,20 @@ exit \"\$status\""
 }
 
 cmd_fetch() {
-    local changes slug
-    printf '+ rsync -ai %q %q\n' "$host:$rsync_dir/results/" "$root/results/"
-    ((dry_run)) && return 0
-    mkdir -p "$root/results"
-    changes="$(rsync -ai "$host:$rsync_dir/results/" "$root/results/")"
-    echo "$changes"
-    for slug in $(sed -n "s|^>f[^ ]* $op/\([^/]*\)/.*\.jsonl$|\1|p" <<<"$changes" | sort -u); do
-        echo "== $op/$slug"
-        PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" "${PYTHON:-python3}" -m torch_op_bench.cli \
-            report "$root/results" --op "$op" --device-slug "$slug" 2>&1 | head -n 25
+    local changes slug name
+    # Each directory, not its contents, into this checkout: results-strict/ is there
+    # only after a strict run, and a missing source is skipped (--ignore-missing-args
+    # does not skip a missing DIR/, which rsync changes into).
+    for name in results results-strict; do
+        printf '+ rsync -ai --ignore-missing-args %q %q\n' "$host:$rsync_dir/$name" "$root/"
+        ((dry_run)) && continue
+        changes="$(rsync -ai --ignore-missing-args "$host:$rsync_dir/$name" "$root/")"
+        echo "$changes"
+        for slug in $(sed -n "s|^>f[^ ]* $name/$op/\([^/]*\)/.*\.jsonl$|\1|p" <<<"$changes" | sort -u); do
+            echo "== $name/$op/$slug"
+            PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" "${PYTHON:-python3}" -m torch_op_bench.cli \
+                report "$root/$name" --op "$op" --device-slug "$slug" 2>&1 | head -n 25
+        done
     done
 }
 

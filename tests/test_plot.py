@@ -530,6 +530,15 @@ def rendered_gaps(fig):
     return gaps
 
 
+def with_strict(kwargs, synth_strict):
+    """``kwargs`` for ``draw`` with ``strict`` the strict set when asked, and the kinds
+    of figure written: the reduction figure (R1-26 F2) is under the same rules."""
+    kwargs = dict(kwargs)
+    if not kwargs.pop("strict", False):
+        return kwargs, {"grid", "ratio", "overlay"}
+    return {**kwargs, "strict": synth_strict}, {"grid", "ratio", "overlay", "reduction"}
+
+
 def FontPropertiesSize(size):
     from matplotlib.font_manager import FontProperties
 
@@ -542,10 +551,12 @@ def FontPropertiesSize(size):
         {"sweep": ["M"]},  # one column: the title wraps
         {},  # four columns
         {"sweep": ["M", "K"], "impls": ["base"]},  # two columns, the baseline alone
+        {"strict": True},  # and the reduction figures
+        {"strict": True, "impls": ["base"], "mode": "fwd_bwd"},  # one pair of bars
     ],
-    ids=["one-column", "four-columns", "two-columns"],
+    ids=["one-column", "four-columns", "two-columns", "reduction", "reduction-one-entry"],
 )
-def test_gaps_between_bands(synth, tmp_path, monkeypatch, kwargs):
+def test_gaps_between_bands(synth, synth_strict, tmp_path, monkeypatch, kwargs):
     # The user (inbox 21): the white space between title, legend and first panel,
     # and between last panel and footer, is at most about a capital letter's height
     # of the text around it, in every figure plot writes.
@@ -555,8 +566,9 @@ def test_gaps_between_bands(synth, tmp_path, monkeypatch, kwargs):
     monkeypatch.setattr(plt, "close", closed.append)
     other = tmp_path / "second"
     S.write(other)
+    kwargs, kinds = with_strict(kwargs, synth_strict)
     written = draw(synth, tmp_path / "out", dtype="float32", overlay=other, **kwargs)
-    assert {p.name.split("-")[0] for p in written} == {"grid", "ratio", "overlay"}
+    assert {p.name.split("-")[0] for p in written} == kinds
     assert len(closed) == len(written)
     for path, fig in zip(written, closed, strict=True):
         for name, (gap, bound) in rendered_gaps(fig).items():
@@ -626,10 +638,20 @@ def nightly_like_ratios(synth):
         {},  # four columns
         {"sweep": ["M"], "metrics": ["peak_above_baseline"]},  # one row
         {"sweep": ["layout"], "metrics": ["parity_grad_rel", "tflops"], "mode": "fwd_bwd"},
+        {"strict": True},  # and the reduction figures
+        {"strict": True, "impls": ["chunked"], "mode": "fwd_bwd"},
     ],
-    ids=["one-column", "two-columns", "four-columns", "one-row", "str-axis"],
+    ids=[
+        "one-column",
+        "two-columns",
+        "four-columns",
+        "one-row",
+        "str-axis",
+        "reduction",
+        "reduction-two-entries",
+    ],
 )
-def test_nothing_clipped(synth, tmp_path, monkeypatch, kwargs):
+def test_nothing_clipped(synth, synth_strict, tmp_path, monkeypatch, kwargs):
     # The user (inbox 22): nothing non-empty may be clipped, in any direction, in
     # any figure plot writes: every drawn text lies inside the figure.
     import matplotlib.pyplot as plt
@@ -638,9 +660,9 @@ def test_nothing_clipped(synth, tmp_path, monkeypatch, kwargs):
     monkeypatch.setattr(plt, "close", closed.append)
     other = tmp_path / "second"
     S.write(other)
-    kwargs = {"dtype": "float32", **kwargs}
+    kwargs, kinds = with_strict({"dtype": "float32", **kwargs}, synth_strict)
     written = draw(synth, tmp_path / "out", overlay=other, **kwargs)
-    assert {p.name.split("-")[0] for p in written} == {"grid", "ratio", "overlay"}
+    assert {p.name.split("-")[0] for p in written} == kinds
     monkeypatch.undo()
     for path, fig in zip(written, closed, strict=True):
         assert_inside(fig, path.name)
@@ -796,3 +818,127 @@ def test_metric_a_mode_lacks(synth, tmp_path, capsys):
         "parity_grad_rel",
         "median_ms",
     }
+
+
+def test_reduction_figure(synth, synth_strict, tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+
+    out = tmp_path / "out"
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    written = draw(synth, out, dtype="float32", strict=synth_strict)
+    monkeypatch.undo()
+    figures = dict(zip((p.name for p in written), closed, strict=True))
+    names = [p.name for p in written]
+    assert names[-2:] == ["reduction-fwd.png", "reduction-fwd_bwd.png"]
+    assert "reduction-fwd.png" not in [p.name for p in draw(synth, tmp_path / "plain")]
+    path = out / "reduction-fwd_bwd.png"
+    assert min(png_size(path)) > 0
+    rows = read_csv(path.with_suffix(".csv"))
+    bars = {(r["metric"], r["implementation"], r["set"]): float(r["y"]) for r in rows}
+    # Per entry a pair of bars, time and the mode's parity metric; compiled is absent
+    # from the strict set: no bars, not a failure.
+    assert {k[1] for k in bars} == {"base", "base_other", "chunked"}
+    t = S.median_ms("base", "fwd_bwd", "float32", S.DEFAULT)
+    assert bars[("median_ms", "base", "default")] == pytest.approx(t)
+    assert bars[("median_ms", "base", "strict")] == pytest.approx(S.STRICT_TIME * t)
+    assert bars[("parity_grad_rel", "base", "default")] == pytest.approx(2e-3)
+    assert bars[("parity_grad_rel", "base", "strict")] == pytest.approx(1e-3)
+    assert {r["metric"] for r in rows} == {"median_ms", "parity_grad_rel"}
+    assert {r["figure"] for r in rows} == {"reduction-fwd_bwd"}
+    roles = {r["implementation"]: r["role"] for r in rows}
+    assert roles == {"base": "baseline", "base_other": "control", "chunked": "counterpart"}
+    assert {r["point"] for r in rows} == {"M=128, K=32, N=16, layout=a"}
+    # R1-26 F1: both panels linear from zero, so each bar is as long as its value.
+    fig = figures["reduction-fwd_bwd.png"]
+    for ax, metric in zip(fig.axes, ("median_ms", "parity_grad_rel"), strict=True):
+        assert ax.get_yscale() == "linear"
+        assert ax.get_ylim()[0] == 0
+        drawn = sorted(round(b.get_height(), 12) for b in ax.patches)
+        assert drawn == sorted(round(y, 12) for (m, _, _), y in bars.items() if m == metric)
+        assert all(b.get_y() == 0 for b in ax.patches)
+    for fig in closed:
+        plt.close(fig)
+    # fwd: the loss error; base_other is unavailable in the strict fwd float32.
+    fwd = read_csv(out / "reduction-fwd.csv")
+    assert {r["metric"] for r in fwd} == {"median_ms", "parity_loss_rel_err"}
+    assert {r["implementation"] for r in fwd} == {"base"}
+
+
+def test_reduction_figure_draws_a_zero(synth, synth_strict, tmp_path, monkeypatch):
+    # A zero parity error is a result: a bar of length zero, and a row in the CSV.
+    value = plot._reduction_value
+
+    def zero_strict(entry, metric, which):
+        y = value(entry, metric, which)
+        return 0.0 if y is not None and which == "strict" and metric != "median_ms" else y
+
+    monkeypatch.setattr(plot, "_reduction_value", zero_strict)
+    out = tmp_path / "out"
+    draw(synth, out, dtype="float32", mode="fwd_bwd", strict=synth_strict)
+    rows = read_csv(out / "reduction-fwd_bwd.csv")
+    zeros = {
+        r["implementation"] for r in rows if r["set"] == "strict" and r["metric"] != "median_ms"
+    }
+    assert zeros == {"base", "base_other", "chunked"}
+    assert all(
+        float(r["y"]) == 0 for r in rows if r["set"] == "strict" and r["metric"] != "median_ms"
+    )
+
+
+def test_reduction_figure_with_impl_and_cli(synth, synth_strict, tmp_path):
+    out = tmp_path / "out"
+    argv = ["plot", str(synth), "--out", str(out), "--baseline", "base", "--mode", "fwd_bwd"]
+    argv += ["--dtype", "bfloat16", "--impl", "chunked", "--strict", str(synth_strict)]
+    with pytest.warns(UserWarning, match="different torch-op-bench commits"):
+        assert cli.main(argv) == 0
+    rows = read_csv(out / "reduction-fwd_bwd.csv")
+    assert {r["implementation"] for r in rows} == {"base", "chunked"}
+
+
+def test_reduction_parity():
+    def entry(*names):
+        return {"parity": {name: {} for name in names}}
+
+    assert plot.reduction_parity(
+        [entry("loss_rel_err"), entry("grad_hidden_rel_l2")], "fwd_bwd"
+    ) == ("grad_hidden_rel_l2")
+    assert plot.reduction_parity([entry("b", "a")], "fwd_bwd") == "a"
+    assert plot.reduction_parity([entry()], "fwd") is None
+
+
+def test_metric_only_away_from_the_sweeps(synth, tmp_path):
+    # R1-22 R1: a parity metric present only in rows the grid does not draw (away from
+    # the sweeps around the point) is not a metric of the grid: no empty log panel.
+    from torch_op_bench import records
+
+    away = {**S.DEFAULT, "M": 64, "K": 16}  # two axes off the point: in no sweep
+    recs = [r for r in records.read(synth) if r["status"] == "ok"]
+    planted = next(r for r in recs if r["implementation"] == "base" and r["mode"] == "fwd")
+    planted = {
+        **planted,
+        "case": {**planted["case"], "params": away},
+        "case_key": "away",
+        "parity": {**planted["parity"], "metrics": {"loss_rel_err": 1e-3, "away_err": 0.1}},
+    }
+    target = tmp_path / "results" / "synth" / S.SLUG / "x-host-a.jsonl"
+    for record in recs:
+        records.append(target, record)
+    records.append(target, planted)
+    with pytest.warns(UserWarning, match="different torch-op-bench commits"):
+        rows = analysis.to_rows(analysis.load(tmp_path / "results"))
+    assert "parity_away_err" in plot.known_metrics(rows)  # present in the records
+    out = tmp_path / "out"
+    with pytest.warns(UserWarning) as caught:
+        plot.plot(
+            tmp_path / "results",
+            out,
+            baseline="base",
+            dtype=planted["case"]["dtype"],
+            mode="fwd",
+            metrics=["median_ms", "parity_away_err"],
+        )
+    messages = [str(w.message) for w in caught]
+    assert f"fwd, {planted['case']['dtype']}: no values of parity_away_err: left out" in messages
+    grid = read_csv(out / "grid-fwd.csv")
+    assert {r["metric"] for r in grid} == {"median_ms"}

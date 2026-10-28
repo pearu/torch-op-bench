@@ -35,8 +35,8 @@ TIME_RATIO_RANGE = (0.95, 1.05)
 PEAK_DIFF_LIMIT = 64 * MIB
 # ... and its parity metrics within these of its original's: another build can move
 # the error of the same code (R1-12 R1), which a parity comparison must not credit
-# to the counterpart.
-PARITY_RATIO_RANGE = (0.9, 1.1)
+# to the counterpart. The reduction-setting section uses the same band.
+PARITY_RATIO_RANGE = analysis.PARITY_RATIO_RANGE
 
 
 def sig3(value: Any) -> str:
@@ -358,7 +358,185 @@ def _case_order(values: tuple) -> tuple:
     return tuple((0, v, "") if isinstance(v, (int, float)) else (1, 0, str(v)) for v in values)
 
 
-# --- 4. the environment check ------------------------------------------------------------
+# --- 4. the reduction setting ------------------------------------------------------------
+
+REDUCTION_TITLE = "## Reduction setting"
+# The record names a warning lists at most; the rest is counted.
+NAMED_RECORDS = 10
+# The op_decisions fields named in the section's cell, when the build has them: the
+# PR's predicates, else the _ChunkContext capability decisions.
+DECISION_FIELDS = (
+    "_mm_fp32_out_available",
+    "_mm_accumulates_in_fp32",
+    "is_cuda",
+    "use_acc_dtype",
+    "forward_uses_cuda_out_dtype",
+)
+
+
+def record_text(record: Mapping[str, Any], axes: Sequence[str]) -> str:
+    case = record.get("case") or {}
+    params = case.get("params") or {}
+    where = ", ".join(f"{name}={params.get(name)}" for name in axes)
+    return f"{record.get('implementation')} {record.get('mode')} {case.get('dtype')} {where}"
+
+
+def reduction_warnings(
+    recs_default: Sequence[Mapping[str, Any]],
+    recs_strict: Sequence[Mapping[str, Any]],
+    axes: Sequence[str],
+) -> list[str]:
+    """A line per set holding a record of another setting than its own, naming them."""
+    lines = []
+    for label, recs, expected in (
+        ("RESULTS", recs_default, "default"),
+        ("RESULTS_STRICT", recs_strict, "strict"),
+    ):
+        odd = analysis.reduction_mismatches(recs, expected)
+        if not odd:
+            continue
+        names = [
+            f"{record_text(r, axes)} ({analysis.reduction_setting(r)})" for r in odd[:NAMED_RECORDS]
+        ]
+        more = f" and {len(odd) - NAMED_RECORDS} more" if len(odd) > NAMED_RECORDS else ""
+        lines.append(
+            f"**Warning:** {len(odd)} record(s) of {label} do not have the {expected} "
+            f"setting in `env.torch.matmul`: {'; '.join(names)}{more}."
+        )
+    return lines
+
+
+def decisions_text(decisions: Sequence[Mapping[str, Any] | None]) -> str:
+    """``op_decisions`` of the default and the strict record in one cell: the named
+    fields the build has, once when both agree."""
+
+    def one(d: Mapping[str, Any] | None) -> str:
+        if not d:
+            return MISSING
+        if "unavailable" in d:
+            return f"unavailable: {d['unavailable']}"
+        return ", ".join(f"{k}={d[k]}" for k in DECISION_FIELDS if k in d) or MISSING
+
+    default, strict = (one(d) for d in decisions)
+    return default if default == strict else f"default: {default}; strict: {strict}"
+
+
+def _side(entry: Mapping[str, Any], which: str) -> str:
+    row = entry[which]
+    if row is None:
+        return "absent"
+    return text(row.get("status"))
+
+
+def render_reduction(
+    entries: Sequence[Mapping[str, Any]], point: Mapping[str, Any], dtype: str, mode: str
+) -> str:
+    """The table of one dtype and mode, and the reading below it."""
+    title = f"### {mode}, {dtype}"
+    if not entries:
+        return f"{title}\n\nNo records at the default point.\n"
+    metrics = sorted({name for e in entries for name in e["parity"]})
+    decisions = any(any(d is not None for d in e["op_decisions"]) for e in entries)
+    header = ["implementation", "median ms default", "median ms strict", "time strict / default"]
+    for name in metrics:
+        header += [f"{name} default", f"{name} strict", f"{name} default / strict"]
+    header.append("parity moves")
+    if decisions:
+        header.append("op_decisions")
+    numeric = [False, True, True, True, *[True] * (3 * len(metrics)), False]
+    numeric += [False] * decisions
+    label_rows = [
+        {"implementation": e["implementation"], "role": e["role"], "control_of": e["control_of"]}
+        for e in entries
+    ]
+    body = []
+    for e in entries:
+        cells = [impl_label(e["implementation"], label_rows)]
+        if not e["measured"]:
+            reason = f"not measured (default: {_side(e, 'default')}, strict: {_side(e, 'strict')})"
+            cells += [reason, *[MISSING] * (2 + 3 * len(metrics)), MISSING]
+        else:
+            cells += [sig3(e["median_default"]), sig3(e["median_strict"]), sig3(e["time_ratio"])]
+            for name in metrics:
+                value = e["parity"].get(name)
+                if value is None:
+                    cells += [MISSING] * 3
+                else:
+                    cells += [sig3(value["default"]), sig3(value["strict"]), sig3(value["ratio"])]
+            cells.append(f"yes: {', '.join(e['moves'])}" if e["moves"] else "no")
+        if decisions:
+            cells.append(text(decisions_text(e["op_decisions"])))
+        body.append(cells)
+    lines = [title, "", f"At {analysis.point_text(point)}.", "", table(header, body, numeric), ""]
+    lines += reduction_reading(entries)
+    return "\n".join(lines) + "\n"
+
+
+def reduction_reading(entries: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The reading below a table: which entries keep their strict parity under the
+    defaults and which do not; and the torch LCE entries' (those recording
+    ``op_decisions``) on a line of their own."""
+    compared = [e for e in entries if e["measured"] and e["parity"]]
+    keep = [e["implementation"] for e in compared if not e["moves"]]
+    move = [e["implementation"] for e in compared if e["moves"]]
+
+    def names(found: Sequence[str]) -> str:
+        return ", ".join(f"`{n}`" for n in found) or "none"
+
+    lines = [
+        f"Under the defaults, {names(keep)} have the strict parity (fp32 accumulation or "
+        f"no small-M GEMMs); {names(move)} do not.",
+    ]
+    unmeasured = [e["implementation"] for e in entries if e not in compared]
+    if unmeasured:
+        lines[-1] += f" Not compared (not measured in both, or no parity): {names(unmeasured)}."
+    lce = [e for e in compared if any(d is not None for d in e["op_decisions"])]
+    for e in lce:
+        verdict = "equals" if not e["moves"] else f"does not equal ({', '.join(e['moves'])})"
+        lines.append("")
+        lines.append(
+            f"torch LCE: `{e['implementation']}`'s default parity {verdict} its strict parity."
+        )
+    return lines
+
+
+def render_reduction_section(
+    recs_default: Sequence[Mapping[str, Any]],
+    recs_strict: Sequence[Mapping[str, Any]],
+    point: Mapping[str, Any],
+    baseline: str,
+    *,
+    dtypes: Sequence[str],
+    modes: Sequence[str],
+    strict_dir: str | Path,
+) -> str:
+    axes = analysis.axes_of([*recs_default, *recs_strict])
+    low, high = PARITY_RATIO_RANGE
+    lines = [
+        REDUCTION_TITLE,
+        "",
+        f"The default run against the strict one (`{strict_dir}`: no reduced-precision "
+        f"reduction in bf16 and fp16 GEMMs) at the default point: the time ratio "
+        f"(strict / default) and, per parity metric, the ratio default / strict. A parity "
+        f"ratio outside [{low}, {high}] (the environment check's band) means the "
+        f"setting moves that entry's parity.",
+        "",
+    ]
+    warned = reduction_warnings(recs_default, recs_strict, axes)
+    for line in warned:
+        lines += [line, ""]
+    entries = analysis.reduction_rows(recs_default, recs_strict, point, baseline=baseline)
+    for d in dtypes:
+        for m in modes:
+            selected = [e for e in entries if e["dtype"] == d and e["mode"] == m]
+            if selected:
+                lines.append(render_reduction(selected, point, d, m))
+    if not any(e["dtype"] in dtypes and e["mode"] in modes for e in entries):
+        lines.append("No records at the default point in either set.")
+    return "\n".join(lines) + "\n"
+
+
+# --- 5. the environment check ------------------------------------------------------------
 
 
 def _parity_metrics(row: Row) -> dict[str, Any]:
@@ -513,7 +691,7 @@ def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-# --- 5. not measured -----------------------------------------------------------------------
+# --- 6. not measured -----------------------------------------------------------------------
 
 
 def render_not_measured(rows: Sequence[Row], axes: Sequence[str]) -> str:
@@ -556,15 +734,21 @@ def report(
     baseline: str = "torch_eager",
     point: Mapping[str, str] | None = None,
     command: Sequence[str] | None = None,
+    strict: str | Path | None = None,
 ) -> str:
-    """The markdown report of a results directory."""
+    """The markdown report of a results directory; with ``strict``, a strict run's
+    results directory, the "Reduction setting" section too."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         recs = analysis.load(results_dir, op=op, device_slug=device_slug)
-    if not recs:
-        raise ValueError(f"no records under {results_dir}")
-    _one({r["op"] for r in recs}, "op", "choose one with --op")
-    _one({r["device_slug"] for r in recs}, "device slug", "choose one with --device-slug")
+        if not recs:
+            raise ValueError(f"no records under {results_dir}")
+        op_name = _one({r["op"] for r in recs}, "op", "choose one with --op")
+        slug = _one(
+            {r["device_slug"] for r in recs}, "device slug", "choose one with --device-slug"
+        )
+        # The strict set of the same op and device as RESULTS.
+        recs_strict = [] if strict is None else analysis.load(strict, op=op_name, device_slug=slug)
     rows = analysis.to_rows(recs)
     axes = analysis.axes_of(recs)
     point = analysis.default_point(recs, point=point)
@@ -609,6 +793,18 @@ def report(
                 continue
             lines += [f"**{m}, {d}:** {NO_SWEEP.lower()}: one table per case instead.", ""]
             lines.append(render_per_case(selected, axes, baseline, d, m))
+    if strict is not None:
+        lines.append(
+            render_reduction_section(
+                recs,
+                recs_strict,
+                point["params"],
+                baseline,
+                dtypes=dtypes,
+                modes=modes,
+                strict_dir=strict,
+            )
+        )
     scope = [row for row in rows if row["dtype"] in dtypes and row["mode"] in modes]
     lines.append(render_environment_check(scope, axes))
     lines.append(render_not_measured(scope, axes))

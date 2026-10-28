@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from torch_op_bench import remote
+from torch_op_bench import records, remote
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "remote-run.sh"
@@ -52,6 +52,12 @@ def test_syntax_and_help():
         (["tob-ex", "run", "--dir", "rel/dir"], "--dir must be absolute or start with ~/"),
         (["tob-ex", "run", "--envs", "a;b"], "bad environment name"),
         (["tob-ex", "run", "extra"], "unexpected argument extra"),
+        (["tob-ex", "run", "--matmul-reduction", "loose"], "--matmul-reduction must be"),
+        (["tob-ex", "run", "--", "--results", "x"], "--results is remote-run.sh's own option"),
+        (
+            ["tob-ex", "run", "--", "--matmul-reduction=strict"],
+            "--matmul-reduction is remote-run.sh's own option",
+        ),
     ],
 )
 def test_usage_errors(args, message):
@@ -149,6 +155,16 @@ def test_run_dry_run():
     assert 'echo $! > "$D"/run.pid' in out and 'log="$D/logs/' in out
     assert "a run is in progress" in out  # no second run on top of the first
     assert "CUDA_VISIBLE_DEVICES" not in dry("run")
+    assert "--matmul-reduction" not in dry("run")  # the default: nothing passed
+
+
+def test_run_strict_dry_run():
+    out = dry("run", "--matmul-reduction", "strict", "--", "--case", "N=1024")
+    assert "\nmkdir -p logs results-strict\n" in out
+    assert (
+        'cmd=("$D"/envs/torch-nightly/bin/python -m torch_op_bench.cli run lce --device cuda '
+        '--results "$D"/results-strict --matmul-reduction strict "${env_args[@]}" --case N=1024)'
+    ) in out
 
 
 def test_status_wait_fetch_shell_dry_run():
@@ -157,7 +173,10 @@ def test_status_wait_fetch_shell_dry_run():
     out = dry("wait")
     assert 'tail -n +1 -f --pid="$pid"' in out and 'exit "$status"' in out
     out = dry("fetch")
-    assert out == f"+ rsync -ai tob-ex:torch_op_bench-scratch/results/ {ROOT}/results/\n"
+    assert out == "".join(
+        f"+ rsync -ai --ignore-missing-args tob-ex:torch_op_bench-scratch/{name} {ROOT}/\n"
+        for name in ("results", "results-strict")
+    )
     assert "--delete" not in out  # never deletes on the remote, nor locally
     out = dry("shell")
     assert out.startswith("+ ssh -t tob-ex bash\\ -c\\ ") and "source\\\\\\ env.sh" in out
@@ -558,8 +577,17 @@ def test_remote_side_end_to_end(fake_host, repo, tests_dir):
     assert "toy/cpu: 2 records (2 ok)" in out
     out = call("fetch", "--op", "toy")
     fetched = list((repo / "results" / "toy" / "cpu").glob("*.jsonl"))
-    assert len(fetched) == 1 and "== toy/cpu" in out and "# Report: toy on cpu" in out
+    assert len(fetched) == 1 and "== results/toy/cpu" in out and "# Report: toy on cpu" in out
+    assert not (repo / "results-strict").exists()  # none on the host: skipped
     # A rerun of the same run resumes: the recorded ok triples are skipped.
     call("run", "--op", "toy_op:TOY", *run_args)
     out = call("wait")
     assert "recorded, skipped" in out and "0 new records" in out
+    # The strict run: into results-strict/ beside results/, and fetched back.
+    call("run", "--op", "toy_op:TOY", "--matmul-reduction", "strict", *run_args)
+    out = call("wait")
+    assert "2 new records (2 ok)" in out and "results-strict/toy/cpu/" in out, out[-700:]
+    out = call("fetch", "--op", "toy")
+    (strict,) = (repo / "results-strict" / "toy" / "cpu").glob("*.jsonl")
+    assert "== results-strict/toy/cpu" in out and "== results/toy/cpu" not in out
+    assert all(r["settings"]["matmul_reduction"] == "strict" for r in records.read(strict))

@@ -19,6 +19,7 @@ def test_settings_and_env_map():
         "flush_l2": False,
         "seed": 0,
         "timeout": 600.0,
+        "matmul_reduction": "default",
     }
     assert runner.parse_env_map() == {"torch": sys.executable}
     env_map = runner.parse_env_map(["other=/x/python", "torch=/y/python"])
