@@ -546,8 +546,8 @@ every push.
 
 This project's stable test interface, which tools outside it may name, is two
 commands: `scripts/test-affected.sh [--base REF] [-- PATH...]` to iterate, and
-`pytest --testmon-noselect` (under `COVERAGE_CORE=ctrace`) for the final run, both
-described below. Their names and arguments stay as they are.
+`COVERAGE_CORE=ctrace python -m pytest --testmon-noselect -n auto --maxprocesses 10`
+for the final run, both described below. Their names and arguments stay as they are.
 
 Iterating, `scripts/test-affected.sh [--base REF] [-- PATH...]` lints, then runs the
 tests `pytest-testmon` selects, then the test files `scripts/affected-tests.py` maps
@@ -567,11 +567,11 @@ the scripts and environment definitions the tests run as files, and the files ev
 test depends on (`pyproject.toml` and the shared test helpers), for which it says
 `all`. It also says `all` once for a new interpreter, a new or rebuilt torch, or a
 new GPU, from the stamp `.testmondata.env` it keeps beside `.testmondata`. For `all`
-the script runs the whole suite once instead:
+the script runs the whole suite once instead, in parallel:
 
 ```sh
 ruff check .
-COVERAGE_CORE=ctrace python -m pytest --testmon-noselect
+COVERAGE_CORE=ctrace python -m pytest --testmon-noselect -n auto --maxprocesses 10
 ```
 
 The final run, in the interpreter with CUDA and the counterpart environments present:
@@ -579,9 +579,23 @@ the whole suite, which also refreshes testmon's data, then CI's own command.
 
 ```sh
 ruff check .
-COVERAGE_CORE=ctrace pytest --testmon-noselect
-pytest --cov=torch_op_bench --cov-report=term-missing --cov-fail-under=90
+COVERAGE_CORE=ctrace pytest --testmon-noselect -n auto --maxprocesses 10
+pytest --cov=torch_op_bench --cov-report=term-missing --cov-fail-under=90 -n auto --maxprocesses 10
 ```
+
+The whole-suite runs above, and CI's, run in parallel with `pytest-xdist` (in
+`dev`): `-n auto` starts a worker per core, at most 10 (more workers gained less
+than ten percent on a 32-core host; CI's runner has four). `-n` is on those
+commands only, not in the pytest options: a selected run stays serial, as each
+worker imports torch first. `-n 0` runs a whole suite serially. When a CUDA device
+is present, the `cuda` tests all go to one worker (`--dist loadgroup`, in
+`pyproject.toml`'s pytest options, groups them, from `tests/conftest.py`): the
+peak-memory and subprocess-CUDA-memory tests measure the device, and a second
+worker on it would perturb them. They run under their plain ids, so `pytest-testmon`
+records each test once, however the suite ran, and a parallel final run refreshes
+the data the serial selection reads. `dev` keeps pytest below 9.2: under pytest
+9.2, pytest-xdist's `loadgroup` stops grouping (pytest-dev/pytest-xdist#1386); the
+bound goes when a pytest-xdist release groups under pytest 9.2.
 
 Tests marked `cuda` run when a CUDA device is present and are skipped otherwise. The
 CUDA test of the Liger entries runs once per Liger environment present

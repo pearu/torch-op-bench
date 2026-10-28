@@ -339,7 +339,10 @@ def test_test_affected_all(checkout):
     root, _ = checkout
     (root / "pyproject.toml").write_text("two\n")
     commands = dry_run(checkout)
-    assert commands == ["ruff check .", "COVERAGE_CORE=ctrace python -m pytest --testmon-noselect"]
+    assert commands == [
+        "ruff check .",
+        "COVERAGE_CORE=ctrace python -m pytest --testmon-noselect -n auto --maxprocesses 10",
+    ]
     assert commands == readme_blocks()[2]
 
 
@@ -348,7 +351,7 @@ def test_test_affected_new_environment(checkout):
     (root / ".testmondata.env").write_text("{}\n")
     assert dry_run(checkout) == [
         "ruff check .",
-        "COVERAGE_CORE=ctrace python -m pytest --testmon-noselect",
+        "COVERAGE_CORE=ctrace python -m pytest --testmon-noselect -n auto --maxprocesses 10",
     ]
 
 
@@ -371,7 +374,10 @@ def test_test_affected_testmon_only(checkout):
 def test_readme_final_run():
     """The final run: the whole suite through testmon, then CI's own command."""
     final = readme_blocks()[3]
-    assert final[:2] == ["ruff check .", "COVERAGE_CORE=ctrace pytest --testmon-noselect"]
+    assert final[:2] == [
+        "ruff check .",
+        "COVERAGE_CORE=ctrace pytest --testmon-noselect -n auto --maxprocesses 10",
+    ]
     workflow = (ROOT / ".github" / "workflows").glob("*.yml")
     ci = " ".join(" ".join(path.read_text().split()) for path in workflow)
     assert f"run: >- {final[2]} " in ci + " "

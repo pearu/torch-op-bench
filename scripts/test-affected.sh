@@ -10,7 +10,8 @@ While iterating: `ruff check .`, then the tests pytest-testmon selects
 (`pytest --testmon`), then the test files scripts/affected-tests.py maps the
 changes since REF to, unconditionally (`pytest --testmon-noselect FILE...`).
 When the map says `all` (a change every test depends on, or a new interpreter,
-torch build or GPU), the whole suite once instead of both. Each pytest run
+torch build or GPU), the whole suite once instead of both, in parallel
+(`-n auto --maxprocesses 10`, pytest-xdist). Each pytest run
 records testmon's data, under COVERAGE_CORE=ctrace (with Python 3.14's
 default core, testmon's data misses tests). The exit status is lint's, else the
 first failing pytest's.
@@ -85,7 +86,9 @@ tests=()
 
 status=0
 if [ "${tests[*]-}" = "all" ]; then
-    run_pytest --testmon-noselect || status=$?
+    # The whole suite in parallel (see "Tests" in README.md); a selected run stays
+    # serial, as K interpreters importing torch would cost more than it saves.
+    run_pytest --testmon-noselect -n auto --maxprocesses 10 || status=$?
 else
     run_pytest --testmon || status=$?
     if [ ${#tests[@]} -gt 0 ]; then

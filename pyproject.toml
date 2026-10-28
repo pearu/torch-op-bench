@@ -17,7 +17,11 @@ dependencies = []
 [project.optional-dependencies]
 # matplotlib only: the reports read records with the standard library, no pandas.
 plot = ["matplotlib"]
-dev = ["pytest", "pytest-cov", "pytest-testmon>=2.2", "ruff"]
+# pytest below 9.2: there pytest-xdist's --dist loadgroup stops grouping (it renames
+# items by assigning item._nodeid, which pytest 9.2 ignores; pytest-dev/pytest-xdist#1386),
+# and the cuda tests must stay on one worker. Remove the bound when a pytest-xdist
+# release groups under pytest 9.2.
+dev = ["pytest<9.2", "pytest-cov", "pytest-testmon>=2.2", "pytest-xdist", "ruff"]
 # Liger in the torch environment itself (§4.2); envs/liger.yml is its own environment.
 liger = ["liger-kernel==0.8.4"]
 # torchtitan in the torch environment itself (§4.2); envs/torchtitan.yml is its own.
@@ -42,3 +46,6 @@ select = ["E", "F", "W", "I", "B", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["cuda: needs a CUDA device; skipped without one"]
+# Under -n, the xdist_group("cuda") tests (see tests/conftest.py) share one worker;
+# without -n this does nothing.
+addopts = "--dist loadgroup"
