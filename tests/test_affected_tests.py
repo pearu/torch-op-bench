@@ -418,7 +418,11 @@ def test_test_affected_selects_every_test_of_a_changed_line(tmp_path):
             env={**env, "PYTEST_ADDOPTS": "-v -p no:randomly"},
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        return sorted(set(re.findall(r"test_m\.py::(test_\w+) PASSED", proc.stdout)))
+        # Serial -v writes "test_m.py::test_a PASSED"; under xdist (the `all` branch),
+        # "[gw0] [ 33%] PASSED tests/test_m.py::test_a".
+        pattern = r"test_m\.py::(test_\w+) PASSED|PASSED \S*test_m\.py::(test_\w+)"
+        found = re.findall(pattern, proc.stdout)
+        return sorted({a or b for a, b in found})
 
     assert ran() == ["test_a", "test_b", "test_c"]  # the first run: all
     assert ran() == []
