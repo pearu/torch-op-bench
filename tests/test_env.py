@@ -41,13 +41,22 @@ def test_matmul_precision(monkeypatch):
         "fp32_precision": getattr(torch.backends.cuda.matmul, "fp32_precision", None),
         "float32_matmul_precision": torch.get_float32_matmul_precision(),
     }
-    # As the process has them when the record is made, not the defaults.
-    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_bf16_reduced_precision_reduction", False)
+    # As the process has them when the record is made, not the defaults. The flag is
+    # set and restored here, not by monkeypatch: cuBLASModule serves its flags through
+    # __getattr__ and __setattr__, and pytest 9.2's monkeypatch restores from the
+    # instance __dict__, so at teardown it deletes the flag instead (CI, torch 2.15).
+    flags, name = torch.backends.cuda.matmul, "allow_bf16_reduced_precision_reduction"
+    split_k = getattr(flags, f"{name}_split_k", None)
+    saved = getattr(flags, name) if split_k is None else (getattr(flags, name), split_k)
+    setattr(flags, name, False)
     torch.set_float32_matmul_precision("high")
     try:
         matmul = env.torch_info()["matmul"]
     finally:
+        setattr(flags, name, saved)
         torch.set_float32_matmul_precision("highest")
+    restored = getattr(flags, name), getattr(flags, f"{name}_split_k", None)
+    assert restored == (saved if split_k is not None else (saved, None))
     assert matmul["allow_bf16_reduced_precision_reduction"] is False
     assert matmul["float32_matmul_precision"] == "high"
     # A setting this torch lacks is None, not an error.
