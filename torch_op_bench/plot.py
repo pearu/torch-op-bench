@@ -634,7 +634,8 @@ def reduction_figure(
     baseline: str,
 ) -> Path:
     """Per entry a pair of bars, default and strict, for each of ``metrics`` (median
-    time, a parity metric) one panel above the other; the CSV holds the bars."""
+    time, a parity metric) one panel above the other, each on a linear axis from
+    zero; the CSV holds the bars."""
     plt = pyplot()
     from matplotlib.patches import Patch
 
@@ -651,8 +652,8 @@ def reduction_figure(
             color = palette.get(entry["implementation"], "#7f7f7f")
             for offset, which in zip((-0.2, 0.2), REDUCTION_SETS, strict=True):
                 y = _reduction_value(entry, metric, which)
-                if y is None or (parity and y <= 0):
-                    continue  # nothing to draw (on a log axis, nor a zero)
+                if y is None:
+                    continue  # nothing to draw
                 strict_bar = which == "strict"
                 ax.bar(
                     x + offset,
@@ -685,8 +686,9 @@ def reduction_figure(
                 )
         label = METRIC_LABELS.get(metric, metric) if not parity else metric
         ax.set_ylabel(ylabel_text(label))
-        if parity:
-            ax.set_yscale("log")
+        # Linear from zero (R1-26 F1): a bar's length is its value, so the pair's
+        # lengths compare as the values do, and a zero parity error shows as zero.
+        ax.set_ylim(bottom=0)
         ax.grid(True, axis="y", alpha=0.3)
     bottom = axes[-1][0]
     bottom.set_xticks(xs)
@@ -705,7 +707,9 @@ def reduction_figure(
     # Bands, top to bottom, as in _figure: title, legend, panels (with their tick
     # labels), footer, each as high as its text, measured.
     title_lines = textwrap.wrap(title, int(width * TITLE_CHARS_PER_INCH), break_on_hyphens=False)
-    title_text = fig.text(0.5, 1, "\n".join(title_lines), ha="center", va="top", fontsize="large")
+    title_text = fig.text(
+        0.5, 1, "\n".join(title_lines), ha="center", va="top", fontsize="large", gid="title"
+    )
     legend = fig.legend(
         handles=handles, loc="upper center", ncol=2, borderaxespad=0, fontsize="small"
     )
@@ -714,7 +718,9 @@ def reduction_figure(
         for line in footer
         for part in textwrap.wrap(line, int(width * 17), break_on_hyphens=False)
     ]
-    footer_text = fig.text(0.01, 0, "\n".join(lines), ha="left", va="bottom", fontsize="x-small")
+    footer_text = fig.text(
+        0.01, 0, "\n".join(lines), ha="left", va="bottom", fontsize="x-small", gid="footer"
+    )
     renderer = fig.canvas.get_renderer()
 
     def inches(artist: Any) -> float:

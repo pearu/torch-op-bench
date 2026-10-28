@@ -433,7 +433,8 @@ results hold several):
 - `reduction-<mode>.png`, with `--strict RESULTS_STRICT`: per entry at the default
   point a pair of bars, default (filled) and strict (hatched), for the median time
   and for the mode's parity metric (`grad_hidden` or `loss` error), as the report's
-  "Reduction setting" compares them. It is drawn also when nothing is swept.
+  "Reduction setting" compares them, each on a linear axis from zero, so the bars'
+  lengths compare as the values do. It is drawn also when nothing is swept.
 
 When no axis varies around the point, `plot` draws nothing and says so on stderr,
 once per mode and dtype, and exits 0; the report's per-case tables are then the
