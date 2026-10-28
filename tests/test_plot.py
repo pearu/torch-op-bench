@@ -1,4 +1,6 @@
 import csv
+import itertools
+import re
 import struct
 import sys
 
@@ -497,9 +499,21 @@ def cap_height(size):
     return 0.73 * FontProperties(size=size).get_size_in_points()
 
 
+def panel_rows(fig, renderer):
+    """The tight boxes (tick and axis labels included) of the figure's rows of panels,
+    top to bottom: a row's is the union of its panels'."""
+    from matplotlib.transforms import Bbox
+
+    rows = {}
+    for ax in fig.axes:
+        rows.setdefault(round(ax.get_position().y1, 6), []).append(ax.get_tightbbox(renderer))
+    return [Bbox.union(rows[top]) for top in sorted(rows, reverse=True)]
+
+
 def rendered_gaps(fig):
     """The white space, in points, between stacked elements, with its bound: a capital
-    letter of the axis font (the tick and axis labels), as the user set it (inbox 22)."""
+    letter of the axis font (the tick and axis labels), as the user set it (inbox 22);
+    between two stacked rows of panels too (inbox 34): ``panels-<i>-<i+1>``."""
     import matplotlib
 
     renderer = fig.canvas.get_renderer()
@@ -525,9 +539,17 @@ def rendered_gaps(fig):
         gaps["title-legend"] = ((box.y0 - lbox.y1) * pt, bound)
         above = lbox.y0
     gaps["above-panels"] = ((above - panels_top) * pt, bound)
+    rows = panel_rows(fig, renderer)
+    for i, (upper, lower) in enumerate(itertools.pairwise(rows)):
+        gaps[f"panels-{i}-{i + 1}"] = ((upper.y0 - lower.y1) * pt, bound)
     footer_top = max(t.get_window_extent(renderer).y1 for t in footer)
     gaps["panels-footer"] = ((panels_bottom - footer_top) * pt, bound)
     return gaps
+
+
+def panel_gaps(gaps):
+    """The names of ``rendered_gaps``'s gaps between two rows of panels."""
+    return [name for name in gaps if re.fullmatch(r"panels-\d+-\d+", name)]
 
 
 def with_strict(kwargs, synth_strict):
@@ -570,14 +592,49 @@ def test_gaps_between_bands(synth, synth_strict, tmp_path, monkeypatch, kwargs):
     written = draw(synth, tmp_path / "out", dtype="float32", overlay=other, **kwargs)
     assert {p.name.split("-")[0] for p in written} == kinds
     assert len(closed) == len(written)
+    stacked = set()  # the kinds drawn with two rows of panels or more
     for path, fig in zip(written, closed, strict=True):
-        for name, (gap, bound) in rendered_gaps(fig).items():
+        gaps = rendered_gaps(fig)
+        for name, (gap, bound) in gaps.items():
             assert -0.5 <= gap <= bound, (path.name, name, gap, bound)
+        if panel_gaps(gaps):
+            stacked.add(path.name.split("-")[0])
+    assert stacked == kinds  # no kind is measured on one row only
     if kwargs.get("sweep") == ["M"]:  # the ratio and overlay titles wrap at 3.8 in
         assert any("\n" in title_artist(fig).get_text() for fig in closed)
     monkeypatch.undo()
     for fig in closed:
         plt.close(fig)
+
+
+def test_panel_gap_measured(synth, tmp_path, monkeypatch):
+    # The bound on the gap between stacked panels is not met vacuously: with
+    # tight_layout's former h_pad (1.08 font sizes, 10.8 pt) the same measurement
+    # reports a gap above it.
+    import matplotlib.pyplot as plt
+
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    monkeypatch.setattr(plot, "PANEL_PAD", 1.08)
+    rows = [r for r in analysis.to_rows(load_quiet(synth)) if r["mode"] == "fwd"]
+    rows = [r for r in rows if r["dtype"] == "float32"]
+    plot._figure(
+        tmp_path / "two.png",
+        [(None, rows, None)],
+        ["median_ms", "tokens_per_s"],
+        ["M"],
+        S.DEFAULT,
+        "base",
+        "synth: fwd",
+        ["footer"],
+    )
+    monkeypatch.undo()
+    (fig,) = closed
+    gaps = rendered_gaps(fig)
+    gap, bound = gaps["panels-0-1"]
+    assert gap > bound, (gap, bound)
+    assert panel_gaps(gaps) == ["panels-0-1"]
+    plt.close(fig)
 
 
 def drawn_texts(fig):

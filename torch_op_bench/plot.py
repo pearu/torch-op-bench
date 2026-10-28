@@ -31,11 +31,14 @@ TITLE_CHARS_PER_INCH = 10
 # The layout, in inches: the margin above the title and below the footer, and the
 # gap between title and legend. Between the legend (or the title) and the first
 # panel, and between the last panel and the footer, the gap is tight_layout's pad,
-# LAYOUT_PAD times the font size (10 pt: 3 pt). Every such gap is at most a capital
-# letter of the axis font (the tick and axis labels, 10 pt): about 7.3 pt.
+# LAYOUT_PAD times the font size (10 pt: 3 pt). Between two stacked panels (tick and
+# axis labels included) it is tight_layout's h_pad, PANEL_PAD times the font size: the
+# same 3 pt, so the figure reads evenly. Every such gap is at most a capital letter of
+# the axis font (the tick and axis labels, 10 pt): about 7.3 pt, PANEL_PAD 0.73.
 MARGIN = 0.05
 GAP = 3 / 72
 LAYOUT_PAD = 0.3
+PANEL_PAD = LAYOUT_PAD
 # tight_layout passes at most, until the panels stop moving (see _layout).
 LAYOUT_PASSES = 4
 
@@ -548,7 +551,7 @@ def _layout(fig: Any, rect: tuple[float, float, float, float]) -> None:
     """
     previous = None
     for _ in range(LAYOUT_PASSES):
-        fig.tight_layout(rect=rect, pad=LAYOUT_PAD, h_pad=1.08, w_pad=1.08)
+        fig.tight_layout(rect=rect, pad=LAYOUT_PAD, h_pad=PANEL_PAD, w_pad=1.08)
         fig.canvas.draw()  # the tick labels of the new panel sizes
         wrapped = _fit_ylabels(fig)
         # In pixels; tight_layout's own rounding moves panels by a fraction of one.
@@ -563,7 +566,7 @@ def _layout(fig: Any, rect: tuple[float, float, float, float]) -> None:
                 return
         previous = positions
     # The passes ran out with a change (a label just wrapped) no tight_layout has seen.
-    fig.tight_layout(rect=rect, pad=LAYOUT_PAD, h_pad=1.08, w_pad=1.08)
+    fig.tight_layout(rect=rect, pad=LAYOUT_PAD, h_pad=PANEL_PAD, w_pad=1.08)
 
 
 def ylabel_text(label: str) -> str:
