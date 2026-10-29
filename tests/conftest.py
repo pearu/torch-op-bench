@@ -16,13 +16,28 @@ def _has_cuda() -> bool:
     return torch.cuda.is_available()
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
-    if _has_cuda():
-        return
-    skip = pytest.mark.skip(reason="no CUDA device")
+    # With a device, the cuda tests go to one xdist worker (--dist loadgroup, in
+    # pyproject.toml): the peak-memory and subprocess-CUDA-memory tests measure the
+    # device, and a second worker on it would perturb them. Tests use the first GPU
+    # only. tryfirst: xdist's own hook on the worker, which turns the mark into the
+    # node id's "@cuda" suffix the scheduler groups by, runs before this one otherwise.
+    mark = pytest.mark.xdist_group("cuda") if _has_cuda() else pytest.mark.skip("no CUDA device")
     for item in items:
         if "cuda" in item.keywords:
-            item.add_marker(skip)
+            item.add_marker(mark)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_finish(session):
+    # On an xdist worker, xdist's own hook has now sent the scheduler the ids with
+    # "@cuda", which it groups by. From here on the tests run, are reported and are
+    # recorded by pytest-testmon under their plain ids, as in a serial run, so that
+    # testmon keeps one record per test whichever way the suite ran.
+    for item in session.items:
+        if item.nodeid.endswith("@cuda"):
+            item._nodeid = item.nodeid.removesuffix("@cuda")
 
 
 @pytest.fixture
