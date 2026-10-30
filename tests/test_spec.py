@@ -80,6 +80,47 @@ def test_as_control():
         )
 
 
+def test_with_params():
+    calls = []
+
+    def setup(case, **params):
+        calls.append((case, params))
+        return {"seen": params}
+
+    impl = Implementation(
+        "chunked",
+        toy_op.run_chunked,
+        modes={"fwd"},
+        setup=setup,
+        packages=("p",),
+        info={"k": 1},
+    )
+    variant = impl.with_params(split=2, mode="b")
+    assert variant.name == "chunked[mode=b,split=2]"  # keys sorted
+    assert variant.info == {"k": 1, "base": "chunked", "params": {"split": 2, "mode": "b"}}
+    assert impl.info == {"k": 1} and impl.variant_of is None
+    assert variant.variant_of == "chunked"
+    assert variant.run is impl.run and variant.modes == {"fwd"} and variant.packages == ("p",)
+    assert variant.setup("case") == {"seen": {"split": 2, "mode": "b"}}
+    assert calls == [("case", {"split": 2, "mode": "b"})]
+    assert impl.with_params(split=8).name == "chunked[split=8]"
+    # Without a setup there is nothing to pass the parameters to.
+    assert Implementation("plain", toy_op.run_plain).with_params(split=2).setup is None
+    with pytest.raises(ValueError, match="a variant needs parameters"):
+        impl.with_params()
+    with pytest.raises(ValueError, match="duplicate"):
+        OpSpec(
+            name="op",
+            axes=[Axis("M", [1])],
+            dtypes=["float32"],
+            make_inputs=None,
+            implementations=[impl, impl.with_params(split=2), impl.with_params(split=2)],
+            reference=impl,
+            compare=None,
+        )
+    assert toy_op.TOY.implementation("chunked[split=2]").variant_of == "chunked"
+
+
 def test_opspec_lookup_and_defaults():
     spec = toy_op.TOY
     assert spec.axis("K").values == [4, 8]

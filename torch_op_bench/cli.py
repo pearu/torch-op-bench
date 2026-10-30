@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 from collections.abc import Sequence
@@ -14,9 +15,12 @@ from . import analysis, env, runner
 from .spec import MODES, OpSpec, resolve_op
 from .worker import MATMUL_REDUCTIONS
 
+# A comma outside brackets: a variant's name, "liger[a=1,b=2]", holds commas of its own.
+_LIST_COMMA = re.compile(r",(?![^\[]*\])")
+
 
 def _split(items: Sequence[str] | None) -> list[str]:
-    return [part for item in items or () for part in item.split(",") if part]
+    return [part for item in items or () for part in _LIST_COMMA.split(item) if part]
 
 
 def _assignments(text: str) -> list[tuple[str, str]]:
@@ -139,6 +143,8 @@ def cmd_list(args: argparse.Namespace) -> int:
         role = " (reference)" if impl is spec.reference else ""
         if impl.info.get("role") == "control":
             role = f" (control of {impl.info['control_of']})"
+        if impl.variant_of is not None:
+            role = f" (variant of {impl.variant_of})"
         modes = ",".join(m for m in MODES if m in impl.modes)
         print(f"  {impl.name}{role}  modes={modes}  env={impl.env_name}  {status}")
     tolerances = ", ".join(f"{k}<={v:g}" for k, v in spec.tolerances.items()) or "none"

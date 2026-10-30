@@ -5,7 +5,9 @@ the worker: ``plain`` and ``chunked`` run, ``backward`` leaves its gradients on
 the inputs, ``missing`` is unavailable, ``broken``
 raises, ``flagged`` checks that its ``env_vars`` were set before torch was imported,
 ``elsewhere`` runs in the environment named ``other``, ``spawner`` leaves a child
-process behind, ``described`` adds run-time facts to its ``info`` from ``setup``.
+process behind, ``described`` adds run-time facts to its ``info`` from ``setup``;
+``chunked[split=2]`` is ``chunked`` with another split size, a variant
+(``Implementation.with_params``).
 """
 
 import os
@@ -43,9 +45,18 @@ def run_plain(inputs, mode):
     return _finish((a @ b).sum(), inputs, mode)
 
 
+# The rows per chunk of ``chunked``, set by its setup; a worker runs one case.
+_CHUNKED = {"split": 4}
+
+
+def setup_chunked(case, split=4):
+    _CHUNKED["split"] = split
+    return {"split": split, "num_chunks": -(-case.params["M"] // split)}
+
+
 def run_chunked(inputs, mode):
     a, b = inputs
-    y = sum((chunk @ b).sum() for chunk in a.split(4))
+    y = sum((chunk @ b).sum() for chunk in a.split(_CHUNKED["split"]))
     return _finish(y, inputs, mode)
 
 
@@ -106,6 +117,7 @@ def compare(outputs, ref_outputs, case):
 
 
 PLAIN = Implementation("plain", run_plain)
+CHUNKED = Implementation("chunked", run_chunked, setup=setup_chunked)
 
 TOY = OpSpec(
     name="toy",
@@ -120,7 +132,7 @@ TOY = OpSpec(
     implementations=[
         PLAIN,
         PLAIN.as_control("other"),
-        Implementation("chunked", run_chunked),
+        CHUNKED,
         Implementation(
             "described", run_plain, modes={"fwd"}, setup=setup_info, info={"chunk": "rows of 4"}
         ),
@@ -130,6 +142,7 @@ TOY = OpSpec(
         Implementation("flagged", run_plain, env_vars={"TOB_TOY_FLAG": "on"}, verify=verify_flag),
         Implementation("elsewhere", run_plain, modes={"fwd"}, env_name="other"),
         Implementation("spawner", run_plain, modes={"fwd"}, setup=setup_spawner),
+        CHUNKED.with_params(split=2),
     ],
     reference=Implementation("reference", run_reference),
     compare=compare,

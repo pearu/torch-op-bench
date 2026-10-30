@@ -98,6 +98,10 @@ def test_enumerate_runs_respects_modes():
     pairs = [(impl.name, mode) for _, impl, mode in runs]
     assert ("broken", "fwd") in pairs and ("broken", "fwd_bwd") not in pairs
     assert len(pairs) == 16
+    # A variant runs only when named: never along a default sweep.
+    assert not any(name.startswith("chunked[") for name, _ in pairs)
+    runs = runner.enumerate_runs(SPEC, [case], ["chunked[split=2]"], ["fwd"])
+    assert [(impl.name, mode) for _, impl, mode in runs] == [("chunked[split=2]", "fwd")]
     runs = runner.enumerate_runs(SPEC, [case], ["plain", "broken"], ["fwd_bwd"])
     assert [(impl.name, mode) for _, impl, mode in runs] == [("plain", "fwd_bwd")]
     with pytest.raises(KeyError):

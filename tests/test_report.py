@@ -886,3 +886,122 @@ def test_decisions_text():
     assert report.decisions_text([ctx, ctx]) == "is_cuda=True, use_acc_dtype=True"
     gone = {"unavailable": "no module"}
     assert report.decisions_text([gone, gone]) == "unavailable: no module"
+
+
+# --- time at equal peak (Task I1-7) ------------------------------------------------------
+
+
+def test_equal_peak_section(synth):
+    S.write_variants(synth)
+    text = section(make(synth), "## Time at equal peak")
+    assert (
+        "The budgets are the baseline `base`'s peak above baseline there, at 1×, 0.5×, 0.25×"
+        in text
+    )
+    assert "no value of a parameter is ranked here" in text
+    header = (
+        "| implementation | ≤ 1× (64.0 MiB) | ≤ 0.5× (32.0 MiB) | ≤ 0.25× (16.0 MiB) "
+        "| default: median ms, peak MiB |"
+    )
+    part = section(text, "### fwd_bwd, bfloat16", "\n### ")
+    assert tables(part)[0] == [
+        header,
+        "| :--- | ---: | ---: | ---: | ---: |",
+        # compiled: its 48 MiB variant is slower than its 64 MiB default, which fits
+        # 1x exactly; none fits below; its 80 MiB variant is unavailable here.
+        "| compiled | 32.0 <sub>default</sub> | — | — | 32.0 ms, 64.0 MiB |",
+        # chunked: the 40 MiB variant (failing parity) within 1x; its 16 MiB default
+        # within 0.5x and exactly at 0.25x; the 8 MiB variant is never the largest.
+        "| chunked | 102 <sub>num_chunks=2, parity fail</sub> "
+        "| 128 <sub>default (num_chunks=4)</sub> | 128 <sub>default (num_chunks=4)</sub> "
+        "| 128 ms, 16.0 MiB |",
+    ]
+    assert "Not `ok` here, so in no cell: `compiled[mode=b]` (unavailable)." in part
+    part = section(text, "### fwd_bwd, float32", "\n### ")
+    assert tables(part)[0][2:] == [
+        "| compiled | 64.0 <sub>default</sub> | — | — | 64.0 ms, 64.0 MiB |",
+        "| chunked | 205 <sub>num_chunks=2</sub> | 256 <sub>default (num_chunks=4)</sub> "
+        "| 256 <sub>default (num_chunks=4)</sub> | 256 ms, 16.0 MiB |",
+    ]
+    assert "Not `ok`" not in part
+    # fwd: chunked runs fwd_bwd only, so only compiled has a row.
+    assert [cells(r)[0] for r in tables(section(text, "### fwd, float32", "\n### "))[0][2:]] == [
+        "compiled"
+    ]
+    assert [line for line in text.splitlines() if line.startswith("### ")] == [
+        "### fwd, float32",
+        "### fwd_bwd, float32",
+        "### fwd, bfloat16",
+        "### fwd_bwd, bfloat16",
+    ]
+
+
+def test_equal_peak_without_a_baseline(synth):
+    S.write_variants(synth)
+    text = section(
+        report.report(synth, baseline="nope", dtype="float32", mode="fwd_bwd"),
+        "## Time at equal peak",
+    )
+    assert "The baseline `nope` has no `ok` record with a peak here: no budgets." in text
+    assert tables(text)[0] == [
+        "| implementation | default: median ms, peak MiB |",
+        "| :--- | ---: |",
+        "| compiled | 64.0 ms, 64.0 MiB |",
+        "| chunked | 256 ms, 16.0 MiB |",
+    ]
+
+
+def test_variants_change_nothing_else(synth, synth_strict):
+    # The variants are in "Time at equal peak", "Parity failures" and "Not measured"
+    # only: every other table reads as without them (no row, no column, no info).
+    before = make(synth, strict=synth_strict)
+    assert "## Time at equal peak" not in before
+    S.write_variants(synth)
+    after = make(synth, strict=synth_strict)
+    for title in (
+        "## At the default point",
+        "## Sweeps",
+        "## Reduction setting",
+        "## Environment check",
+    ):
+        assert section(after, title) == section(before, title), title
+    assert "[" not in section(after, "## At the default point")
+    assert (
+        section(after, "## Sweeps", "## Time at equal peak").rstrip()
+        == section(before, "## Sweeps").rstrip()
+    )
+    failures = section(after, "## Parity failures")
+    assert "- `chunked[num_chunks=2]`, grad_rel (1): explained: a planted cause" in failures
+    assert (
+        "3 parity failures, 2 explained." in failures
+        and "2 parity failures, 1 explained." in before
+    )
+    missing = section(after, "## Not measured")
+    assert "- unavailable: out of memory on cuda:0 (16.0 GiB) (1)" in missing
+    assert (
+        "  - compiled[mode=b], fwd_bwd, bfloat16 M=128, K=32, N=16, layout=a: tried 1.0 GiB"
+        in missing
+    )
+
+
+def test_within_and_default_params(synth):
+    def row(peak, ms):
+        return {"peak_above_baseline": peak, "median_ms": ms}
+
+    points = [row(10, 5.0), row(20, 4.0), row(20, 3.0), row(40, 2.0)]
+    assert analysis.within(points, 20) is points[2]  # the largest peak within; the faster
+    assert analysis.within(points, 39) is points[2]
+    assert analysis.within(points, 40) is points[3]
+    assert analysis.within(points, 9) is None
+    S.write_variants(synth)
+    with pytest.warns(UserWarning):
+        recs = analysis.load(synth)
+    bases, variants = analysis.split_variants(recs)
+    assert {r["implementation"] for r in variants} == set(S.VARIANTS)
+    assert not any("[" in r["implementation"] for r in bases)
+    # chunked records its num_chunks; compiled has no field named mode.
+    assert analysis.default_params(bases, variants) == {"chunked": "num_chunks=4"}
+    row = analysis.flatten(variants[0])
+    assert (row["base"], row["params"]) == ("chunked", "num_chunks=2")
+    assert analysis.flatten(bases[0])["base"] is None
+    assert not any(k.startswith("params.") or k == "base" for k in analysis.varying_info(recs))

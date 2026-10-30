@@ -35,14 +35,20 @@ def restore_overrides():
     yield
     if hasattr(torch.backends, "python_native"):
         torch.backends.python_native.enable_operations(*lce.OVERRIDE_OPS)
+    # A variant's setup keeps its parameter for the run; the next test starts without.
+    for key in ("lce_options", "liger_kwargs"):
+        lce._STATE.pop(key, None)
 
 
 def test_registered():
     assert resolve_op("lce") is SPEC
-    assert [impl.name for impl in SPEC.implementations] == IMPLS + LIGER_IMPLS + TITAN_IMPLS
+    # The base entries, then their variants (test_variants_of_the_spec).
+    assert [impl.name for impl in lce.IMPLEMENTATIONS] == IMPLS + LIGER_IMPLS + TITAN_IMPLS
+    names = [impl.name for impl in [*lce.IMPLEMENTATIONS, *lce.variants(lce.IMPLEMENTATIONS)]]
+    assert [impl.name for impl in SPEC.implementations] == names
     assert SPEC.default_point == {"N": 4096, "H": 4096, "V": 131072, "ignore_frac": "0"}
     assert SPEC.default_dtypes == ["bfloat16"]
-    for impl in [*SPEC.implementations, SPEC.reference]:
+    for impl in [*lce.IMPLEMENTATIONS, SPEC.reference]:
         assert {k: impl.info[k] for k in lce.CONTRACT} == lce.CONTRACT
         if impl.name in LIGER_IMPLS + TITAN_IMPLS:
             continue
@@ -1550,3 +1556,181 @@ def test_parity_note_bf16_running_loss():
         assert not note.applies(Case(params, "float16", "cuda"), mode, {}, nightly)
         assert not note.applies(Case(params, "float32", "cuda"), mode, {}, nightly)
         assert not note.applies(Case(params, "bfloat16", "cpu"), mode, {}, nightly)
+
+
+# --- variants (Task I1-7) ----------------------------------------------------------
+
+
+DEFAULT_SHAPE = {"N": 4096, "H": 4096, "V": 131072}
+
+
+def test_variants_of_the_spec():
+    bases = [impl.name for impl in lce.IMPLEMENTATIONS]
+    names = [impl.name for impl in SPEC.implementations]
+    assert names[: len(bases)] == bases  # the variants last: the bases keep their order
+    variants = [impl for impl in SPEC.implementations if impl.variant_of is not None]
+    assert [v.name for v in variants] == [
+        f"{base}[{param}={value}]"
+        for base, (param, values) in lce.VARIANTS.items()
+        for value in values
+    ]
+    assert len(variants) == 12 and all(len(v) == 2 for _, v in lce.VARIANTS.values())
+    for variant in variants:
+        base = SPEC.implementation(variant.variant_of)
+        param, _ = lce.VARIANTS[base.name]
+        assert list(variant.info["params"]) == [param]
+        assert variant.modes == base.modes and variant.available is base.available
+        assert variant.env_name == base.env_name and variant.verify is base.verify
+        assert variant.info == {**base.info, "base": base.name, "params": variant.info["params"]}
+
+
+@pytest.mark.parametrize("name", ["torch_lce", "torch_lce_no_override"])
+def test_torch_lce_variant_setup(name):
+    # The variant's options are the ones setup resolves, op_decisions reads and the
+    # timed call takes; info shows the parameter as given (params) and the resolved
+    # chunk size (options.batch_chunk_size) and count (num_chunks).
+    c = case("bfloat16", **DEFAULT_SHAPE)
+    base = SPEC.implementation(name).setup(c)
+    assert base["options"]["chunking_method"] == "aspect_ratio"
+    assert (base["options"]["batch_chunk_size"], base["num_chunks"]) == (128, 32)
+    assert lce._STATE["lce_options"] is lce._lce_options()
+    for size, chunks in ((256, 16), (1024, 4)):
+        variant = SPEC.implementation(f"{name}[batch_chunk_size={size}]")
+        assert variant.info["params"] == {"batch_chunk_size": size}
+        info = variant.setup(c)
+        assert info["options"] == {
+            **base["options"],
+            "chunking_method": None,
+            "batch_chunk_size": size,
+        }
+        assert info["num_chunks"] == chunks
+        # The chunk size does not change what torch decides for the case.
+        assert info["op_decisions"] == base["op_decisions"]
+        options = lce._STATE["lce_options"]
+        assert (options.chunking_method, options.batch_chunk_size) == (None, size)
+    if name == "torch_lce_no_override":
+        assert info["override_disabled"] == list(lce.OVERRIDE_OPS)
+    # Larger than N: torch caps the chunk at N (_adjust's min(batch_chunk_size, N)).
+    small = SPEC.implementation(f"{name}[batch_chunk_size=256]").setup(case("bfloat16"))
+    assert (small["options"]["batch_chunk_size"], small["num_chunks"]) == (64, 1)
+
+
+def test_torch_lce_variant_runs_with_its_options(monkeypatch):
+    import torch.nn.functional as F
+
+    seen = []
+    original = F.linear_cross_entropy
+
+    def recording(*args, options, **kwargs):
+        seen.append(options)
+        return original(*args, options=options, **kwargs)
+
+    monkeypatch.setattr(F, "linear_cross_entropy", recording)
+    c = case("float32", "0.25")
+    variant = SPEC.implementation("torch_lce_no_override[batch_chunk_size=1024]")
+    variant.setup(c)
+    x = inputs(c)
+    metrics = SPEC.compare(variant.run(x, "fwd_bwd"), SPEC.reference.run(x, "fwd_bwd"), c)
+    assert max(metrics.values()) < 1e-5, metrics
+    assert [(o.chunking_method, o.batch_chunk_size) for o in seen] == [(None, 1024)]
+    SPEC.implementation("torch_lce_no_override").setup(c)
+    clear_grads(x)
+    variant.run(x, "fwd")
+    assert seen[-1] is lce._lce_options()  # the base entry's again
+
+
+def test_liger_variant_setup_and_run(monkeypatch):
+    monkeypatch.setattr(lce, "liger_version", lambda: "0.8.4")
+    calls = []
+
+    def fake(input, weight, target, ignore_index, reduction, accum_dtype, chunk_mem_const=1):
+        calls.append(chunk_mem_const)
+        return lce._eager_loss(input, weight, target)
+
+    _fake_liger(monkeypatch, fake)
+    c = case("bfloat16", **DEFAULT_SHAPE)
+    for name, accum in (("liger", "float32"), ("liger_native_accum", None)):
+        info = SPEC.implementation(f"{name}[chunk_mem_const=4]").setup(c)
+        assert info == {
+            "accum_dtype": accum,
+            "chunk_mem_const": 4,
+            "inc_factor": 8,
+            "chunk_size": 512,
+            "num_chunks": 8,
+            "liger_kernel": "0.8.4",
+            "ce_impl": "triton",
+        }
+        info = SPEC.implementation(f"{name}[chunk_mem_const=8]").setup(c)
+        assert (info["chunk_mem_const"], info["chunk_size"], info["num_chunks"]) == (8, 1024, 4)
+    small = case("float32")
+    x = inputs(small)
+    SPEC.implementation("liger[chunk_mem_const=8]").setup(small)
+    SPEC.implementation("liger").run(x, "fwd_bwd")
+    SPEC.implementation("liger").setup(small)  # the base entry passes none: Liger's default
+    clear_grads(x)
+    SPEC.implementation("liger").run(x, "fwd_bwd")
+    assert calls == [8, 1]
+
+    def without(input, weight, target, ignore_index, reduction, accum_dtype):
+        return None
+
+    _fake_liger(monkeypatch, without)
+    with pytest.raises(lce.Unavailable, match="takes no chunk_mem_const"):
+        SPEC.implementation("liger[chunk_mem_const=4]").setup(c)
+    assert SPEC.implementation("liger").setup(c)["chunk_mem_const"] == 1
+
+
+def test_torchtitan_variant_setup(monkeypatch):
+    _fake_torchtitan(monkeypatch)
+    c = case("bfloat16", **DEFAULT_SHAPE)
+    for name in ("torchtitan_chunked", "torchtitan_chunked_compiled"):
+        for chunks in (4, 32):
+            info = SPEC.implementation(f"{name}[num_chunks={chunks}]").setup(c)
+            assert (info["num_chunks"], info["chunk_tokens"]) == (chunks, 4096 // chunks)
+            assert lce._STATE["titan_loss"].config.num_chunks == chunks
+        assert SPEC.implementation(name).setup(c)["num_chunks"] == lce.TORCHTITAN_CHUNKS
+    with pytest.raises(ValueError, match="N=60 is not divisible by num_chunks=32"):
+        SPEC.implementation("torchtitan_chunked[num_chunks=32]").setup(case(N=60))
+
+
+def test_list_shows_the_variants(capsys):
+    assert cli.main(["list", "lce"]) == 0
+    out = capsys.readouterr().out
+    for base, (param, values) in lce.VARIANTS.items():
+        for value in values:
+            assert f"  {base}[{param}={value}] (variant of {base})  modes=" in out
+
+
+def test_variants_not_run_by_default():
+    cases = runner.enumerate_cases(SPEC, device="cuda")
+    names = {impl.name for _, impl, _ in runner.enumerate_runs(SPEC, cases)}
+    assert names == {impl.name for impl in lce.IMPLEMENTATIONS}
+
+
+def test_parity_note_covers_the_variants():
+    # The bf16 running-loss note names torch_lce_no_override; its variants' rows match
+    # it through their base (analysis.explained).
+    from torch_op_bench import analysis
+
+    [note] = lce.LCE.parity_notes
+    row = {
+        "implementation": "torch_lce_no_override[batch_chunk_size=256]",
+        "base": "torch_lce_no_override",
+        "mode": "fwd_bwd",
+        "dtype": "bfloat16",
+        "device": "cuda:0",
+        "parity_status": "fail",
+        "parity_failed": "loss_rel_err,grad_weight_rel_l2",
+        "torch_version": "2.16.0a0",
+        **DEFAULT_SHAPE,
+        "ignore_frac": "0",
+    }
+    axes = ["N", "H", "V", "ignore_frac"]
+    assert analysis.explained(row, [note], axes) == {
+        "loss_rel_err": note,
+        "grad_weight_rel_l2": None,
+    }
+    assert analysis.explained({**row, "base": None}, [note], axes) == {
+        "loss_rel_err": None,
+        "grad_weight_rel_l2": None,
+    }

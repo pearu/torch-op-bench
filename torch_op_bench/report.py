@@ -496,7 +496,113 @@ def _case_order(values: tuple) -> tuple:
     return tuple((0, v, "") if isinstance(v, (int, float)) else (1, 0, str(v)) for v in values)
 
 
-# --- 4. the reduction setting ------------------------------------------------------------
+# --- 4. time at equal peak --------------------------------------------------------------
+
+EQUAL_PEAK_TITLE = "## Time at equal peak"
+
+
+def _equal_peak_cell(row: Row | None, defaults: Mapping[str, str]) -> str:
+    """The median of the point within a budget, and in small print what produced it:
+    the variant's parameter, or ``default`` (with its own value when recorded)."""
+    if row is None:
+        return MISSING
+    if row.get("base") is not None:
+        label = text(row.get("params"))
+    else:
+        own = defaults.get(row["implementation"])
+        label = "default" + (f" ({text(own)})" if own else "")
+    if row.get("parity_status") == "fail":
+        label += ", parity fail"
+    return f"{sig3(row.get('median_ms'))} <sub>{label}</sub>"
+
+
+def _default_cell(row: Row | None) -> str:
+    if row is None:
+        return MISSING
+    if row.get("status") != "ok":
+        return text(row.get("status"))
+    return f"{sig3(row.get('median_ms'))} ms, {mib(row.get('peak_above_baseline'))} MiB"
+
+
+def render_equal_peak(
+    found: Mapping[str, Any],
+    point: Mapping[str, Any],
+    baseline: str,
+    variant_rows: Sequence[Row],
+    defaults: Mapping[str, str],
+) -> str:
+    """One table of ``analysis.equal_peak``'s: a row per base entry with variants, a
+    column per budget, and the default's own time and peak."""
+    title = f"### {found['mode']}, {found['dtype']}"
+    lines = [title, "", f"At {analysis.point_text(point)}.", ""]
+    budgets = found["budgets"]
+    if budgets is None:
+        lines += [f"The baseline `{baseline}` has no `ok` record with a peak here: no budgets.", ""]
+        budgets = []
+    header = ["implementation"]
+    header += [
+        f"≤ {f:g}× ({mib(b)} MiB)"
+        for f, b in zip(analysis.EQUAL_PEAK_BUDGETS, budgets, strict=False)
+    ]
+    header.append("default: median ms, peak MiB")
+    body = []
+    for entry in found["entries"]:
+        cells = entry["cells"] or []
+        body.append(
+            [
+                entry["base"],
+                *(_equal_peak_cell(row, defaults) for row in cells),
+                _default_cell(entry["default"]),
+            ]
+        )
+    lines.append(table(header, body, [False] + [True] * (len(header) - 1)))
+    names = {e["base"] for e in found["entries"]}
+    unmeasured = [
+        f"`{r['implementation']}` ({text(r.get('status'))})"
+        for r in analysis.at(variant_rows, dtype=found["dtype"], mode=found["mode"])
+        if r.get("base") in names and all(r.get(k) == v for k, v in point.items())
+        if r.get("status") != "ok"
+    ]
+    if unmeasured:
+        lines += ["", f"Not `ok` here, so in no cell: {', '.join(unmeasured)}."]
+    return "\n".join(lines) + "\n"
+
+
+def render_equal_peak_section(
+    rows: Sequence[Row],
+    variant_rows: Sequence[Row],
+    point: Mapping[str, Any],
+    baseline: str,
+    defaults: Mapping[str, str],
+    *,
+    dtypes: Sequence[str],
+    modes: Sequence[str],
+) -> str:
+    """The section "Time at equal peak" (Statement §6 step 6f): per dtype and mode
+    with variants at ``point``, ``render_equal_peak``."""
+    factors = ", ".join(f"{f:g}×" for f in analysis.EQUAL_PEAK_BUDGETS)
+    lines = [
+        EQUAL_PEAK_TITLE,
+        "",
+        f"Each chunked entry's time within a peak budget at the default point. The "
+        f"budgets are the baseline `{baseline}`'s peak above baseline there, at "
+        f"{factors}, the same for every entry. A cell is the median time, in ms, of the "
+        f"entry's default or of one of its variants (the entry with another value of its "
+        f"own chunk parameter, in small print), the one whose peak above baseline is the "
+        f"largest within the budget; {MISSING} when none is. The variants exist for this "
+        f"comparison only: no value of a parameter is ranked here.",
+        "",
+    ]
+    tables = [
+        render_equal_peak(found, point, baseline, variant_rows, defaults)
+        for found in analysis.equal_peak(rows, variant_rows, point, baseline)
+        if found["dtype"] in dtypes and found["mode"] in modes
+    ]
+    lines += tables or ["No variant has a record at the default point."]
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+# --- 5. the reduction setting ------------------------------------------------------------
 
 REDUCTION_TITLE = "## Reduction setting"
 # The record names a warning lists at most; the rest is counted.
@@ -677,7 +783,7 @@ def render_reduction_section(
     return "\n".join(lines) + "\n"
 
 
-# --- 5. the environment check ------------------------------------------------------------
+# --- 6. the environment check ------------------------------------------------------------
 
 
 def _parity_metrics(row: Row) -> dict[str, Any]:
@@ -865,7 +971,7 @@ def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-# --- 6. parity failures --------------------------------------------------------------------
+# --- 7. parity failures --------------------------------------------------------------------
 
 PARITY_FAILURES_TITLE = "## Parity failures"
 
@@ -908,7 +1014,7 @@ def render_parity_failures(
     return "\n".join(lines) + "\n"
 
 
-# --- 7. not measured -----------------------------------------------------------------------
+# --- 8. not measured -----------------------------------------------------------------------
 
 
 REASON_WIDTH = 200
@@ -1001,16 +1107,21 @@ def report(
         recs = analysis.load(results_dir, op=op, device_slug=device_slug)
         if not recs:
             raise ValueError(f"no records under {results_dir}")
+        # The variants are in "Time at equal peak", "Parity failures" and "Not
+        # measured" only.
+        base_recs, variant_recs = analysis.split_variants(recs)
         op_name = _one({r["op"] for r in recs}, "op", "choose one with --op")
         slug = _one(
             {r["device_slug"] for r in recs}, "device slug", "choose one with --device-slug"
         )
         # The strict set of the same op and device as RESULTS.
         recs_strict = [] if strict is None else analysis.load(strict, op=op_name, device_slug=slug)
-    rows = analysis.to_rows(recs)
+        recs_strict = analysis.split_variants(recs_strict)[0]
+    rows = analysis.to_rows(base_recs)
+    variant_rows = analysis.to_rows(variant_recs)
     axes = analysis.axes_of(recs)
     notes = analysis.parity_notes(recs)
-    point = analysis.default_point(recs, point=point)
+    point = analysis.default_point(base_recs or recs, point=point)
     dtypes = [dtype] if dtype else list(dict.fromkeys(row["dtype"] for row in rows))
     modes = [mode] if mode else [m for m in MODES if any(row["mode"] == m for row in rows)]
 
@@ -1056,10 +1167,22 @@ def report(
                 continue
             lines += [f"**{m}, {d}:** {NO_SWEEP.lower()}: one table per case instead.", ""]
             lines.append(render_per_case(selected, axes, baseline, d, m, notes))
+    if variant_rows:
+        lines.append(
+            render_equal_peak_section(
+                rows,
+                variant_rows,
+                point["params"],
+                baseline,
+                analysis.default_params(base_recs, variant_recs),
+                dtypes=dtypes,
+                modes=modes,
+            )
+        )
     if strict is not None:
         lines.append(
             render_reduction_section(
-                recs,
+                base_recs,
                 recs_strict,
                 point["params"],
                 baseline,
@@ -1069,8 +1192,9 @@ def report(
             )
         )
     scope = [row for row in rows if row["dtype"] in dtypes and row["mode"] in modes]
+    scope_all = scope + [r for r in variant_rows if r["dtype"] in dtypes and r["mode"] in modes]
     unread = None if analysis.spec_of(recs[0]) else recs[0].get("op_ref") or recs[0]["op"]
-    lines.append(render_parity_failures(scope, axes, notes, unread=unread))
+    lines.append(render_parity_failures(scope_all, axes, notes, unread=unread))
     lines.append(render_environment_check(scope, axes))
-    lines.append(render_not_measured(scope, axes))
+    lines.append(render_not_measured(scope_all, axes))
     return "\n".join(lines).rstrip() + "\n"

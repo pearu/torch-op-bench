@@ -24,6 +24,14 @@ memory ``peak_above``. Planted, for the tests to find:
 - the ``other`` environment's records come from another torch-op-bench commit,
   so merge warns.
 
+``write_variants`` adds the variants of ``chunked`` and ``compiled`` at the default
+point (``VARIANTS``: their peaks planted, their times a factor of their base's), in
+a file of its own. Planted: the baseline's peak there is 64 MiB, so the budgets are
+64, 32 and 16 MiB; ``chunked`` (16 MiB) has a variant at 40 MiB that fails parity in
+``bfloat16`` (``VARIANT_PARITY_FAIL``, which ``synth_op.NOTE`` explains through the
+base) and one at 8 MiB; ``compiled`` (64 MiB) one at 48 MiB and one at 80 MiB, above
+every budget and ``unavailable`` in ``fwd_bwd`` ``bfloat16`` (``VARIANT_UNAVAILABLE``).
+
 ``write_strict`` writes the strict counterpart at the default point (the records
 of ``run --matmul-reduction strict``), every implementation but ``compiled``
 (``STRICT_ABSENT``), each ``STRICT_TIME`` times slower. Planted: ``base``'s parity
@@ -301,5 +309,42 @@ def write_strict(results_dir: str | Path) -> Path:
                     metrics = record["parity"]["metrics"]
                     for name in metrics:
                         metrics[name] *= STRICT_PARITY[impl]
+                records.append(path, record)
+    return path.parent
+
+
+# variant: (base, params, time factor of the base's, peak above baseline in MiB)
+VARIANTS = {
+    "chunked[num_chunks=2]": ("chunked", {"num_chunks": 2}, 0.8, 40),
+    "chunked[num_chunks=8]": ("chunked", {"num_chunks": 8}, 1.5, 8),
+    "compiled[mode=a]": ("compiled", {"mode": "a"}, 1.2, 48),
+    "compiled[mode=b]": ("compiled", {"mode": "b"}, 0.9, 80),
+}
+VARIANT_PARITY_FAIL = ("chunked[num_chunks=2]", "fwd_bwd", "bfloat16")
+VARIANT_UNAVAILABLE = ("compiled[mode=b]", "fwd_bwd", "bfloat16")
+VARIANT_REASON = "out of memory on cuda:0 (16.0 GiB)\ntried 1.0 GiB; phase: warmup"
+
+
+def write_variants(results_dir: str | Path) -> Path:
+    """Write the variants' records under ``results_dir``; return ``<results>/synth/<slug>``."""
+    when = datetime.datetime(2026, 10, 17, 14, 0, tzinfo=datetime.timezone.utc)
+    path = records.result_path(results_dir, "synth", SLUG, timestamp=when, host="host-a")
+    for name, (base, params, factor, peak) in VARIANTS.items():
+        for mode in IMPLS[base][1]:
+            for dtype in DTYPES:
+                record = _record(base, mode, dtype, dict(DEFAULT), when)
+                record["implementation"] = name
+                record["info"] = {**record["info"], "base": base, "params": dict(params)}
+                if (name, mode, dtype) == VARIANT_UNAVAILABLE:
+                    record.update(status="unavailable", reason=VARIANT_REASON, times_ms=None)
+                    record.update(memory=None, parity=None, verify=None)
+                    records.append(path, record)
+                    continue
+                t = factor * median_ms(base, mode, dtype, DEFAULT)
+                record["times_ms"] = [0.9 * t, t, 1.1 * t]
+                record["memory"]["peak_bytes"] = BASELINE_BYTES + peak * MIB
+                if (name, mode, dtype) == VARIANT_PARITY_FAIL:
+                    record["parity"]["metrics"]["grad_rel"] = 0.5
+                    record["parity"].update(status="fail", failed=["grad_rel"])
                 records.append(path, record)
     return path.parent

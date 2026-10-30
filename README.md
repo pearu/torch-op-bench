@@ -213,6 +213,31 @@ counterpart:
 | `torchtitan_ce` (env `torchtitan`) | torchtitan's default loss, `CrossEntropyLoss`, on the full logits `F.linear(hidden, weight)`; eager |
 | `torch_eager_torchtitan` (env `torchtitan`) | `torch_eager` in the `torchtitan` environment, the control |
 
+Six of these entries chunk with a parameter of their own, and each has two
+**variants** (`Implementation.with_params`): the same entry with another value of
+that parameter, named `<entry>[<parameter>=<value>]` (`lce.VARIANTS`):
+
+| entries | parameter | default | variants |
+|---|---|---|---|
+| `torch_lce`, `torch_lce_no_override` | `batch_chunk_size`, with `chunking_method=None` | the heuristic's (128 rows at the default point) | 256, 1024 |
+| `liger`, `liger_native_accum` | `chunk_mem_const` | 1 | 4, 8 |
+| `torchtitan_chunked`, `torchtitan_chunked_compiled` | `num_chunks` | 8 | 4, 32 |
+
+They exist for one comparison, the time at equal peak memory (the report's "Time at
+equal peak"): with the default, each entry has three (peak, time) points, from which
+its time within a peak budget is read, at budgets that are the same for every entry.
+They are not a tuning study: no value is ranked, none is named an optimum, and
+whether a default is optimal on a machine is a question for another study. A
+variant runs only when `--impl` names it, at the default point only (see "Remote
+runs"), never along a sweep; `run` without `--impl` leaves the variants out. A
+variant has its entry's modes, environment and availability; its `info` carries
+`base` (the entry) and `params` (the value as given), and what its setup resolved
+from it, as the entry's does: `options.batch_chunk_size` and `num_chunks` for torch
+LCE (a `batch_chunk_size` above N is capped at N by torch; `chunking_method=None`
+with no `batch_chunk_size` would be one chunk of N rows, which no entry uses),
+`chunk_size` and `num_chunks` for Liger, `num_chunks` and `chunk_tokens` for
+torchtitan. Quote a variant's name on a shell command line: `[` is a glob character.
+
 The Liger entries run `fwd_bwd` only: Liger computes the gradients inside its forward
 whenever the inputs require grad, so a `fwd` number would include the backward work.
 They are `unavailable` without `liger_kernel` or without a CUDA device. Their `info`
@@ -417,7 +442,19 @@ torch-op-bench commits). Its sections:
    axis varies around the point (one case, or cases that differ in two axes at
    once), the default-point table is repeated at every case present instead, one
    table per case, as `plot` says when it draws nothing for that mode and dtype.
-4. **Reduction setting**, only with `--strict RESULTS_STRICT` (the results of a
+4. **Time at equal peak**, only when the results hold variants: per mode and dtype,
+   at the default point, one row per entry with variants and one column per peak
+   budget, the baseline's peak above baseline there at 1×, 0.5× and 0.25× (in MiB
+   in the header), the same budgets for every entry, so the table reads the same on
+   any GPU. A cell is the median time of the entry's default or one of its variants,
+   the one whose peak above baseline is the largest within the budget (of two at that
+   peak, the faster), with what produced it in small print: the variant's parameter,
+   or `default` with the entry's own value when its `info` records it; `—` when none
+   fits; ", parity fail" when that record fails parity. The last column is the
+   default's own time and peak. A variant that is not `ok` is in no cell, and a
+   sentence under the table names it. Variants are in no other table but "Parity
+   failures" (a note of an entry covers its variants) and "Not measured".
+5. **Reduction setting**, only with `--strict RESULTS_STRICT` (the results of a
    `run --matmul-reduction strict`): first a check that every record of `RESULTS`
    has the default setting and every record of `RESULTS_STRICT` the strict one
    (read from `env.torch.matmul`; a record the runner wrote has none and is not
@@ -433,13 +470,13 @@ torch-op-bench commits). Its sections:
    and, for each torch LCE entry, whether its default parity equals its strict
    parity: the check that, once PR pytorch#195707 lands as reviewed, torch LCE
    accumulates in fp32 under the defaults while Liger and torchtitan do not.
-5. **Parity failures**: every record whose parity is `fail`, grouped by entry and
+6. **Parity failures**: every record whose parity is `fail`, grouped by entry and
    metric, "explained: <note>" when one of the op's `parity_notes` applies there,
    else "**unexplained**"; then "N parity failures, M explained", a record counting
    as explained when every metric it fails is. When the op cannot be imported,
    there are no notes and every failure is unexplained, and a last sentence says so
    ("The op `<op_ref>` does not import here: …").
-6. **Environment check**: each control (`torch_eager_<env>`) against its original at
+7. **Environment check**: each control (`torch_eager_<env>`) against its original at
    every point both have, as the time ratio (control / original), the peak
    difference, and the ratio of each parity metric. A time ratio outside [0.95,
    1.05], a difference beyond 64 MiB or a parity ratio outside [0.9, 1.1] is named
@@ -455,7 +492,7 @@ torch-op-bench commits). Its sections:
    table counts the pairs compared, those with one side and those with neither side
    measured, and "Every control is within the limits" is said only when no row is
    flagged.
-7. **Not measured**: every `error` and `unavailable` record, grouped by cause, with
+8. **Not measured**: every `error` and `unavailable` record, grouped by cause, with
    the number of records: for an `error`, the message up to its first number (a
    token of its own, such as `4.00`, `cuda:0` or `4096x1024`; digits inside a word,
    as in `mat1`, `sm_80` or `2D`, are part of the cause), less the unfinished
@@ -471,9 +508,8 @@ Numbers have 3 significant digits and memory is in MiB with one decimal.
 Time × peak is there because the comparison that matters for a fused kernel is
 elapsed time *and* memory together: a counterpart that is faster by holding more,
 or smaller by taking longer, does not win on it unless the product drops (the
-user's comparison; the other one, time at equal peak memory, needs variants of an
-entry and is not here yet). The environment check still compares time and peak
-separately.
+user's comparison; the other one is the time at equal peak memory, section 4). The
+environment check still compares time and peak separately.
 
 `plot` (`pip install -e .[plot]`; matplotlib, with the Agg backend, so no display
 is needed) writes PNGs at 150 dpi, per mode (and per dtype, as `-<dtype>`, when the
@@ -498,6 +534,16 @@ results hold several):
   lengths compare as the values do. Each bar carries its value (3 significant
   digits), so a bar too short to see still reads. It is drawn also when nothing is
   swept.
+- `equal-peak-<mode>.png`, when the results hold variants: time against peak above
+  baseline at the default point, one line per entry with variants through its
+  default and variants (by peak), the baseline as a reference point, and the peak
+  budgets of the report's "Time at equal peak" as dotted vertical lines; no point is
+  labelled with its parameter (the CSV names each point's entry). The footer counts
+  what is left out and the parity failures, as every footer does. With `--impl`, the
+  entries named, or one of whose variants is named.
+
+The variants are drawn in no other figure unless `--impl` names them (and never in
+the reduction figure).
 
 When no axis varies around the point, `plot` draws nothing and says so on stderr,
 once per mode and dtype, and exits 0; the report's per-case tables are then the
@@ -554,6 +600,7 @@ scripts/remote-run.sh HOST bootstrap   #    Miniforge, unless conda is there
 scripts/remote-run.sh HOST setup --envs liger,torchtitan   # 2. environments
                                        # 3. setup shows `env`, nvidia-smi, `list lce`
 scripts/remote-run.sh HOST run --envs liger,torchtitan -- --case N=4096,V=65536
+                                       #    then the variants (below)
 scripts/remote-run.sh HOST status      # 4. while it runs: alive?, log, records
 scripts/remote-run.sh HOST wait        #    or follow it to the end
 scripts/remote-run.sh HOST fetch       # 5. results back into results/
@@ -601,6 +648,24 @@ scripts/remote-run.sh HOST fetch       # 5. results back into results/
   `run --matmul-reduction strict --envs liger,torchtitan -- --case N=4096`. Both
   choose the results directory, so neither `--results` nor `--matmul-reduction`
   is accepted after `--`.
+
+  Per GPU, the run plan is: the default sweeps (the base entries; `run` without
+  `--impl` leaves the variants out), the strict point, then the variants (see
+  "Benchmarking LCE") at the default point only, into the same `results/` as the
+  sweeps, under the default setting, for the report's "Time at equal peak":
+
+  ```sh
+  scripts/remote-run.sh HOST run --envs liger,torchtitan -- --case N=4096 \
+      --impl 'torch_lce[batch_chunk_size=256],torch_lce[batch_chunk_size=1024]' \
+      --impl 'torch_lce_no_override[batch_chunk_size=256],torch_lce_no_override[batch_chunk_size=1024]' \
+      --impl 'liger[chunk_mem_const=4],liger[chunk_mem_const=8]' \
+      --impl 'liger_native_accum[chunk_mem_const=4],liger_native_accum[chunk_mem_const=8]' \
+      --impl 'torchtitan_chunked[num_chunks=4],torchtitan_chunked[num_chunks=32]' \
+      --impl 'torchtitan_chunked_compiled[num_chunks=4],torchtitan_chunked_compiled[num_chunks=32]'
+  ```
+
+  The variants exist for that comparison, not to tune an entry: they never run
+  along a sweep, nor under `--matmul-reduction strict`.
 - **`fetch`** copies the host's `results/`, and `results-strict/` when it has one,
   into this checkout's `results/` and `results-strict/` without deleting anything
   on either side (the files are append-only, with new names per run), then prints

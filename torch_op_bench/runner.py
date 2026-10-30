@@ -148,11 +148,13 @@ def enumerate_runs(
     implementations: Sequence[str] | None = None,
     modes: Sequence[str] | None = None,
 ) -> list[tuple[Case, Implementation, str]]:
-    """(case, implementation, mode) triples; an implementation runs only its modes."""
+    """(case, implementation, mode) triples; an implementation runs only its modes.
+    Without ``implementations``, every implementation but the variants
+    (``Implementation.with_params``), which run only when named."""
     impls = (
         [spec.implementation(name) for name in implementations]
         if implementations
-        else list(spec.implementations)
+        else [impl for impl in spec.implementations if impl.variant_of is None]
     )
     modes = list(modes or MODES)
     unknown = sorted(set(modes) - set(MODES))

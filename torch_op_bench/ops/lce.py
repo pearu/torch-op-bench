@@ -67,6 +67,20 @@ TORCHTITAN_PACKAGES = ("torchtitan", "spmd_types")
 # ChunkedLossWrapper.Config's default number of chunks, which torchtitan trains with.
 TORCHTITAN_CHUNKS = 8
 
+# The variants (Implementation.with_params) of the time-at-equal-peak comparison
+# (Statement §6 step 6f): per chunked entry, its own chunk parameter and two values
+# beside its default, which with the default give three (peak, time) points at the
+# default point. Not a tuning study: no value is ranked, none is an optimum. No
+# single-chunk value: that extreme depends on the GPU's memory (the user, 2026-10-17).
+VARIANTS: dict[str, tuple[str, tuple[int, ...]]] = {
+    "torch_lce": ("batch_chunk_size", (256, 1024)),
+    "torch_lce_no_override": ("batch_chunk_size", (256, 1024)),
+    "liger": ("chunk_mem_const", (4, 8)),
+    "liger_native_accum": ("chunk_mem_const", (4, 8)),
+    "torchtitan_chunked": ("num_chunks", (4, 32)),
+    "torchtitan_chunked_compiled": ("num_chunks", (4, 32)),
+}
+
 # What setup learnt about the case this worker runs; verify reads it. A worker
 # runs one case, so module state is per case.
 _STATE: dict[str, Any] = {}
@@ -126,11 +140,28 @@ def _lce_options() -> Any:
     return torch.nn.LinearCrossEntropyOptions()
 
 
+def lce_options(batch_chunk_size: int | None = None) -> Any:
+    """The options of a torch LCE entry: ``LinearCrossEntropyOptions()`` for the base
+    entries; for a variant, its ``batch_chunk_size`` with the heuristic off
+    (``chunking_method=None``), which ``_adjust`` caps at N (``min(..., num_batches)``).
+    Both ``None`` would mean one chunk of N rows (``_adjust``); no entry relies on it.
+    """
+    if batch_chunk_size is None:
+        return _lce_options()
+    import torch
+
+    return torch.nn.LinearCrossEntropyOptions(
+        chunking_method=None, batch_chunk_size=batch_chunk_size
+    )
+
+
 def _lce_loss(hidden: Any, weight: Any, labels: Any) -> Any:
     import torch.nn.functional as F
 
+    # The options setup chose; the base entries' when no setup ran (a direct call).
+    options = _STATE.get("lce_options") or _lce_options()
     return F.linear_cross_entropy(
-        hidden, weight, labels, ignore_index=IGNORE_INDEX, options=_lce_options()
+        hidden, weight, labels, ignore_index=IGNORE_INDEX, options=options
     )
 
 
@@ -148,7 +179,8 @@ def run_lce(inputs: Any, mode: str) -> tuple:
 
 
 def _liger_loss(hidden: Any, weight: Any, labels: Any, accum_dtype: str | None) -> Any:
-    """Liger's functional with the contract's arguments only; the rest at its defaults."""
+    """Liger's functional with the contract's arguments only, and a variant's
+    ``chunk_mem_const`` (``_STATE["liger_kwargs"]``); the rest at its defaults."""
     import torch
     from liger_kernel.transformers.functional import liger_fused_linear_cross_entropy
 
@@ -159,6 +191,7 @@ def _liger_loss(hidden: Any, weight: Any, labels: Any, accum_dtype: str | None) 
         ignore_index=IGNORE_INDEX,
         reduction="mean",
         accum_dtype=None if accum_dtype is None else getattr(torch, accum_dtype),
+        **_STATE.get("liger_kwargs", {}),
     )
 
 
@@ -480,11 +513,12 @@ def lce_source_md5() -> dict[str, Any]:
     return {"lce_source_md5": digest.hexdigest(), "lce_source_files": sorted(files)}
 
 
-def resolved_options(case: Case) -> dict[str, Any]:
-    """LinearCrossEntropyOptions() as the build resolves it for the case."""
+def resolved_options(case: Case, options: Any = None) -> dict[str, Any]:
+    """``options`` (default: LinearCrossEntropyOptions()) as the build resolves it
+    for the case."""
     import torch
 
-    options = _lce_options()
+    options = _lce_options() if options is None else options
     fields = ("acc_policy", "acc_dtype", "chunking_method", "batch_chunk_size")
     resolved = False
     if hasattr(options, "_adjust"):
@@ -523,7 +557,7 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def _chunk_context_decisions(case: Case, module: Any) -> dict[str, Any]:
+def _chunk_context_decisions(case: Case, module: Any, options: Any = None) -> dict[str, Any]:
     """The fields of ``_ChunkContext.build`` for the case that do not depend on which
     gradients are asked: built twice, without and with them, on stride-0 views of
     the case's shapes and a one-row chunk, so nothing of size N or V x H is allocated.
@@ -534,7 +568,7 @@ def _chunk_context_decisions(case: Case, module: Any) -> dict[str, Any]:
     import torch
 
     ctx_cls = module._ChunkContext
-    options = _lce_options()
+    options = _lce_options() if options is None else options
     n, h, v = _shape(case)
     dtype, device = getattr(torch, case.dtype), torch.device(case.device)
     resolved = options._adjust(
@@ -573,15 +607,16 @@ def _chunk_context_decisions(case: Case, module: Any) -> dict[str, Any]:
     return {name: value for name, value in without.items() if with_grads.get(name) == value}
 
 
-def op_decisions(case: Case) -> dict[str, Any]:
+def op_decisions(case: Case, options: Any = None) -> dict[str, Any]:
     """What torch's LCE decided for the case from what the build exposes (R4).
 
     The PR's predicates when the build has them, their values for the case's dtype
     and device under the matmul settings in effect, ``source`` the module they are
     read from; else the ``_ChunkContext`` decisions (``_chunk_context_decisions``),
     ``source`` that class; ``{"unavailable": reason}`` when neither is reachable.
-    Read from ``torch.nn.modules.linear_cross_entropy`` only: importing the
-    torch._native module might register the override.
+    ``options`` are the entry's (default: LinearCrossEntropyOptions()). Read from
+    ``torch.nn.modules.linear_cross_entropy`` only: importing the torch._native module
+    might register the override.
     """
     import importlib
 
@@ -605,7 +640,7 @@ def op_decisions(case: Case) -> dict[str, Any]:
             "unavailable": f"{module_name} has neither {', '.join(MM_PREDICATES)} nor {class_name}"
         }
     try:
-        decisions = _chunk_context_decisions(case, module)
+        decisions = _chunk_context_decisions(case, module, options)
     except Exception as exc:
         return {"unavailable": f"{CHUNK_CONTEXT}.build: {type(exc).__name__}: {exc}"}
     return {"source": f"{CHUNK_CONTEXT}.build", **decisions}
@@ -678,25 +713,32 @@ def check_device(case: Case) -> None:
         )
 
 
-def setup_lce(case: Case) -> dict[str, Any]:
+def setup_lce(case: Case, batch_chunk_size: int | None = None) -> dict[str, Any]:
     check_device(case)
-    return _setup_lce(case)
+    return _setup_lce(case, batch_chunk_size)
 
 
-def _setup_lce(case: Case) -> dict[str, Any]:
-    options = resolved_options(case)
+def _setup_lce(case: Case, batch_chunk_size: int | None = None) -> dict[str, Any]:
+    """The entry's options (``lce_options``), kept for the timed call, and what the
+    build resolves them to: ``options.batch_chunk_size`` is the chunk size, and
+    ``num_chunks`` the chunks of the case's N rows."""
+    lce = lce_options(batch_chunk_size)
+    options = resolved_options(case, lce)
     registration = override_registration()
-    _STATE.update(case=case, options=options, registration=registration)
+    _STATE.update(case=case, options=options, registration=registration, lce_options=lce)
+    chunk = options["batch_chunk_size"]
+    num_chunks = -(-case.params["N"] // chunk) if options["resolved"] and chunk else None
     return {
         "compiled": False,
         "options": options,
+        "num_chunks": num_chunks,
         "override_registration": registration,
-        "op_decisions": op_decisions(case),
+        "op_decisions": op_decisions(case, lce),
         **lce_source_md5(),
     }
 
 
-def setup_lce_no_override(case: Case) -> dict[str, Any]:
+def setup_lce_no_override(case: Case, batch_chunk_size: int | None = None) -> dict[str, Any]:
     import torch
 
     check_device(case)  # before the process-wide disabling; _setup_lce does not repeat it
@@ -705,7 +747,7 @@ def setup_lce_no_override(case: Case) -> dict[str, Any]:
     # override_present tells the reader whether the disabling did anything.
     torch.backends.python_native.disable_operations(*OVERRIDE_OPS)
     return {
-        **_setup_lce(case),
+        **_setup_lce(case, batch_chunk_size),
         "override_disabled": list(OVERRIDE_OPS),
         "override_present": lce_override_present(),
     }
@@ -721,25 +763,43 @@ def liger_chunks(N: int, H: int, V: int, chunk_mem_const: int = 1) -> dict[str, 
     return {"inc_factor": inc_factor, "chunk_size": chunk_size, "num_chunks": -(-N // chunk_size)}
 
 
-def _setup_liger(case: Case, accum_dtype: str | None) -> dict[str, Any]:
+# liger_fused_linear_cross_entropy's default chunk_mem_const (0.8.4 and b49a7aa).
+LIGER_CHUNK_MEM_CONST = 1
+
+
+def _setup_liger(
+    case: Case, accum_dtype: str | None, chunk_mem_const: int | None = None
+) -> dict[str, Any]:
     # With ce_impl=None (the public default) Liger calls its Triton
     # liger_cross_entropy_kernel directly, not its backend dispatcher, so the
     # LIGER_KERNEL_IMPL* environment variables do not apply.
+    kwargs = {}
+    if chunk_mem_const is not None:  # a variant's; the base entries pass none
+        from liger_kernel.transformers.functional import liger_fused_linear_cross_entropy
+
+        if "chunk_mem_const" not in inspect.signature(liger_fused_linear_cross_entropy).parameters:
+            raise Unavailable(
+                f"liger-kernel {liger_version()}: liger_fused_linear_cross_entropy takes "
+                "no chunk_mem_const"
+            )
+        kwargs["chunk_mem_const"] = chunk_mem_const
+    _STATE["liger_kwargs"] = kwargs
+    used = LIGER_CHUNK_MEM_CONST if chunk_mem_const is None else chunk_mem_const
     return {
         "accum_dtype": accum_dtype,
-        "chunk_mem_const": 1,
-        **liger_chunks(*_shape(case)),
+        "chunk_mem_const": used,
+        **liger_chunks(*_shape(case), used),
         "liger_kernel": liger_version(),
         "ce_impl": "triton",
     }
 
 
-def setup_liger(case: Case) -> dict[str, Any]:
-    return _setup_liger(case, "float32")
+def setup_liger(case: Case, chunk_mem_const: int | None = None) -> dict[str, Any]:
+    return _setup_liger(case, "float32", chunk_mem_const)
 
 
-def setup_liger_native_accum(case: Case) -> dict[str, Any]:
-    return _setup_liger(case, None)
+def setup_liger_native_accum(case: Case, chunk_mem_const: int | None = None) -> dict[str, Any]:
+    return _setup_liger(case, None, chunk_mem_const)
 
 
 def torchtitan_api() -> str:
@@ -762,13 +822,15 @@ def _spmd_backend() -> str | None:
     return get_spmd_backend()
 
 
-def _build_torchtitan(chunked: bool, compiled: bool) -> tuple[Any, str]:
+def _build_torchtitan(
+    chunked: bool, compiled: bool, num_chunks: int = TORCHTITAN_CHUNKS
+) -> tuple[Any, str]:
     """torchtitan's loss as its trainer builds it, and how it is compiled."""
     from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 
     api = torchtitan_api()
     cls = ChunkedLossWrapper if chunked else CrossEntropyLoss
-    config = cls.Config(num_chunks=TORCHTITAN_CHUNKS) if chunked else cls.Config()
+    config = cls.Config(num_chunks=num_chunks) if chunked else cls.Config()
     if api == "compile_config":
         if not compiled:
             return cls(config), ""
@@ -784,14 +846,17 @@ def _build_torchtitan(chunked: bool, compiled: bool) -> tuple[Any, str]:
     return cls(config), "torch.compile(fullgraph=True)" if compiled else ""
 
 
-def _setup_torchtitan(case: Case, chunked: bool, compiled: bool) -> dict[str, Any]:
+def _setup_torchtitan(
+    case: Case, chunked: bool, compiled: bool, num_chunks: int | None = None
+) -> dict[str, Any]:
     n = case.params["N"]
-    if chunked and n % TORCHTITAN_CHUNKS:
+    num_chunks = TORCHTITAN_CHUNKS if num_chunks is None else num_chunks
+    if chunked and n % num_chunks:
         raise ValueError(
-            f"N={n} is not divisible by num_chunks={TORCHTITAN_CHUNKS}: torchtitan's "
+            f"N={n} is not divisible by num_chunks={num_chunks}: torchtitan's "
             "ChunkedLossWrapper splits the tokens into equal chunks"
         )
-    loss, compile = _build_torchtitan(chunked, compiled)
+    loss, compile = _build_torchtitan(chunked, compiled, num_chunks)
     api = torchtitan_api()
     _STATE.update(titan_loss=loss, titan_api=api, lm_head=None)
     info: dict[str, Any] = {
@@ -806,8 +871,8 @@ def _setup_torchtitan(case: Case, chunked: bool, compiled: bool) -> dict[str, An
     }
     if chunked:
         info.update(
-            num_chunks=TORCHTITAN_CHUNKS,
-            chunk_tokens=n // TORCHTITAN_CHUNKS,
+            num_chunks=num_chunks,
+            chunk_tokens=n // num_chunks,
             # The GradAccumulator buffer of grad_hidden; grad_weight accumulates
             # in weight's dtype across the chunk backwards.
             grad_accum_dtype="float32",
@@ -817,12 +882,12 @@ def _setup_torchtitan(case: Case, chunked: bool, compiled: bool) -> dict[str, An
     return info
 
 
-def setup_torchtitan_chunked(case: Case) -> dict[str, Any]:
-    return _setup_torchtitan(case, chunked=True, compiled=False)
+def setup_torchtitan_chunked(case: Case, num_chunks: int | None = None) -> dict[str, Any]:
+    return _setup_torchtitan(case, chunked=True, compiled=False, num_chunks=num_chunks)
 
 
-def setup_torchtitan_chunked_compiled(case: Case) -> dict[str, Any]:
-    return _setup_torchtitan(case, chunked=True, compiled=True)
+def setup_torchtitan_chunked_compiled(case: Case, num_chunks: int | None = None) -> dict[str, Any]:
+    return _setup_torchtitan(case, chunked=True, compiled=True, num_chunks=num_chunks)
 
 
 def setup_torchtitan_ce(case: Case) -> dict[str, Any]:
@@ -1166,6 +1231,54 @@ PARITY_NOTES = [
 ]
 
 
+def variants(implementations: list[Implementation]) -> list[Implementation]:
+    """The ``VARIANTS`` of the entries that have them, in the entries' order."""
+    return [
+        impl.with_params(**{VARIANTS[impl.name][0]: value})
+        for impl in implementations
+        if impl.name in VARIANTS
+        for value in VARIANTS[impl.name][1]
+    ]
+
+
+IMPLEMENTATIONS = [
+    TORCH_EAGER,
+    Implementation(
+        "torch_compiled",
+        run_compiled,
+        modes=BOTH,
+        setup=setup_compiled,
+        verify=verify_native,
+        available=compile_available,
+        info={**CONTRACT, "compile": "torch.compile(fullgraph=True)"},
+    ),
+    Implementation(
+        "torch_lce",
+        run_lce,
+        modes=BOTH,
+        setup=setup_lce,
+        verify=verify_lce,
+        available=lce_override_available,
+        packages=DSL_PACKAGES,
+        info={**CONTRACT, "options": "LinearCrossEntropyOptions()"},
+    ),
+    Implementation(
+        "torch_lce_no_override",
+        run_lce,
+        modes=BOTH,
+        setup=setup_lce_no_override,
+        verify=verify_lce_no_override,
+        available=lce_no_override_available,
+        packages=DSL_PACKAGES,
+        info={**CONTRACT, "options": "LinearCrossEntropyOptions()"},
+    ),
+    _liger("liger", run_liger, setup_liger, "float32"),
+    _liger("liger_native_accum", run_liger_native_accum, setup_liger_native_accum, None),
+    TORCH_EAGER.as_control("liger"),
+    *TORCHTITAN,
+]
+
+
 LCE = OpSpec(
     name="lce",
     axes=[
@@ -1178,42 +1291,9 @@ LCE = OpSpec(
     dtypes=["bfloat16", "float16", "float32"],
     default_dtypes=["bfloat16"],
     make_inputs=make_inputs,
-    implementations=[
-        TORCH_EAGER,
-        Implementation(
-            "torch_compiled",
-            run_compiled,
-            modes=BOTH,
-            setup=setup_compiled,
-            verify=verify_native,
-            available=compile_available,
-            info={**CONTRACT, "compile": "torch.compile(fullgraph=True)"},
-        ),
-        Implementation(
-            "torch_lce",
-            run_lce,
-            modes=BOTH,
-            setup=setup_lce,
-            verify=verify_lce,
-            available=lce_override_available,
-            packages=DSL_PACKAGES,
-            info={**CONTRACT, "options": "LinearCrossEntropyOptions()"},
-        ),
-        Implementation(
-            "torch_lce_no_override",
-            run_lce,
-            modes=BOTH,
-            setup=setup_lce_no_override,
-            verify=verify_lce_no_override,
-            available=lce_no_override_available,
-            packages=DSL_PACKAGES,
-            info={**CONTRACT, "options": "LinearCrossEntropyOptions()"},
-        ),
-        _liger("liger", run_liger, setup_liger, "float32"),
-        _liger("liger_native_accum", run_liger_native_accum, setup_liger_native_accum, None),
-        TORCH_EAGER.as_control("liger"),
-        *TORCHTITAN,
-    ],
+    # The variants last: the spec's order of the base entries, which fixes their
+    # colours in the figures, stays.
+    implementations=[*IMPLEMENTATIONS, *variants(IMPLEMENTATIONS)],
     reference=Implementation(
         "reference_fp32", run_reference, modes=BOTH, info={**CONTRACT, "dtype": "float32"}
     ),

@@ -139,7 +139,14 @@ def test_list(tests_dir, capsys):
     assert "  elsewhere  modes=fwd  env=other  not checked (environment 'other')" in out
     assert "  plain_other (control of plain)  modes=fwd,fwd_bwd  env=other  not checked" in out
     assert "  reference (reference)  modes=fwd,fwd_bwd" in out
+    assert "  chunked[split=2] (variant of chunked)  modes=fwd,fwd_bwd  env=torch  available" in out
     assert "tolerances: y_rel_err<=0.0001" in out
+
+
+def test_split_keeps_variant_names():
+    # A comma inside a variant's brackets is part of its name.
+    assert cli._split(["a,b[x=1,y=2]", "c[k=3],d"]) == ["a", "b[x=1,y=2]", "c[k=3]", "d"]
+    assert cli._split(None) == [] and cli._split(["a,,b"]) == ["a", "b"]
 
 
 def test_list_default_dtypes(tests_dir, capsys, monkeypatch):
