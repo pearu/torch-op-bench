@@ -95,6 +95,7 @@ def test_flatten_values(synth):
         "control_of": None,
         "compiled": None,
         "override_ran": None,
+        "override_kernel_ran": None,
         "native_events": 0,
         "torch_version": "2.14.1+cu130",
         "torch_cuda": "13.0",
@@ -116,6 +117,10 @@ def test_flatten_values(synth):
         analysis.at(rows, **S.DEFAULT), implementation="compiled", mode="fwd", dtype="float32"
     )
     assert compiled["native_events"] == 1 and compiled["info.compile"] == "fullgraph"
+    # The override's dispatch and its kernel, from verify (R1-30 N1).
+    record = {**load(synth)[0], "verify": {"override_ran": True, "override_kernel_ran": False}}
+    row = analysis.flatten(record, axes=list(S.DEFAULT), info_keys=[])
+    assert (row["override_ran"], row["override_kernel_ran"]) == (True, False)
 
 
 def test_flatten_error_record(synth):

@@ -284,6 +284,17 @@ What the records say:
   known-good. `info.override_registration` records the same, after `present` (whether
   the build has the override), and `env.packages` the versions of `nvidia-cutlass-dsl`
   and `apache-tvm-ffi`.
+- `verify.override_kernel_ran` and `verify.override_kernels`: whether a CuTeDSL
+  kernel (a name starting `kernel_cutlass_`) ran under the override's dispatch
+  event, and which. The dispatch is not the kernel: in fwd (`torch.no_grad`) the
+  override dispatches but forms the loss from eager ops, with no CuTeDSL kernel, so
+  `torch_lce`'s fwd time is the eager accumulator's (`override_ran: true`,
+  `override_kernel_ran: false`); that is recorded, not an error. In fwd_bwd an
+  eligible override that dispatches without its kernel fails with an `error`
+  record. Under the dispatch only: other `torch._native` overrides launch CuTeDSL
+  kernels too (`_native::scatter_add__cutedsl_*` in the backward), and those are
+  not LCE's. `torch_lce_no_override` records `false` and `[]`, and fails if a
+  kernel ran; on CPU both entries record `false` and `[]`.
 - `verify.native_events`, on every entry (baselines, controls and counterparts
   alike): every `torch._native` event seen, not only LCE's. With the LCE override
   disabled, or in fp32, the backward still runs `_native::scatter_add__cutedsl_*`, so
@@ -366,18 +377,22 @@ torch-op-bench commits). Its sections:
    12 characters of the commit of a git install), the torch-op-bench commit, and
    the matmul settings. It says so when the commits differ, or when one environment
    holds several builds.
-2. **At the default point** (see above), per mode and dtype, two tables. The first
-   has one row per implementation, the baseline first and each control right after
-   its original, with its environment, median and IQR (in one cell, "median (IQR)";
-   the status instead when it is not `ok`), time against the baseline, tokens/s,
-   TFLOP/s, peak memory above baseline and against the baseline's, **time × peak**
-   (median ms × peak above baseline in MiB, in ms·MiB) and against the baseline's,
-   parity and its metrics, and `override_ran`. The second, "Entry details", has one
-   row per implementation in the same order and one cell: the `key=value` pairs of
-   the `info` fields that differ between records (e.g. `torchtitan_api`,
-   `compile`, `op_decisions.is_cuda`), keys sorted, those the entry lacks left
-   out, so a difference cannot hide in `info`. No table of the report is wider
-   than 16 columns.
+2. **At the default point** (see above), per mode and dtype, two tables. The first has
+   one row per implementation, the baseline first and each control right after its
+   original, with its environment, median and IQR (in one cell, "median (IQR)"; the
+   status instead when it is not `ok`), time against the baseline, tokens/s, TFLOP/s,
+   peak memory above baseline and against the baseline's, **time × peak** (median ms ×
+   peak above baseline in MiB, in ms·MiB) and against the baseline's, parity and its
+   metrics, and `override`: `kernel` (the override dispatched and its kernel ran),
+   `dispatch only` (it dispatched, and ran no kernel of its own), or `no` (`dispatch`
+   for a record older than `override_kernel_ran`; `—` for an entry that records
+   neither), from `verify.override_ran` and `verify.override_kernel_ran`. When an
+   entry is `dispatch only`, a sentence under the table says its time is not the
+   override kernel's. The second, "Entry details", has one row per implementation in
+   the same order and one cell: the `key=value` pairs of the `info` fields that differ
+   between records (e.g. `torchtitan_api`, `compile`, `op_decisions.is_cuda`), keys
+   sorted, those the entry lacks left out, so a difference cannot hide in `info`. No
+   table of the report is wider than 16 columns.
 3. **Sweeps**: for each axis varied around the default point, four tables (median,
    peak, time × peak with its ratio to the baseline's in parentheses, parity with
    the failing metrics) with one column per implementation. A cell is `—` when there
