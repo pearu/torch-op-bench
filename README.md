@@ -325,7 +325,7 @@ concatenation; `torch_op_bench.records.read(directory)` reads a tree and
 | `memory` | `peak_bytes`, `baseline_bytes` (inputs allocated); `null` on CPU |
 | `parity` | `status` (`ok`, `fail`, `skipped`), `reason`, `metrics`, `tolerances`, `failed` |
 | `verify`, `work`, `info` | what `verify` returned; work units; the implementation's info |
-| `env`, `env_from`, `env_error` | provenance of the worker's interpreter (`worker`), or of the parent's when the worker produced no record (`runner`, without torch); why `env` is `null` if collecting it failed; `env.packages` maps each of the implementation's `packages` to its version (`null` if not installed), or, for a package installed from a VCS URL, to `{version, url, commit, requested}` from its `direct_url.json`; `env.package_root` the directory the worker imported torch-op-bench from; `env.torch.matmul` the process-wide settings that choose how matmuls round (`allow_tf32`, `allow_bf16_reduced_precision_reduction`, `allow_fp16_reduced_precision_reduction`, and, on builds whose reduced-precision flags are pairs `(reduced_precision, split_k)`, `allow_bf16_reduced_precision_reduction_split_k` and `allow_fp16_reduced_precision_reduction_split_k` (`null` otherwise), `fp32_precision`, `float32_matmul_precision`), as the worker had them after the run (`run --matmul-reduction strict` sets the reduced-precision ones): they change parity (bf16 reduced-precision reduction, on by default, doubles the `grad_hidden` error of chunked LCE at 128-row chunks) |
+| `env`, `env_from`, `env_error` | provenance of the worker's interpreter (`worker`), or of the parent's when the worker produced no record (`runner`, without torch); why `env` is `null` if collecting it failed; `env.packages` maps each of the implementation's `packages` to its version (`null` if not installed), or, for a package installed from a VCS URL, to `{version, url, commit, requested}` from its `direct_url.json`; `env.package_root` the directory the worker imported torch-op-bench from; `env.torch.matmul` the process-wide settings that choose how matmuls round (`allow_tf32`, `allow_bf16_reduced_precision_reduction`, `allow_fp16_reduced_precision_reduction`, and, on builds whose reduced-precision flags are pairs `(reduced_precision, split_k)`, `allow_bf16_reduced_precision_reduction_split_k` and `allow_fp16_reduced_precision_reduction_split_k` (`null` otherwise), `fp32_precision`, `float32_matmul_precision`), as the worker had them after the run (`run --matmul-reduction strict` sets the reduced-precision ones; its `_split_k` fields stay `true`, since the second element of a pair only qualifies an allowed reduced-precision reduction: torch refuses `(True, False)` with "allow_splitk=False is not supported when reduced precision reductions are enabled", and `(False, True)` is no reduced-precision reduction at all): they change parity (bf16 reduced-precision reduction, on by default, doubles the `grad_hidden` error of chunked LCE at 128-row chunks) |
 
 The resume and merge key is (op, device slug, case key, implementation, mode).
 
@@ -361,15 +361,18 @@ torch-op-bench commits). Its sections:
    12 characters of the commit of a git install), the torch-op-bench commit, and
    the matmul settings. It says so when the commits differ, or when one environment
    holds several builds.
-2. **At the default point** (see above), per mode and dtype: one row per
-   implementation, the baseline first and each control right after its original,
-   with its environment, median and IQR, time against the baseline, tokens/s,
+2. **At the default point** (see above), per mode and dtype, two tables. The first
+   has one row per implementation, the baseline first and each control right after
+   its original, with its environment, median and IQR (in one cell, "median (IQR)";
+   the status instead when it is not `ok`), time against the baseline, tokens/s,
    TFLOP/s, peak memory above baseline and against the baseline's, **time × peak**
    (median ms × peak above baseline in MiB, in ms·MiB) and against the baseline's,
-   parity and its
-   metrics, `override_ran`, and each `info` field that differs between records (e.g.
-   `torchtitan_api`, `compile`, `accum_dtype`), so a difference cannot hide in
-   `info`.
+   parity and its metrics, and `override_ran`. The second, "Entry details", has one
+   row per implementation in the same order and one cell: the `key=value` pairs of
+   the `info` fields that differ between records (e.g. `torchtitan_api`,
+   `compile`, `op_decisions.is_cuda`), keys sorted, those the entry lacks left
+   out, so a difference cannot hide in `info`. No table of the report is wider
+   than 16 columns.
 3. **Sweeps**: for each axis varied around the default point, four tables (median,
    peak, time × peak with its ratio to the baseline's in parentheses, parity with
    the failing metrics) with one column per implementation. A cell is `—` when there
@@ -384,7 +387,7 @@ torch-op-bench commits). Its sections:
    checked), else a warning naming the records that do not, and the section still
    renders. Then per mode and dtype, at the default point, one row per entry: the
    median of each and the time ratio strict / default; for each parity metric both
-   values and the ratio default / strict; "parity moves", yes with the metrics
+   values (in one cell, "default, strict") and the ratio default / strict; "parity moves", yes with the metrics
    named when a ratio is outside [0.9, 1.1] (the environment check's band); and,
    for the torch LCE entries, `info.op_decisions`, the values in one cell. An entry
    absent from one directory, or not `ok` in one, says "not measured" and why.
@@ -401,9 +404,22 @@ torch-op-bench commits). Its sections:
    and the counterpart must be compared with its own environment's control. Another
    torch build can move the error of the same code (by 23 % in `grad_hidden` at one
    shape between torch 2.14 and 2.16), so a parity comparison across environments
-   needs this too. A parity metric on one side only is reported as such.
-6. **Not measured**: every `error` and `unavailable` record, grouped by the first
-   line of its reason.
+   needs this too. A parity metric on one side only is reported as such. A pair
+   where only one side is `ok` (a control out of memory where its original fits) is
+   a row too, flagged `status`, with the statuses (control / original) in the time
+   ratio's place and a sentence naming the cause: the environment makes that
+   difference. A pair where neither is `ok` has no row; the paragraph above the
+   table counts the pairs compared, those with one side and those with neither side
+   measured, and "Every control is within the limits" is said only when no row is
+   flagged.
+6. **Not measured**: every `error` and `unavailable` record, grouped by cause, with
+   the number of records: for an `error`, the message up to its first number (a
+   token of its own, such as `4.00`, `cuda:0` or `4096x1024`; digits inside a word,
+   as in `mat1`, `sm_80` or `2D`, are part of the cause), less the unfinished
+   sentence there (one group for every CUDA out-of-memory error, whatever the
+   sizes); each row then names the entry, mode and case, and what the cause left
+   out (for out of memory, the size tried and the free memory). For `unavailable`,
+   whose reasons are written to be stable, the first line of the reason.
 
 Numbers have 3 significant digits and memory is in MiB with one decimal.
 

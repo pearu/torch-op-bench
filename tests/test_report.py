@@ -27,6 +27,17 @@ def table_rows(text):
     return [line for line in text.splitlines() if line.startswith("| ")]
 
 
+def tables(text):
+    """Each markdown table of ``text``, as its lines."""
+    found = [[]]
+    for line in text.splitlines():
+        if line.startswith("| "):
+            found[-1].append(line)
+        elif found[-1]:
+            found.append([])
+    return [t for t in found if t]
+
+
 def test_numbers():
     assert report.sig3(None) == "—"
     assert report.sig3(0.5) == "0.500"
@@ -66,10 +77,10 @@ def test_default_point(synth):
     text = make(synth)
     assert "The default point is the op's defaults." in text
     part = section(text, "### fwd_bwd, float32", "\n### ")
-    names = [cells(row)[0] for row in table_rows(part)[2:]]
+    names = [cells(row)[0] for row in tables(part)[0][2:]]
     assert names == ["base", "base_other (control of base)", "compiled", "chunked"]
-    header = cells(table_rows(part)[0])
-    by_name = {cells(row)[0]: cells(row) for row in table_rows(part)[2:]}
+    header = cells(tables(part)[0][0])
+    by_name = {cells(row)[0]: cells(row) for row in tables(part)[0][2:]}
     col = header.index("time / baseline")
     for name in ["compiled", "chunked"]:
         expected = S.median_ms(name, "fwd_bwd", "float32", S.DEFAULT) / S.median_ms(
@@ -94,10 +105,74 @@ def test_default_point(synth):
     assert by_name["compiled"][product + 1] == "0.500"
     assert by_name["base_other (control of base)"][product + 1] == "1.10"
     assert by_name["base"][product + 1] == "1.00"
-    assert "api.name" in header and "num_chunks" in header  # varying info
-    # fwd: chunked has no fwd records, and no info column is empty there
+    assert header[2] == "median ms (IQR)" and "status" not in header
+    assert by_name["chunked"][2] == "256 (25.6)"
+    # The info fields that differ between records: a table of their own (R1-30 F6).
+    details = tables(part)[1]
+    assert cells(details[0]) == ["implementation", "info"]
+    by_name = {cells(row)[0]: cells(row)[1] for row in details[2:]}
+    assert list(by_name) == names
+    assert by_name["chunked"] == "api.name=v2, num_chunks=4"
+    assert by_name["compiled"] == "compile=fullgraph" and by_name["base"] == "—"
+    assert "Entry details: the `info` fields that differ between records." in part
+    # fwd: chunked has no fwd records, and no info field of its is there
     part = section(text, "### fwd, float32", "\n### ")
     assert "chunked" not in part and "api.name" not in part
+    # Not ok: the status in the median's place.
+    text = make(synth, dtype="float32", mode="fwd", point={"M": "64"})
+    part = section(text, "### fwd, float32", "\n## ")
+    by_name = {cells(row)[0]: cells(row) for row in tables(part)[0][2:]}
+    assert by_name["compiled"][2] == "error"
+
+
+def widen(root, out):
+    """``root``'s records in the shape of I1-12's: 11 entries in fwd_bwd (copies of
+    ``compiled``), four parity metrics, and two entries whose ``info`` keys are
+    disjoint, 40 in all."""
+    for path in root.rglob("*.jsonl"):
+        lines = []
+        for line in path.read_text().splitlines():
+            record = json.loads(line)
+            copies = [record]
+            if record["implementation"] == "compiled":
+                record["info"].update({f"a{i:02}": i for i in range(20)})
+                for k in range(7):
+                    copy = json.loads(line)
+                    copy["implementation"] = f"compiled_{k}"
+                    copies.append(copy)
+            if record["implementation"] == "chunked":
+                record["info"].update({f"b{i:02}": "x" * i for i in range(20)})
+            for r in copies:
+                metrics = (r.get("parity") or {}).get("metrics")
+                if metrics:
+                    metrics.update(m3=1e-3, m4=2e-3)
+            lines += [json.dumps(r) for r in copies]
+        target = out / path.relative_to(root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n".join(lines) + "\n")
+    return out
+
+
+def test_tables_within_max_columns(synth, synth_strict, tmp_path):
+    # R1-30 F6: no table of the report is wider than MAX_COLUMNS, on the synthetic set
+    # and on one of I1-12's width; and every row has the header's cells.
+    wide = widen(synth, tmp_path / "wide")
+    wide_strict = widen(synth_strict, tmp_path / "wide-strict")
+    for text in [make(synth, strict=synth_strict), make(wide, strict=wide_strict)]:
+        found = tables(text)
+        assert len(found) > 10
+        for lines in found:
+            width = len(cells(lines[0]))
+            assert width <= report.MAX_COLUMNS, lines[0]
+            assert {len(cells(line)) for line in lines} == {width}, lines[0]
+    part = section(text, "### fwd_bwd, float32", "\n### ")
+    default, details = tables(part)
+    assert len(cells(default[0])) == report.MAX_COLUMNS  # 4 parity metrics
+    assert len(default) == 2 + 11
+    by_name = {cells(row)[0]: cells(row)[1] for row in details[2:]}
+    assert by_name["compiled"].startswith("a00=0, a01=1, ") and "b00" not in by_name["compiled"]
+    assert by_name["chunked"].startswith("api.name=v2, b00=, b01=x, ")
+    assert by_name["chunked"].count("=") == 22  # api.name, b00..b19, num_chunks
 
 
 def test_sweeps(synth):
@@ -217,15 +292,137 @@ def test_environment_check_without_controls():
     assert "Every control is within the limits" in text
 
 
+def test_environment_check_status_mismatch():
+    # R1-30 F2: a control out of memory where its original fits is the environment's
+    # difference, not a pair to leave out.
+    def row(name, n, status, **more):
+        found = {"implementation": name, "mode": "fwd_bwd", "dtype": "bf16", "N": n}
+        found.update(status=status, median_ms=1.0, peak_above_baseline=0, **more)
+        if status != "ok":
+            found.update(median_ms=None, peak_above_baseline=None)
+        return found
+
+    control = {"role": "control", "control_of": "a", "env_name": "x"}
+    rows = [
+        row("a", 1, "ok"),
+        row("c", 1, "ok", **control),
+        row("a", 2, "ok"),
+        row("c", 2, "error", reason=OOM.format(tried="4.00", free="2.22"), **control),
+        row("a", 3, "error", reason="RuntimeError: boom"),
+        row("c", 3, "ok", **control),
+        row("a", 4, "unavailable", reason="needs 2 GPUs"),
+        row("c", 4, "error", reason="RuntimeError: boom", **control),
+    ]
+    checks = report.environment_check(rows, ["N"])
+    assert [(c["measured"], c["flags"]) for c in checks] == [
+        ("both", []),
+        ("one", ["status"]),
+        ("one", ["status"]),
+        ("neither", []),
+    ]
+    text = report.render_environment_check(rows, ["N"])
+    assert "1 pairs compared; 2 with one side not measured (flagged below); 1 with neither" in text
+    body = [cells(r) for r in table_rows(text)[2:]]
+    assert [r[4] for r in body] == ["N=1", "N=2", "N=3"]  # neither side: no row
+    assert body[1][5:] == ["error / ok", "—", "status"]
+    assert body[2][5:] == ["ok / error", "—", "status"]
+    assert (
+        "- **c** (`x`) against a, fwd_bwd bf16 at N=2: control `error` (OutOfMemoryError: "
+        "CUDA out of memory.), original `ok`: the environment makes a difference there."
+    ) in text
+    assert "control `ok`, original `error` (RuntimeError: boom)" in text
+    assert "Every control is within the limits" not in text
+    # Only the pair of both ok: within the limits.
+    text = report.render_environment_check(rows[:2], ["N"])
+    assert "1 pairs compared; 0 with one side not measured; 0 with neither" in text
+    assert "Every control is within the limits" in text
+    # Neither side measured anywhere: counted, no table.
+    text = report.render_environment_check(rows[6:], ["N"])
+    assert "0 pairs compared; 0 with one side not measured; 1 with neither" in text
+    assert "| control |" not in text and "Every control" not in text
+
+
 def test_not_measured(synth):
     text = section(make(synth), "## Not measured")
     assert (
-        "- error: RuntimeError: boom\n  - compiled, fwd, float32 M=64, K=32, N=16, layout=a" in text
+        "- error: RuntimeError: boom (1)\n  - compiled, fwd, float32 M=64, K=32, N=16, layout=a\n"
+        in text
     )
     assert "second line" not in text  # the reason's first line only
-    assert "- unavailable: needs a GPU\n  - chunked, fwd_bwd, float32 M=128, K=16" in text
+    assert "- unavailable: needs a GPU (1)\n  - chunked, fwd_bwd, float32 M=128, K=16" in text
     rows = [{"status": "ok"}]
     assert "Every record is `ok`." in report.render_not_measured(rows, [])
+
+
+# The reasons of I1-12's six out-of-memory errors, cut where the figures end.
+OOM = (
+    "OutOfMemoryError: CUDA out of memory. Tried to allocate {tried} GiB. GPU 0 has a "
+    "total capacity of 15.57 GiB of which {free} GiB is free. Including non-PyTorch "
+    "memory, this process has 13.28 GiB memory in use."
+)
+
+
+def test_cause():
+    # One cause, whatever its figures (R1-30 F5); the figures go to the row.
+    key = "OutOfMemoryError: CUDA out of memory."
+    assert report.cause("error", OOM.format(tried="4.00", free="2.28")) == (
+        key,
+        "tried to allocate 4.00 GiB, 2.28 GiB free",
+    )
+    assert report.cause("error", OOM.format(tried="8.00", free="1.31"))[0] == key
+    # Two different RuntimeErrors stay two causes.
+    shape = report.cause("error", "RuntimeError: shape mismatch: 3 against 4")
+    illegal = report.cause("error", "RuntimeError: CUDA error: an illegal memory access")
+    assert shape == ("RuntimeError: shape mismatch", "3 against 4")
+    assert illegal == ("RuntimeError: CUDA error: an illegal memory access", "")
+    # Digits in a word name the cause; a number token ends it (R1-31 F1): no two of
+    # these six causes share a group.
+    lines = [
+        "RuntimeError: mat1 and mat2 shapes cannot be multiplied (4096x1024 and 2048x131072)",
+        "RuntimeError: mat1 and mat2 must have the same dtype, but got BFloat16 and Float",
+        "RuntimeError: Expected 2D tensor for input, got 3D",
+        "RuntimeError: Expected 3 arguments, got 2",
+        "ValueError: sm_80 or newer is required",
+        "ValueError: sm_90 kernels are not built for this wheel",
+    ]
+    keys = [report.cause("error", line)[0] for line in lines]
+    assert len(set(keys)) == 6
+    assert keys[0] == "RuntimeError: mat1 and mat2 shapes cannot be multiplied"
+    assert keys[1:3] + keys[4:] == lines[1:3] + lines[4:]  # no number: the whole line
+    assert keys[3] == "RuntimeError: Expected"
+    # ... and other shapes of the same cause stay in its group.
+    other = "RuntimeError: mat1 and mat2 shapes cannot be multiplied (8x16 and 32x64)"
+    assert report.cause("error", other) == (keys[0], "(8x16 and 32x64)")
+    assert report.cause("error", "TimeoutError: worker exceeded 600.0 s") == (
+        "TimeoutError: worker exceeded",
+        "600.0 s",
+    )
+    # A message that starts with a number has nothing to cut at: the whole line.
+    assert report.cause("error", "ValueError: 3 is odd")[0] == "ValueError: 3 is odd"
+    # unavailable: the first line, numbers and all.
+    assert report.cause("unavailable", "needs 2 GPUs\nmore") == ("needs 2 GPUs", "")
+    assert report.cause("error", None) == ("no reason recorded", "")
+
+
+def test_not_measured_groups_by_cause():
+    figures = [("4.00", "2.28"), ("4.00", "2.22"), ("4.00", "2.22"), ("8.00", "2.23")]
+    rows = [
+        {
+            "implementation": f"e{i}",
+            "mode": "fwd_bwd",
+            "dtype": "bfloat16",
+            "N": 16384,
+            "status": "error",
+            "reason": OOM.format(tried=tried, free=free),
+        }
+        for i, (tried, free) in enumerate(figures)
+    ]
+    rows.append({**rows[0], "implementation": "x", "reason": "RuntimeError: boom 7"})
+    text = report.render_not_measured(rows, ["N"])
+    assert text.count("\n- ") == 2
+    assert "- error: OutOfMemoryError: CUDA out of memory. (4)\n" in text
+    assert "  - e3, fwd_bwd, bfloat16 N=16384: tried to allocate 8.00 GiB, 2.23 GiB free\n" in text
+    assert "- error: RuntimeError: boom (1)\n  - x, fwd_bwd, bfloat16 N=16384: 7\n" in text
 
 
 def test_missing_baseline_and_point(synth):
@@ -331,8 +528,8 @@ def test_without_the_default_point(synth, tmp_path):
                 assert f"### {mode}, {dtype}: {case}\n\nAt {case}.\n" in part
     # The rows of the default-point table, its ratios included.
     table = section(part, "### fwd_bwd, float32: M=64,", "\n### ")
-    header = cells(table_rows(table)[0])
-    by_name = {cells(row)[0]: cells(row) for row in table_rows(table)[2:]}
+    header = cells(tables(table)[0][0])
+    by_name = {cells(row)[0]: cells(row) for row in tables(table)[0][2:]}
     assert by_name["chunked"][header.index("time / baseline")] == "2.00"
     assert by_name["chunked"][header.index("time × peak / baseline's")] == "0.500"
     # A partial --point names one axis; the rest stay the spec's.
@@ -427,7 +624,7 @@ def test_reduction_section(synth, synth_strict):
     assert list(rows) == ["base", "base_other (control of base)", "compiled", "chunked"]
     base = rows["base"]
     assert base["time strict / default"] == "1.20"
-    assert base["grad_rel default"] == "0.00200" and base["grad_rel strict"] == "0.00100"
+    assert base["grad_rel default, strict"] == "0.00200, 0.00100"
     assert base["grad_rel default / strict"] == "2.00"
     assert base["parity moves"] == "yes: grad_rel, loss_rel_err"
     other = rows["base_other (control of base)"]

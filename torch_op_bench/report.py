@@ -7,6 +7,7 @@ Pure functions ``render_*`` turn rows (``analysis.to_rows``) into markdown;
 from __future__ import annotations
 
 import math
+import re
 import shlex
 import warnings
 from collections import defaultdict
@@ -30,6 +31,8 @@ SOURCES = {
 # A varying info value longer than this is cut in the tables (the record has it
 # whole), so one long list cannot make the table unreadable.
 INFO_WIDTH = 40
+# The widest a table may be (R1-30 F6): wider, a reader loses the row.
+MAX_COLUMNS = 16
 # The environment check: a control within these of its original is the same build.
 TIME_RATIO_RANGE = (0.95, 1.05)
 PEAK_DIFF_LIMIT = 64 * MIB
@@ -220,13 +223,10 @@ def render_default(
     base = by_impl.get(baseline)
     base_ok = base if base is not None and base.get("status") == "ok" else None
     parity = _parity_columns(here)
-    info = [c for c in _info_columns(here) if any(row.get(c) is not None for row in here)]
     header = [
         "implementation",
         "env",
-        "status",
-        "median ms",
-        "IQR ms",
+        "median ms (IQR)",
         "time / baseline",
         "tokens/s",
         "TFLOP/s",
@@ -237,20 +237,17 @@ def render_default(
         "parity",
         *(p.removeprefix(analysis.PARITY_PREFIX) for p in parity),
         "override_ran",
-        *(c.removeprefix(analysis.INFO_PREFIX) for c in info),
     ]
-    numeric = [False, False, False, *[True] * 9, False, *[True] * len(parity), False]
-    numeric += [False] * len(info)
+    numeric = [False, False, *[True] * 8, False, *[True] * len(parity), False]
     body = []
-    for name in analysis.implementations(here, baseline):
+    names = analysis.implementations(here, baseline)
+    for name in names:
         row = by_impl[name]
         body.append(
             [
                 impl_label(row, here),
                 text(row.get("env_name")),
-                text(row.get("status")),
-                sig3(row.get("median_ms")),
-                sig3(row.get("iqr_ms")),
+                _median_cell(row),
                 sig3(ratio(row.get("median_ms"), base_ok and base_ok.get("median_ms"))),
                 sig3(row.get("tokens_per_s")),
                 sig3(row.get("tflops")),
@@ -266,14 +263,51 @@ def render_default(
                 parity_text(row),
                 *(sig3(row.get(p)) for p in parity),
                 text(row.get("override_ran")),
-                *(text(row.get(c), INFO_WIDTH) for c in info),
             ]
         )
     lines = [f"### {title}", "", f"At {analysis.point_text(point)}.", ""]
     if base_ok is None:
         lines += [f"The baseline `{baseline}` has no `ok` record here: no ratios.", ""]
     lines.append(table(header, body, numeric))
+    lines += entry_details([by_impl[name] for name in names], here)
     return "\n".join(lines) + "\n"
+
+
+def _median_cell(row: Row) -> str:
+    """The median and, in parentheses, the IQR; the status when not ``ok``."""
+    if row.get("status") != "ok":
+        return text(row.get("status"))
+    return f"{sig3(row.get('median_ms'))} ({sig3(row.get('iqr_ms'))})"
+
+
+def entry_details(entries: Sequence[Row], labels: Sequence[Row]) -> list[str]:
+    """The table below the default-point one: per entry, in one cell, the ``info``
+    fields that differ between records (``analysis.varying_info``; a field the entry
+    lacks is not listed), so a difference cannot hide in ``info`` (R1-30 F6: as
+    columns they made the table 64 wide)."""
+    columns = sorted(
+        c for c in _info_columns(entries) if any(r.get(c) is not None for r in entries)
+    )
+    if not columns:
+        return []
+    body = [
+        [
+            impl_label(row, labels),
+            ", ".join(
+                f"{c.removeprefix(analysis.INFO_PREFIX)}={text(row[c], INFO_WIDTH)}"
+                for c in columns
+                if row.get(c) is not None
+            )
+            or MISSING,
+        ]
+        for row in entries
+    ]
+    return [
+        "",
+        "Entry details: the `info` fields that differ between records.",
+        "",
+        table(["implementation", "info"], body, [False, False]),
+    ]
 
 
 # --- 3. the sweeps --------------------------------------------------------------------
@@ -438,12 +472,14 @@ def render_reduction(
     metrics = sorted({name for e in entries for name in e["parity"]})
     decisions = any(any(d is not None for d in e["op_decisions"]) for e in entries)
     header = ["implementation", "median ms default", "median ms strict", "time strict / default"]
+    # Both values of a metric in one cell, so four metrics keep the table within
+    # MAX_COLUMNS.
     for name in metrics:
-        header += [f"{name} default", f"{name} strict", f"{name} default / strict"]
+        header += [f"{name} default, strict", f"{name} default / strict"]
     header.append("parity moves")
     if decisions:
         header.append("op_decisions")
-    numeric = [False, True, True, True, *[True] * (3 * len(metrics)), False]
+    numeric = [False, True, True, True, *[True] * (2 * len(metrics)), False]
     numeric += [False] * decisions
     label_rows = [
         {"implementation": e["implementation"], "role": e["role"], "control_of": e["control_of"]}
@@ -454,15 +490,16 @@ def render_reduction(
         cells = [impl_label(e["implementation"], label_rows)]
         if not e["measured"]:
             reason = f"not measured (default: {_side(e, 'default')}, strict: {_side(e, 'strict')})"
-            cells += [reason, *[MISSING] * (2 + 3 * len(metrics)), MISSING]
+            cells += [reason, *[MISSING] * (2 + 2 * len(metrics)), MISSING]
         else:
             cells += [sig3(e["median_default"]), sig3(e["median_strict"]), sig3(e["time_ratio"])]
             for name in metrics:
                 value = e["parity"].get(name)
                 if value is None:
-                    cells += [MISSING] * 3
+                    cells += [MISSING] * 2
                 else:
-                    cells += [sig3(value["default"]), sig3(value["strict"]), sig3(value["ratio"])]
+                    both = f"{sig3(value['default'])}, {sig3(value['strict'])}"
+                    cells += [both, sig3(value["ratio"])]
             cells.append(f"yes: {', '.join(e['moves'])}" if e["moves"] else "no")
         if decisions:
             cells.append(text(decisions_text(e["op_decisions"])))
@@ -566,20 +603,42 @@ def parity_ratios(control: Row, original: Row) -> dict[str, dict[str, Any]]:
 
 
 def environment_check(rows: Sequence[Row], axes: Sequence[str]) -> list[dict[str, Any]]:
-    """For every control, against its original, at every point and mode both have ok:
-    the time ratio (control / original), the peak difference (control − original)
-    and the ratio of each parity metric (control / original)."""
-    originals = {
-        (row["implementation"], row["mode"], analysis.case_of(row, axes)): row
-        for row in rows
-        if row.get("status") == "ok"
+    """For every control, against its original, at every point and mode both have a
+    record: when both are ok, the time ratio (control / original), the peak
+    difference (control − original) and the ratio of each parity metric (control /
+    original); when only one is ok (``measured`` is "one"), the flag ``status``: the
+    environment makes that difference (R1-30 F2); when neither is ("neither"), the
+    pair only."""
+    by_key = {
+        (row["implementation"], row["mode"], analysis.case_of(row, axes)): row for row in rows
     }
     found = []
     for row in rows:
-        if row.get("role") != "control" or row.get("status") != "ok":
+        if row.get("role") != "control":
             continue
-        original = originals.get((row.get("control_of"), row["mode"], analysis.case_of(row, axes)))
+        original = by_key.get((row.get("control_of"), row["mode"], analysis.case_of(row, axes)))
         if original is None:
+            continue
+        check = {
+            "control": row["implementation"],
+            "original": row["control_of"],
+            "env_name": row.get("env_name"),
+            "mode": row["mode"],
+            "dtype": row.get("dtype"),
+            "case": case_text(row, axes),
+            "status": (row.get("status"), original.get("status")),
+            "measured": "both",
+            "time_ratio": None,
+            "peak_diff": None,
+            "parity": {},
+            "flags": [],
+        }
+        found.append(check)
+        both = [r.get("status") == "ok" for r in (row, original)]
+        if not all(both):
+            check["measured"] = "one" if any(both) else "neither"
+            check["flags"] = ["status"] if any(both) else []
+            check["reason"] = (row if not both[0] else original).get("reason")
             continue
         time_ratio = ratio(row.get("median_ms"), original.get("median_ms"))
         peak_a, peak_b = row.get("peak_above_baseline"), original.get("peak_above_baseline")
@@ -597,20 +656,7 @@ def environment_check(rows: Sequence[Row], axes: Sequence[str]) -> list[dict[str
                 flags.append(name)
             elif value["ratio"] is None and value["side"] is None:  # 0 against nonzero
                 flags.append(name)
-        found.append(
-            {
-                "control": row["implementation"],
-                "original": row["control_of"],
-                "env_name": row.get("env_name"),
-                "mode": row["mode"],
-                "dtype": row.get("dtype"),
-                "case": case_text(row, axes),
-                "time_ratio": time_ratio,
-                "peak_diff": peak_diff,
-                "parity": parity,
-                "flags": flags,
-            }
-        )
+        check.update(time_ratio=time_ratio, peak_diff=peak_diff, parity=parity, flags=flags)
     return found
 
 
@@ -625,9 +671,10 @@ def _parity_cell(value: Mapping[str, Any] | None) -> str:
 
 
 def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
-    checks = environment_check(rows, axes)
+    pairs = environment_check(rows, axes)
+    checks = [c for c in pairs if c["measured"] != "neither"]
     lines = ["## Environment check", ""]
-    if not checks:
+    if not pairs:
         lines.append("No control has a record at a point where its original has one.")
         return "\n".join(lines) + "\n"
     low, high = TIME_RATIO_RANGE
@@ -639,9 +686,20 @@ def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
         f"[{low}, {high}], a peak difference beyond {PEAK_DIFF_LIMIT // MIB} MiB or a "
         f"parity ratio outside [{p_low}, {p_high}] means the environment, not the "
         f"counterpart, makes a difference there, and a counterpart must be compared "
-        f"with the control of its own environment.",
+        f"with the control of its own environment; so does a pair where only one side "
+        f"is `ok` (flag `status`, its statuses, control / original, in the time ratio's "
+        f"place).",
         "",
     ]
+    count = {kind: sum(c["measured"] == kind for c in pairs) for kind in ("both", "one", "neither")}
+    lines += [
+        f"{count['both']} pairs compared; {count['one']} with one side not measured"
+        f"{' (flagged below)' if count['one'] else ''}; {count['neither']} with neither "
+        f"side measured.",
+        "",
+    ]
+    if not checks:
+        return "\n".join(lines) + "\n"
     metrics = sorted({name for c in checks for name in c["parity"]})
     body = [
         [
@@ -650,7 +708,7 @@ def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
             c["mode"],
             text(c["dtype"]),
             c["case"],
-            sig3(c["time_ratio"]),
+            sig3(c["time_ratio"]) if c["measured"] == "both" else " / ".join(c["status"]),
             mib(c["peak_diff"]),
             *(_parity_cell(c["parity"].get(name)) for name in metrics),
             ", ".join(c["flags"]) or "",
@@ -665,6 +723,17 @@ def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
     if not noted:
         lines.append("Every control is within the limits: the environments do not differ here.")
     for c in noted:
+        if c["measured"] == "one":
+            control, original = (
+                f"`{status}`" + ("" if status == "ok" else f" ({cause(status, c['reason'])[0]})")
+                for status in c["status"]
+            )
+            lines.append(
+                f"- **{c['control']}** (`{c['env_name']}`) against {c['original']}, "
+                f"{c['mode']} {c['dtype']} at {c['case']}: control {control}, original "
+                f"{original}: the environment makes a difference there."
+            )
+            continue
         what = []
         if "time" in c["flags"]:
             what.append(f"time ratio {sig3(c['time_ratio'])} outside [{low}, {high}]")
@@ -694,23 +763,60 @@ def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
 # --- 6. not measured -----------------------------------------------------------------------
 
 
+REASON_WIDTH = 200
+# An error's cause ends where its first number starts: what follows (sizes, free
+# memory, indices) differs from record to record of one cause. A number is a token
+# of its own ("4.00", "cuda:0", "4096x1024"), not digits in a word ("mat1", "sm_80",
+# "2D", "BFloat16"), which name the cause (R1-31 F1).
+FIRST_NUMBER = re.compile(r"(?<![A-Za-z0-9_.])\d+(?:[.x]\d+)*(?![A-Za-z0-9_])")
+OOM_SPECIFICS = re.compile(
+    r"Tried to allocate (?P<tried>[\d.]+ \w+)\..*? of which (?P<free>[\d.]+ \w+) is free"
+)
+
+
+def cause(status: str, reason: str | None) -> tuple[str, str]:
+    """The group of a not-measured record: its cause, and what of its reason's first
+    line the cause leaves out. For an ``error``, the cause is the message up to its
+    first number (``FIRST_NUMBER``), with the unfinished sentence there dropped
+    ("OutOfMemoryError: CUDA out of memory. Tried to allocate 4.00 GiB. …" is
+    "OutOfMemoryError: CUDA out of memory."); for ``unavailable``, whose reasons are
+    written to be stable, the whole first line."""
+    line = (reason or "no reason recorded").strip().splitlines()[0]
+    found = FIRST_NUMBER.search(line) if status == "error" else None
+    if found is None:
+        return line[:REASON_WIDTH], ""
+    head = line[: found.start()]
+    # "…: CUDA out of memory. Tried to allocate " -> "…: CUDA out of memory."
+    sentence = head.rfind(". ")
+    key = head[: sentence + 1] if sentence != -1 else head.rstrip(" ([{:,=")
+    name, colon, message = head.partition(":")
+    if not (message if colon and " " not in name else head).strip(" :([{,="):
+        # The message starts with a number: no cause to cut it at.
+        return line[:REASON_WIDTH], ""
+    oom = OOM_SPECIFICS.search(line)
+    if oom:
+        rest = f"tried to allocate {oom['tried']}, {oom['free']} free"
+    else:
+        rest = line[len(key) :].strip(" :,=")
+    return key[:REASON_WIDTH], rest
+
+
 def render_not_measured(rows: Sequence[Row], axes: Sequence[str]) -> str:
     missing = [row for row in rows if row.get("status") in ("error", "unavailable")]
     lines = ["## Not measured", ""]
     if not missing:
         lines.append("Every record is `ok`.")
         return "\n".join(lines) + "\n"
-    groups: dict[tuple[str, str], list[Row]] = defaultdict(list)
+    groups: dict[tuple[str, str], list[tuple[Row, str]]] = defaultdict(list)
     for row in missing:
-        reason = (row.get("reason") or "no reason recorded").strip().splitlines()[0]
-        groups[(row["status"], reason[:200])].append(row)
-    for (status, reason), group in sorted(groups.items()):
-        lines.append(f"- {status}: {text(reason)}")
-        for row in group:
-            lines.append(
-                f"  - {row['implementation']}, {row['mode']}, "
-                f"{row.get('dtype')} {case_text(row, axes)}"
-            )
+        key, rest = cause(row["status"], row.get("reason"))
+        groups[(row["status"], key)].append((row, rest))
+    for (status, key), group in sorted(groups.items()):
+        lines.append(f"- {status}: {text(key)} ({len(group)})")
+        for row, rest in group:
+            where = f"{row['implementation']}, {row['mode']}, {row.get('dtype')}"
+            where += f" {case_text(row, axes)}" + (f": {text(rest, REASON_WIDTH)}" if rest else "")
+            lines.append(f"  - {where}")
     return "\n".join(lines) + "\n"
 
 
