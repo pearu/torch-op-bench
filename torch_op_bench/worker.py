@@ -206,10 +206,16 @@ def _parity(
         parity["status"] = "skipped"
         parity["reason"] = f"reference does not support mode {mode!r}"
         return parity
+    # The implementation first, its outputs kept in host memory while the reference
+    # runs: on the device they would pin the allocator segments its temporaries used,
+    # and the fp32 reference would not have the memory ``reference_fits`` saw (I1-17).
     reset()
+    outputs = _move(impl.run(inputs, mode), "cpu")
+    reset()
+    _release_cached(case)
     ref_outputs = spec.reference.run(inputs, mode)
     reset()
-    outputs = impl.run(inputs, mode)
+    outputs = _move(outputs, case.device)
     metrics = {
         name: float(value) for name, value in spec.compare(outputs, ref_outputs, case).items()
     }
@@ -223,6 +229,23 @@ def _parity(
     )
     parity["status"] = "fail" if parity["failed"] else "ok"
     return parity
+
+
+def _move(outputs: Any, device: str) -> Any:
+    """``outputs`` (a tuple) with each tensor moved to ``device``."""
+    import torch
+
+    return tuple(t.to(device) if isinstance(t, torch.Tensor) else t for t in outputs)
+
+
+def _release_cached(case: Case) -> None:
+    """Return the memory the caching allocator holds unused to the device, for the
+    reference to allocate in full."""
+    gc.collect()
+    if case.device.startswith("cuda"):
+        import torch
+
+        torch.cuda.empty_cache()
 
 
 def main() -> None:
