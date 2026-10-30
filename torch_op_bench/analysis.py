@@ -2,7 +2,8 @@
 
 Op-agnostic and stdlib only: it reads records, not an op's module, so ``report``
 runs in any environment that has the tool. An op's spec is consulted only for the
-order of its axes and its default point, and only when its ``op_ref`` resolves.
+order of its axes, its default point and its parity notes, and only when its
+``op_ref`` resolves.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from . import records
-from .spec import MODES
+from .spec import MODES, Case
 
 Record = dict[str, Any]
 Row = dict[str, Any]
@@ -24,7 +25,17 @@ MIB = 1024**2
 # Where a record came from: the file name, kept beside the record for its host part.
 SOURCE = "_source"
 
-HEAD = ["op", "device_slug", "host", "timestamp", "implementation", "mode", "env_name", "dtype"]
+HEAD = [
+    "op",
+    "device_slug",
+    "host",
+    "timestamp",
+    "implementation",
+    "mode",
+    "env_name",
+    "dtype",
+    "device",
+]
 RESULTS = [
     "status",
     "reason",
@@ -196,6 +207,7 @@ def flatten(
         "mode": record.get("mode"),
         "env_name": record.get("env_name"),
         "dtype": case.get("dtype"),
+        "device": case.get("device"),
     }
     row.update({name: params.get(name) for name in axes})
 
@@ -257,6 +269,55 @@ def flatten(
     for name in info_keys:
         row[INFO_PREFIX + name] = _cell(flat.get(name))
     return row
+
+
+# --- parity notes (R1-30 F1) ----------------------------------------------------------
+
+
+def parity_notes(recs: Sequence[Mapping[str, Any]]) -> list[Any]:
+    """The op's ``parity_notes`` when its spec resolves here, else none."""
+    spec = spec_of(recs[0]) if recs else None
+    return list(getattr(spec, "parity_notes", None) or [])
+
+
+def failed_metrics(row: Row) -> list[str]:
+    """The parity metrics a row failed on, from ``parity_failed``."""
+    return [name for name in (row.get("parity_failed") or "").split(",") if name]
+
+
+def explained(row: Row, notes: Sequence[Any], axes: Sequence[str]) -> dict[str, Any]:
+    """For each metric a ``fail`` row failed on, the first note that explains it
+    there (its implementation and metric, and ``applies`` true for the row), or
+    ``None``; empty for a row that did not fail."""
+    if row.get("parity_status") != "fail":
+        return {}
+    failed = failed_metrics(row)
+    mine = [n for n in notes if n.implementation == row["implementation"]]
+    if not mine:
+        return dict.fromkeys(failed)
+    case = Case({name: row.get(name) for name in axes}, row["dtype"], row["device"])
+    metrics = _parity_values(row)
+    return {
+        name: next(
+            (
+                note
+                for note in mine
+                if (note.metrics is None or name in note.metrics)
+                and note.applies(case, row["mode"], metrics, row.get("torch_version"))
+            ),
+            None,
+        )
+        for name in failed
+    }
+
+
+def parity_failures(
+    rows: Sequence[Row], notes: Sequence[Any], axes: Sequence[str]
+) -> tuple[int, int]:
+    """How many rows failed parity, and how many of them a note explains in every
+    metric they failed on."""
+    failed = [explained(row, notes, axes) for row in rows if row.get("parity_status") == "fail"]
+    return len(failed), sum(1 for found in failed if found and all(found.values()))
 
 
 def time_x_peak(median_ms: float | None, peak_above_baseline: int | None) -> float | None:

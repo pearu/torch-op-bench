@@ -118,6 +118,25 @@ def _always_fits(case: Case) -> bool | str:
     return True
 
 
+@dataclass(frozen=True)
+class ParityNote:
+    """A known cause of an implementation's parity failure (R1-30 F1).
+
+    ``implementation`` fails ``metrics`` (``None``: any of its metrics) for a cause
+    outside the tool, named in ``text``: one or two sentences with the cause, its
+    source (file and line, the torch version it was verified on) and a reference (an
+    issue or PR URL). ``applies(case, mode, metrics, torch_version)`` says whether
+    the cause holds for a record: its case, mode, parity metrics and the worker's
+    torch version (``None`` when not recorded). The note lives with the op, not in
+    the records: a cause found after a run needs no rerun.
+    """
+
+    implementation: str
+    metrics: tuple[str, ...] | None
+    applies: Callable[[Case, str, Mapping[str, float], str | None], bool]
+    text: str
+
+
 @dataclass
 class Implementation:
     """One way of computing an op.
@@ -184,7 +203,8 @@ class OpSpec:
     axis around (an axis missing from it defaults to its first value).
     ``reference_fits(case)`` is the memory guard of the parity check: ``True``, or a
     string saying why the reference is skipped. ``default_dtypes`` are the dtypes a
-    run uses when none are given (``None``: all of ``dtypes``).
+    run uses when none are given (``None``: all of ``dtypes``). ``parity_notes``
+    explain parity failures with a known cause (``ParityNote``).
     """
 
     name: str
@@ -199,12 +219,18 @@ class OpSpec:
     defaults: dict[str, Any] = field(default_factory=dict)
     reference_fits: Callable[[Case], bool | str] = _always_fits
     default_dtypes: list[str] | None = None
+    parity_notes: list[ParityNote] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         names = [impl.name for impl in self.implementations]
         duplicates = sorted({n for n in names if names.count(n) > 1})
         if duplicates:
             raise ValueError(f"op {self.name!r}: duplicate implementations {duplicates}")
+        unknown = sorted({n.implementation for n in self.parity_notes} - set(names))
+        if unknown:
+            raise ValueError(
+                f"op {self.name!r}: parity notes for unknown implementations {unknown}"
+            )
         unknown = set(self.defaults) - {axis.name for axis in self.axes}
         if unknown:
             raise ValueError(f"op {self.name!r}: defaults for unknown axes {sorted(unknown)}")

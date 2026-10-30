@@ -2,9 +2,11 @@ import json
 import statistics
 
 import pytest
+import synth_op
 import synth_results as S
 
 from torch_op_bench import analysis, records
+from torch_op_bench.spec import ParityNote
 
 MERGE_WARNING = "different torch-op-bench commits"
 
@@ -73,6 +75,7 @@ def test_flatten_values(synth):
         "timestamp": "2026-10-17T12:00:00+00:00",
         "mode": "fwd_bwd",
         "env_name": "other",
+        "device": S.DEVICE,
         "status": "ok",
         "reason": None,
         "n": 3,
@@ -285,3 +288,53 @@ def test_reduction_rows():
     assert found["zero"]["moves"] == ["grad"]
     gone = found["gone"]
     assert not gone["measured"] and gone["default"] is None and gone["time_ratio"] is None
+
+
+def test_parity_notes(synth, monkeypatch):
+    # R1-30 F1: a failure is explained, per metric, by the first note of its
+    # implementation and metric whose applies() holds for the record.
+    rows = analysis.to_rows(load(synth))
+    notes = analysis.parity_notes(load(synth))
+    assert [n.text for n in notes] == [synth_op.NOTE.text, synth_op.NEVER.text]
+    axes = list(S.DEFAULT)
+    failed = [r for r in rows if r["parity_status"] == "fail"]
+    assert {(r["implementation"], r["dtype"]) for r in failed} == {
+        ("chunked", "float32"),
+        ("chunked", "bfloat16"),
+    }
+    found = {r["dtype"]: analysis.explained(r, notes, axes) for r in failed}
+    assert found == {"bfloat16": {"grad_rel": synth_op.NOTE}, "float32": {"grad_rel": None}}
+    assert analysis.parity_failures(rows, notes, axes) == (2, 1)
+    assert analysis.parity_failures(rows, [], axes) == (2, 0)
+    ok = next(r for r in rows if r["parity_status"] == "ok")
+    assert analysis.explained(ok, notes, axes) == {}
+    # applies() sees the case (axes, dtype, device), mode, metrics and torch version.
+    seen = []
+
+    def applies(case, mode, metrics, torch_version):
+        seen.append((case, mode, metrics, torch_version))
+        return True
+
+    row = next(r for r in failed if r["dtype"] == "bfloat16")
+    analysis.explained(row, [ParityNote("chunked", None, applies, "t")], axes)
+    [(case, mode, metrics, version)] = seen
+    assert (case.params, case.dtype, case.device) == ({**S.DEFAULT, "M": 256}, "bfloat16", S.DEVICE)
+    assert (mode, version) == ("fwd_bwd", S.ENVS["other"]["version"])
+    assert metrics == {"loss_rel_err": 1e-3, "grad_rel": 0.5}
+    # A row failing two metrics, one explained: the record is not.
+    two = {**row, "parity_failed": "grad_rel,loss_rel_err"}
+    only_grad = [synth_op.NOTE]
+    assert analysis.explained(two, only_grad, axes) == {
+        "grad_rel": synth_op.NOTE,
+        "loss_rel_err": None,
+    }
+    assert analysis.parity_failures([two], only_grad, axes) == (1, 0)
+    assert analysis.parity_failures([two], [*only_grad, synth_op.NEVER], axes) == (1, 1)
+    # No spec here: no notes.
+    monkeypatch.setattr(analysis, "_SPECS", {})
+    monkeypatch.setattr("torch_op_bench.spec.resolve_op", _unresolvable)
+    assert analysis.parity_notes(load(synth)) == []
+
+
+def _unresolvable(ref):
+    raise ModuleNotFoundError(ref)

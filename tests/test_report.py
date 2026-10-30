@@ -2,9 +2,12 @@ import json
 import re
 
 import pytest
+import synth_op
 import synth_results as S
+import toy_op
 
 from torch_op_bench import analysis, cli, report
+from torch_op_bench.spec import ParityNote
 
 MERGE_WARNING = "different torch-op-bench commits"
 
@@ -249,6 +252,117 @@ def test_sweeps(synth):
     part = section(text, "#### fwd_bwd, float32: median ms against layout", "\n####")
     assert "| :--- |" in part.splitlines()[3]  # a str axis is not right-aligned
     assert "### fwd, " not in text and "bfloat16" not in text.split("## Environment check")[0]
+
+
+def test_parity_notes(synth):
+    # R1-30 F1: synth_op's note explains chunked's grad_rel failure at M=256 in
+    # bfloat16, not in float32; its other note names a metric chunked never fails.
+    text = make(synth, mode="fwd_bwd")
+    footnote = f"¹ `chunked`, grad_rel: {synth_op.NOTE.text}"
+    part = section(text, "#### fwd_bwd, bfloat16: parity against M", "\n####")
+    assert "| 256 | ok | ok | ok | fail¹: grad_rel |" in part
+    assert footnote in part.splitlines()
+    part = section(text, "#### fwd_bwd, float32: parity against M", "\n####")
+    assert "| 256 | ok | ok | ok | fail: grad_rel |" in part and "¹" not in part
+    # Only the parity table of the failure carries it.
+    assert text.count(footnote) == 1 and synth_op.NEVER.text not in text
+    part = section(text, "## Parity failures")
+    assert text.index("## Parity failures") < text.index("## Environment check")
+    lines = part.splitlines()
+    i = lines.index(f"- `chunked`, grad_rel (1): explained: {synth_op.NOTE.text}")
+    assert lines[i + 1] == "  - fwd_bwd, bfloat16 M=256, K=32, N=16, layout=a"
+    assert lines[i + 2] == "- `chunked`, grad_rel (1): **unexplained**"
+    assert lines[i + 3] == "  - fwd_bwd, float32 M=256, K=32, N=16, layout=a"
+    assert "2 parity failures, 1 explained." in lines
+    # One mode with no failure.
+    part = section(make(synth, mode="fwd"), "## Parity failures")
+    assert "No record fails parity." in part and "0 parity failures, 0 explained." in part
+
+
+def test_parity_notes_without_the_op(synth, monkeypatch):
+    # The op does not import here: no note, `fail` as it was, every failure unexplained.
+    def unresolvable(ref):
+        raise ModuleNotFoundError(ref)
+
+    monkeypatch.setattr(analysis, "_SPECS", {})
+    monkeypatch.setattr("torch_op_bench.spec.resolve_op", unresolvable)
+    text = make(synth, mode="fwd_bwd")
+    part = section(text, "#### fwd_bwd, bfloat16: parity against M", "\n####")
+    assert "| 256 | ok | ok | ok | fail: grad_rel |" in part
+    assert "¹" not in text and synth_op.NOTE.text not in text
+    assert "2 parity failures, 0 explained." in text
+
+
+def toy_rows(failed="y_rel_err"):
+    """The toy op's ``chunked`` failing parity in both modes at its default point,
+    beside ``plain`` passing."""
+    point = {"M": 16, "K": 4, "N": 4, "layout": "contiguous"}
+    rows = []
+    for mode in ("fwd", "fwd_bwd"):
+        for name, status in (("plain", "ok"), ("chunked", "fail")):
+            rows.append(
+                {
+                    "implementation": name,
+                    "mode": mode,
+                    "dtype": "float32",
+                    "device": "cpu",
+                    "env_name": "torch",
+                    **point,
+                    "status": "ok",
+                    "median_ms": 1.0,
+                    "parity_status": status,
+                    "parity_failed": failed if status == "fail" else None,
+                    "parity_y_rel_err": 1e-3,
+                }
+            )
+    return point, rows
+
+
+def test_parity_notes_of_the_toy_op():
+    # toy_op's note on chunked applies in fwd_bwd only: the footnote is under the
+    # fwd_bwd table, and the fwd failure stays unexplained.
+    notes = toy_op.TOY.parity_notes
+    point, rows = toy_rows()
+    fwd = report.render_default(
+        analysis.at(rows, mode="fwd"), point, "plain", title="f", notes=notes
+    )
+    assert "| fail: y_rel_err |" in fwd and "¹" not in fwd
+    both = report.render_default(
+        analysis.at(rows, mode="fwd_bwd"), point, "plain", title="b", notes=notes
+    )
+    assert "| fail¹: y_rel_err |" in both
+    assert f"¹ `chunked`, any metric: {notes[0].text}" in both.splitlines()
+    text = report.render_parity_failures(rows, list(point), notes)
+    assert f"- `chunked`, y_rel_err (1): explained: {notes[0].text}" in text
+    assert "- `chunked`, y_rel_err (1): **unexplained**" in text
+    assert "2 parity failures, 1 explained." in text
+    assert "1 parity failure, 0 explained." in report.render_parity_failures(
+        rows[:2], list(point), notes
+    )
+
+
+def test_footnotes_numbered_per_table():
+    # Distinct notes numbered in the order first marked, one footnote each per table;
+    # a cell whose metrics two notes explain carries both marks.
+    point, rows = toy_rows("y_rel_err,grad_a_rel_l2")
+    rows = analysis.at(rows, mode="fwd_bwd")
+    rows.append({**rows[1], "implementation": "plain2", "parity_failed": "grad_a_rel_l2"})
+    always = lambda *args: True  # noqa: E731
+    notes = [
+        ParityNote("chunked", ("y_rel_err",), always, "first"),
+        ParityNote("chunked", ("grad_a_rel_l2",), always, "second"),
+        ParityNote("plain2", None, always, "third"),
+    ]
+    text = report.render_default(rows, point, "plain", title="b", notes=notes)
+    assert "| fail¹²: y_rel_err,grad_a_rel_l2 |" in text
+    assert "| fail³: grad_a_rel_l2 |" in text
+    lines = text.splitlines()
+    footnotes = [line for line in lines if line and line[0] in "¹²³"]
+    assert footnotes == [
+        "¹ `chunked`, y_rel_err: first",
+        "² `chunked`, grad_a_rel_l2: second",
+        "³ `plain2`, any metric: third",
+    ]
 
 
 def test_environment_check(synth):

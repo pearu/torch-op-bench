@@ -21,7 +21,7 @@ import inspect
 from pathlib import Path
 from typing import Any
 
-from ..spec import Axis, Case, Implementation, OpSpec, Unavailable
+from ..spec import Axis, Case, Implementation, OpSpec, ParityNote, Unavailable
 
 IGNORE_INDEX = -100
 
@@ -1115,6 +1115,57 @@ TORCHTITAN = [
 ]
 
 
+# --- parity notes (R1-30 F1) ----------------------------------------------------
+
+# The day torch main first carries the fix of the bf16 running loss (PR
+# pytorch#202050), as "YYYYMMDD"; None while it is open. A nightly of that day or later
+# should pass, so the note no longer applies to it.
+BF16_LOSS_FIX_DATE: str | None = None
+
+
+def before_bf16_loss_fix(torch_version: str | None, fixed: str | None = None) -> bool:
+    """Whether a torch build predates the fix of the bf16 running loss (``fixed``,
+    default ``BF16_LOSS_FIX_DATE``): every build while it is unmerged; then a nightly
+    (``2.16.0.dev20261017``) by its date. A build without a date (a release, a source
+    build) or an unrecorded version is taken as before it."""
+    fixed = BF16_LOSS_FIX_DATE if fixed is None else fixed
+    if fixed is None or torch_version is None:
+        return True
+    _, dev, rest = torch_version.partition(".dev")
+    date = rest[:8]
+    if not dev or not date.isdigit():
+        return True
+    return date < fixed
+
+
+def _bf16_running_loss(
+    case: Case, mode: str, metrics: dict[str, float], torch_version: str | None
+) -> bool:
+    # The mechanism is the dtype's, at every shape, in both modes.
+    return (
+        case.dtype == "bfloat16"
+        and case.device.startswith("cuda")
+        and before_bf16_loss_fix(torch_version)
+    )
+
+
+PARITY_NOTES = [
+    ParityNote(
+        "torch_lce_no_override",
+        ("loss_rel_err", "grad_hidden_rel_l2"),
+        _bf16_running_loss,
+        "torch's eager chunked LCE keeps the running loss in bf16 and rounds it twice "
+        "per chunk (`torch/nn/modules/linear_cross_entropy.py:534`, `output_dtype = "
+        "acc_dtype if dtype == torch.float16 else dtype`, torch 2.16.0.dev20261017), "
+        "where the override keeps it in fp32, as its docstring says "
+        "(`torch/_native/ops/linear_cross_entropy/cutedsl_impl.py`, "
+        "`_batch_chunked_kernel`). Reported as "
+        "https://github.com/pytorch/pytorch/issues/201659; fix "
+        "https://github.com/pytorch/pytorch/pull/202050 (open).",
+    ),
+]
+
+
 LCE = OpSpec(
     name="lce",
     axes=[
@@ -1181,4 +1232,5 @@ LCE = OpSpec(
     },
     work=work,
     reference_fits=reference_fits,
+    parity_notes=PARITY_NOTES,
 )

@@ -9,6 +9,7 @@ import pytest
 import synth_results as S
 
 from torch_op_bench import analysis, cli, plot
+from torch_op_bench.spec import ParityNote
 
 pytest.importorskip("matplotlib")
 
@@ -352,6 +353,13 @@ def test_coincident_pairs():
     for pair in ([drawn[0], drawn[8]], [drawn[8], drawn[0]]):
         assert plot.coincident_pairs(pair) == {}
         assert plot.coincident_levels(pair) == {0: (0, 1, 0), 1: (0, 1, 1)}
+    # Nor are two controls of one original, each in its own environment (R1-34 R1):
+    # styled alike by design; their agreement is the environment check's.
+    a_other = series([100.0, 200.0, None], name="a_other", control_of="a")
+    assert plot.coincident_pairs([drawn[8], a_other]) == {}
+    # ... while a control on another implementation's control is still coincident.
+    b_ctl = series([100.0, 200.0, None], name="b_ctl", control_of="b")
+    assert plot.coincident_pairs([drawn[8], b_ctl]) == {1: 0}
     # Two on one that are not on each other (2.4 pt either side of it, 4.8 pt apart):
     # still a level each, so the later does not cover the earlier.
     fan = [
@@ -438,6 +446,17 @@ def test_left_out_and_provenance():
     )
     assert "1 without parity" in plot.left_out(rows, ["parity_x"])
     assert plot.left_out(rows[3:], ["median_ms"]) == "Every record of this figure is drawn."
+    # Parity failures are drawn (hollow, in every panel): counted, with those a note
+    # explains (R1-30 F1).
+    note = ParityNote("x", ("e",), lambda case, mode, metrics, version: mode == "fwd", "why")
+    failed = {"status": "ok", "parity_status": "fail", "parity_failed": "e", "dtype": "f"}
+    failed |= {"device": "cpu", "M": 1}
+    rows += [{**failed, "implementation": "x", "mode": m} for m in ("fwd", "fwd_bwd")]
+    assert plot.left_out(rows[3:], ["parity_e"], [note], ["M"]) == (
+        "Every record of this figure is drawn. Parity failures: 2 (1 explained), drawn hollow."
+    )
+    assert plot.left_out(rows[3:], [], [note], ["M"]).endswith("2 (1 explained), drawn hollow.")
+    assert plot.left_out(rows[3:], ["median_ms"]).endswith("2 (0 explained), drawn hollow.")
     row = {"env_name": "e", "torch_version": "2.1", "tob_hash": "abcdef1234567890", "host": "h"}
     assert plot.provenance([row], "A") == "A: e: torch 2.1, torch-op-bench abcdef123456; host h"
     assert plot.provenance([{}]) == "no provenance recorded; host ?"
@@ -605,8 +624,10 @@ def test_overlay_footer_counts_both_sets(synth, tmp_path, monkeypatch):
             labels=("one", "two"),
         )
     footer = footers["overlay-fwd_bwd.png"]
-    assert footer[0] == "one: Left out: 1 unavailable (gaps in the lines)."
-    assert footer[1] == "two: Left out: 1 error, 1 unavailable (gaps in the lines)."
+    # chunked fails parity at M=256 in float32, which synth_op's note does not explain.
+    hollow = " Parity failures: 1 (0 explained), drawn hollow."
+    assert footer[0] == "one: Left out: 1 unavailable (gaps in the lines)." + hollow
+    assert footer[1] == "two: Left out: 1 error, 1 unavailable (gaps in the lines)." + hollow
     assert footer[2].startswith("one: ") and footer[3].startswith("two: ")
 
 
