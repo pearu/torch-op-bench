@@ -870,9 +870,13 @@ def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
 PARITY_FAILURES_TITLE = "## Parity failures"
 
 
-def render_parity_failures(rows: Sequence[Row], axes: Sequence[str], notes: Sequence[Any]) -> str:
+def render_parity_failures(
+    rows: Sequence[Row], axes: Sequence[str], notes: Sequence[Any], *, unread: str | None = None
+) -> str:
     """Every ``fail`` of ``rows``, by entry and metric: explained by a note of the op,
-    or unexplained; and the count the "final" check reads."""
+    or unexplained; and the count the "final" check reads. ``unread`` is the
+    ``op_ref`` of an op that does not import here, whose notes were not read: a
+    sentence says so, so the count does not read as a real failure (R1-38 R1)."""
     groups: dict[tuple[str, str, Any], list[Row]] = defaultdict(list)
     for row in rows:
         for metric, note in analysis.explained(row, notes, axes).items():
@@ -896,6 +900,11 @@ def render_parity_failures(rows: Sequence[Row], axes: Sequence[str], notes: Sequ
             for row in groups[key]:
                 lines.append(f"  - {row['mode']}, {row.get('dtype')} {case_text(row, axes)}")
     lines += ["", f"{total} parity failure{'' if total == 1 else 's'}, {explained} explained."]
+    if unread is not None:
+        lines.append(
+            f"The op `{unread}` does not import here: its parity notes are not read, and "
+            "every failure counts as unexplained."
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -1060,7 +1069,8 @@ def report(
             )
         )
     scope = [row for row in rows if row["dtype"] in dtypes and row["mode"] in modes]
-    lines.append(render_parity_failures(scope, axes, notes))
+    unread = None if analysis.spec_of(recs[0]) else recs[0].get("op_ref") or recs[0]["op"]
+    lines.append(render_parity_failures(scope, axes, notes, unread=unread))
     lines.append(render_environment_check(scope, axes))
     lines.append(render_not_measured(scope, axes))
     return "\n".join(lines).rstrip() + "\n"

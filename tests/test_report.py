@@ -290,7 +290,15 @@ def test_parity_notes_without_the_op(synth, monkeypatch):
     part = section(text, "#### fwd_bwd, bfloat16: parity against M", "\n####")
     assert "| 256 | ok | ok | ok | fail: grad_rel |" in part
     assert "¹" not in text and synth_op.NOTE.text not in text
-    assert "2 parity failures, 0 explained." in text
+    part = section(text, "## Parity failures")
+    assert part.rstrip().splitlines()[-2:] == [
+        "2 parity failures, 0 explained.",
+        f"The op `{S.OP_REF}` does not import here: its parity notes are not read, and "
+        "every failure counts as unexplained.",
+    ]
+    # Where the op imports, no such sentence (R1-38 R1).
+    monkeypatch.undo()
+    assert "does not import here" not in make(synth, mode="fwd_bwd")
 
 
 def toy_rows(failed="y_rel_err"):

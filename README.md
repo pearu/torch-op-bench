@@ -437,7 +437,8 @@ torch-op-bench commits). Its sections:
    metric, "explained: <note>" when one of the op's `parity_notes` applies there,
    else "**unexplained**"; then "N parity failures, M explained", a record counting
    as explained when every metric it fails is. When the op cannot be imported,
-   there are no notes and every failure is unexplained.
+   there are no notes and every failure is unexplained, and a last sentence says so
+   ("The op `<op_ref>` does not import here: …").
 6. **Environment check**: each control (`torch_eager_<env>`) against its original at
    every point both have, as the time ratio (control / original), the peak
    difference, and the ratio of each parity metric. A time ratio outside [0.95,
