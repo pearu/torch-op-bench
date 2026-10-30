@@ -530,11 +530,56 @@ def test_work():
 def test_reference_fits(monkeypatch):
     assert SPEC.reference_fits(case()) is True
     c = case(device="cuda", N=4096, H=4096, V=131072)
+    # 3 * 1024 * V (one chunk) + 2 * (N * H + V * H) + V * H, in fp32
+    assert lce.reference_bytes(c) == 4 * (
+        3 * 1024 * 131072 + 2 * (4096 + 131072) * 4096 + 131072 * 4096
+    )
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (1024**3, 16 * 1024**3))
     reason = SPEC.reference_fits(c)
-    assert reason == "reference does not fit: 10.1 GiB needed, 1.0 GiB free (80 % usable)"
+    assert reason == "reference does not fit: 7.6 GiB needed, 1.0 GiB free (80 % usable)"
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (80 * 1024**3, 0))
     assert SPEC.reference_fits(c) is True
+    # Below one chunk the chunk is N rows.
+    small = case(device="cuda", N=100, H=8, V=10)
+    assert lce.reference_bytes(small) == 4 * (3 * 100 * 10 + 2 * (100 + 10) * 8 + 10 * 8)
+
+
+def _reference_unchunked(inputs, mode):
+    """The fp32 reference as it was before it was chunked: the oracle of the chunked one."""
+    hidden, weight, labels = inputs
+    hidden = hidden.detach().float().requires_grad_()
+    weight = weight.detach().float().requires_grad_()
+    return lce._call(lce._eager_loss, (hidden, weight, labels), mode)
+
+
+@pytest.mark.parametrize("mode", ["fwd_bwd", "fwd"])
+@pytest.mark.parametrize("ignore_frac", ["0", "0.1", "1"])
+@pytest.mark.parametrize("N", [64, 70])
+def test_reference_chunked_equals_unchunked(monkeypatch, N, ignore_frac, mode):
+    # 4 chunks of 16 rows at N=64; at N=70 the last chunk has 6.
+    monkeypatch.setattr(lce, "REFERENCE_CHUNK", 16)
+    c = case("bfloat16", ignore_frac, N=N, H=32, V=96)
+    x = inputs(c)
+    chunked = SPEC.reference.run(x, mode)
+    unchunked = _reference_unchunked(x, mode)
+    assert len(chunked) == len(unchunked) == (3 if mode == "fwd_bwd" else 1)
+    assert x[0].grad is None and x[1].grad is None  # copies, not the inputs
+    for got, want in zip(chunked, unchunked, strict=True):
+        assert got.dtype == torch.float32 and got.shape == want.shape
+        assert not got.requires_grad
+    if ignore_frac == "1":
+        # Every label ignored: the mean is 0 / 0, as eager's; no gradient flows.
+        assert chunked[0].isnan() and unchunked[0].isnan()
+        for got, want in zip(chunked[1:], unchunked[1:], strict=True):
+            torch.testing.assert_close(got, want, rtol=0, atol=0, equal_nan=True)
+        return
+    metrics = SPEC.compare(chunked, unchunked, c)
+    assert metrics["loss_rel_err"] <= 1e-6, metrics
+    for name in ("grad_hidden_rel_l2", "grad_weight_rel_l2"):
+        if mode == "fwd_bwd":
+            assert metrics[name] <= 1e-6, metrics
+    for got, want in zip(chunked[1:], unchunked[1:], strict=True):
+        torch.testing.assert_close(got, want, rtol=1e-6, atol=1e-6 * want.abs().max().item())
 
 
 def test_through_worker_and_runner(tmp_path):
@@ -1141,6 +1186,30 @@ def test_cuda_small_case_through_runner(tmp_path):
         assert all(event.startswith("_native::") for event in verify["native_events"])
     peak = {name: r["memory"]["peak_bytes"] for name, r in fwd_bwd.items()}
     assert peak["torch_lce"] < peak["torch_eager"], peak
+
+
+@pytest.mark.cuda
+def test_cuda_parity_where_the_unchunked_reference_does_not_fit(tmp_path):
+    # N=16384 at the default H and V: the unchunked fp32 reference needed
+    # 4 (3 N V + 2 (N H + V H)) = 28.5 GiB, more than this device has; parity was
+    # skipped there (F3 of R1-30). Chunked over N it needs 8 GiB, and is measured.
+    point = {"N": 16384, "H": 4096, "V": 131072, "ignore_frac": "0.1"}
+    cases = runner.enumerate_cases(SPEC, device="cuda", cases=[point])
+    written = runner.run_sweep(
+        SPEC,
+        "lce",
+        runner.enumerate_runs(SPEC, cases, ["torch_eager"]),
+        settings=runner.Settings(warmup=1, repeat=2, timeout=900),
+        results_dir=tmp_path,
+        slug="gpu",
+        env_map=runner.parse_env_map(),
+    )
+    assert sorted(r["mode"] for r in written) == ["fwd", "fwd_bwd"]
+    for record in written:
+        assert record["status"] == "ok", record["reason"]
+        parity = record["parity"]
+        assert parity["status"] in ("ok", "fail"), parity
+        assert parity["metrics"]["loss_rel_err"] < 1e-2, parity
 
 
 @pytest.mark.cuda

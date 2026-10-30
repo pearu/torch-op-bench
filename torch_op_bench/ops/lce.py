@@ -25,6 +25,10 @@ from ..spec import Axis, Case, Implementation, OpSpec, Unavailable
 
 IGNORE_INDEX = -100
 
+# Rows per chunk of the fp32 reference (``run_reference``): fixed, so that the
+# reference does not depend on the device's free memory.
+REFERENCE_CHUNK = 1024
+
 # Constants of the contract, recorded in every implementation's info.
 CONTRACT: dict[str, Any] = {
     "ignore_index": IGNORE_INDEX,
@@ -233,11 +237,46 @@ def run_torchtitan_ce(inputs: Any, mode: str) -> tuple:
 
 
 def run_reference(inputs: Any, mode: str) -> tuple:
-    """fp32 eager on fresh fp32 copies of the inputs, and their gradients."""
+    """fp32 eager on fp32 copies of the inputs, and their gradients, in chunks of
+    ``REFERENCE_CHUNK`` rows: the same quantities as unchunked fp32 eager (only the
+    order of the sums differs), with the logits of one chunk alive at a time.
+
+    Each chunk's loss is a sum over its rows; the total is divided by the number of
+    non-ignored labels (all ignored: 0 / 0, NaN, as eager's mean). The backward runs
+    per chunk, on ``chunk loss / count``, so a chunk's graph is freed before the next.
+    """
+    import torch
+    import torch.nn.functional as F
+
     hidden, weight, labels = inputs
-    hidden = hidden.detach().float().requires_grad_()
-    weight = weight.detach().float().requires_grad_()
-    return _call(_eager_loss, (hidden, weight, labels), mode)
+    grad = mode != "fwd"
+    hidden = hidden.detach().float()
+    weight = weight.detach().float().requires_grad_(grad)
+    count = (labels != IGNORE_INDEX).sum()
+    loss = torch.zeros((), dtype=torch.float32, device=hidden.device)
+    grad_hidden = torch.empty_like(hidden) if grad else None
+    grad_weight = torch.zeros_like(weight) if grad else None
+    for start in range(0, hidden.shape[0], REFERENCE_CHUNK):
+        rows = slice(start, start + REFERENCE_CHUNK)
+        hidden_c = hidden[rows].requires_grad_(grad)
+        with torch.set_grad_enabled(grad):
+            loss_c = F.cross_entropy(
+                F.linear(hidden_c, weight),
+                labels[rows],
+                ignore_index=IGNORE_INDEX,
+                reduction="sum",
+            )
+        if grad:
+            grad_hidden_c, grad_weight_c = torch.autograd.grad(loss_c / count, (hidden_c, weight))
+            grad_hidden[rows] = grad_hidden_c
+            grad_weight += grad_weight_c
+            del grad_hidden_c, grad_weight_c
+        loss += loss_c.detach()
+        del loss_c
+    loss = loss / count
+    if not grad:
+        return (loss,)
+    return (loss, grad_hidden, grad_weight)
 
 
 def compare(outputs: tuple, ref_outputs: tuple, case: Case) -> dict[str, float]:
@@ -257,15 +296,16 @@ def compare(outputs: tuple, ref_outputs: tuple, case: Case) -> dict[str, float]:
 def reference_fits(case: Case) -> bool | str:
     """On CUDA: whether the fp32 reference fits in 80 % of the free memory.
 
-    Estimate: fp32 logits, their gradient and the softmax temporaries (3 N V), and
-    fp32 copies of the inputs and their gradients (2 (N H + V H)).
+    Estimate, in fp32: one chunk's logits, their gradient and the softmax
+    temporaries (3 chunk V); the copies of the inputs and their full gradients
+    (2 (N H + V H)); and a chunk's term of the weight gradient before it is added
+    (V H).
     """
     if not case.device.startswith("cuda"):
         return True
     import torch
 
-    n, h, v = _shape(case)
-    needed = 4 * (3 * n * v + 2 * (n * h + v * h))
+    needed = reference_bytes(case)
     free = torch.cuda.mem_get_info(torch.device(case.device))[0]
     if needed <= 0.8 * free:
         return True
@@ -274,6 +314,13 @@ def reference_fits(case: Case) -> bool | str:
         f"reference does not fit: {needed / gib:.1f} GiB needed, "
         f"{free / gib:.1f} GiB free (80 % usable)"
     )
+
+
+def reference_bytes(case: Case) -> int:
+    """The memory ``run_reference`` needs at ``case``, as ``reference_fits`` estimates it."""
+    n, h, v = _shape(case)
+    chunk = min(n, REFERENCE_CHUNK)
+    return 4 * (3 * chunk * v + 2 * (n * h + v * h) + v * h)
 
 
 def work(case: Case) -> dict[str, float]:

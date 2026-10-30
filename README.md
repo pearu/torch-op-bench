@@ -162,7 +162,9 @@ variables are set.
 - `reference`: an `Implementation` at higher precision, run once per case on the same
   inputs; `compare(outputs, ref_outputs, case)` returns named error metrics, checked
   against `tolerances`; `reference_fits(case)` returns `True` or a reason to skip the
-  parity check (a memory guard).
+  parity check (a memory guard). The worker runs the implementation first and keeps
+  its outputs in host memory while the reference runs, so the reference has the
+  device's free memory to itself.
 - `work(case)`: work units of a case (e.g. `{"tokens": N, "flops": ...}`) from which
   reports derive throughput.
 
@@ -184,7 +186,9 @@ counterpart:
 - no bias, no label smoothing; the output is the mean loss over non-ignored tokens;
 - `fwd_bwd`: forward and `loss.backward()`, returns `(loss, grad_hidden, grad_weight)`;
 - `fwd`: forward under `no_grad`, returns `(loss,)`;
-- parity against an fp32 eager reference; work units `tokens = N`, `flops = 6 N H V`.
+- parity against an fp32 eager reference, computed in chunks of 1024 rows (the same
+  quantities: only the order of the sums differs), so it needs one chunk's logits,
+  not N rows'; work units `tokens = N`, `flops = 6 N H V`.
 
 | implementation | what |
 |---|---|
