@@ -80,6 +80,52 @@ def test_grid_csv_is_what_was_drawn(synth, tmp_path):
     }
 
 
+def test_hollow_marker_per_parity_metric(synth, tmp_path, monkeypatch):
+    # F8 (I1-12): in a parity panel a marker is hollow when that metric failed, not
+    # when any did. chunked at M=256 fails only grad_rel: its marker is filled in the
+    # loss_rel_err panel, hollow in the grad_rel panel and in the time panel.
+    import matplotlib.pyplot as plt
+
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    metrics = ["median_ms", "parity_loss_rel_err", "parity_grad_rel"]
+    draw(synth, tmp_path, dtype="float32", mode="fwd_bwd", sweep=["M"], metrics=metrics)
+    monkeypatch.undo()
+    fig = closed[0]  # the grid
+    color = plot.colors(analysis.to_rows(load_quiet(synth)), "base")["chunked"]
+
+    def faces(ax):
+        """The face of chunked's marker at M=256 in a panel."""
+        return [
+            line.get_markerfacecolor()
+            for line in ax.lines
+            if line.get_linestyle() == "None"
+            and line.get_color() == color
+            and 256 in list(line.get_xdata())
+        ]
+
+    time, loss, grad = (fig.axes[i] for i in range(3))
+    assert faces(time) == ["none"]
+    assert faces(grad) == ["none"]
+    assert faces(loss) != ["none"]
+    assert len(faces(loss)) == 1
+    for f in closed:
+        plt.close(f)
+    rows = read_csv(tmp_path / "grid-fwd_bwd.csv")
+    at = {
+        r["metric"]: (r["parity_fail"], r["parity_fail_metric"])
+        for r in rows
+        if (r["implementation"], r["axis"], r["x"]) == ("chunked", "M", "256")
+    }
+    assert at == {
+        "median_ms": ("True", ""),
+        "parity_loss_rel_err": ("True", "False"),
+        "parity_grad_rel": ("True", "True"),
+    }
+    others = [r for r in rows if r["metric"].startswith("parity_") and r["parity_fail"] == "False"]
+    assert others and {r["parity_fail_metric"] for r in others} == {"False"}
+
+
 def test_ratio_csv(synth, tmp_path):
     draw(synth, tmp_path, dtype="float32", mode="fwd_bwd")
     rows = read_csv(tmp_path / "ratio-fwd_bwd.csv")

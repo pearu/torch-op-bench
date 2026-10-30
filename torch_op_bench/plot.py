@@ -100,6 +100,7 @@ CSV_COLUMNS = [
     "y",
     "parity_status",
     "parity_fail",
+    "parity_fail_metric",
     "dtype",
     "mode",
     "point",
@@ -219,6 +220,19 @@ def swept_axes(rows: Sequence[Row], point: Mapping[str, Any]) -> list[str]:
         for axis, swept in analysis.sweeps(rows, point).items()
         if len(analysis.axis_values(swept, axis)) > 1
     ]
+
+
+def failed_metrics(row: Row) -> set[str]:
+    """The parity metrics a row failed on, from ``parity_failed``."""
+    return set(filter(None, (row.get("parity_failed") or "").split(",")))
+
+
+def parity_fail_metric(row: Row, metric: str) -> bool | None:
+    """Whether the row failed on ``metric`` itself, when it is a parity metric
+    (``parity_<name>``); ``None`` for any other metric."""
+    if not metric.startswith(analysis.PARITY_PREFIX):
+        return None
+    return metric.removeprefix(analysis.PARITY_PREFIX) in failed_metrics(row)
 
 
 def _value(row: Row, metric: str) -> float | None:
@@ -368,7 +382,9 @@ def _draw_panel(
                 if y is None:
                     continue
                 fail = row.get("parity_status") == "fail"
-                (fail_pts if fail else ok_pts).append((x, y))
+                # Hollow: in a parity panel, this metric failed; elsewhere, any did.
+                own = parity_fail_metric(row, metric)
+                (fail_pts if (fail if own is None else own) else ok_pts).append((x, y))
                 plotted.append(
                     {
                         "figure": figure,
@@ -382,6 +398,7 @@ def _draw_panel(
                         "y": y,
                         "parity_status": row.get("parity_status"),
                         "parity_fail": fail,
+                        "parity_fail_metric": own,
                         "dtype": row.get("dtype"),
                         "mode": row.get("mode"),
                         "point": ", ".join(f"{k}={row.get(k)}" for k in point),
@@ -680,6 +697,9 @@ def reduction_figure(
                         "y": y,
                         "parity_status": row.get("parity_status"),
                         "parity_fail": row.get("parity_status") == "fail",
+                        "parity_fail_metric": parity_fail_metric(
+                            row, analysis.PARITY_PREFIX + metric if parity else metric
+                        ),
                         "dtype": entry["dtype"],
                         "mode": entry["mode"],
                         "point": analysis.point_text(point),
