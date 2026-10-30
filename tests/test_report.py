@@ -217,6 +217,56 @@ def test_environment_check_without_controls():
     assert "Every control is within the limits" in text
 
 
+def test_environment_check_status_mismatch():
+    # R1-30 F2: a control out of memory where its original fits is the environment's
+    # difference, not a pair to leave out.
+    def row(name, n, status, **more):
+        found = {"implementation": name, "mode": "fwd_bwd", "dtype": "bf16", "N": n}
+        found.update(status=status, median_ms=1.0, peak_above_baseline=0, **more)
+        if status != "ok":
+            found.update(median_ms=None, peak_above_baseline=None)
+        return found
+
+    control = {"role": "control", "control_of": "a", "env_name": "x"}
+    rows = [
+        row("a", 1, "ok"),
+        row("c", 1, "ok", **control),
+        row("a", 2, "ok"),
+        row("c", 2, "error", reason=OOM.format(tried="4.00", free="2.22"), **control),
+        row("a", 3, "error", reason="RuntimeError: boom"),
+        row("c", 3, "ok", **control),
+        row("a", 4, "unavailable", reason="needs 2 GPUs"),
+        row("c", 4, "error", reason="RuntimeError: boom", **control),
+    ]
+    checks = report.environment_check(rows, ["N"])
+    assert [(c["measured"], c["flags"]) for c in checks] == [
+        ("both", []),
+        ("one", ["status"]),
+        ("one", ["status"]),
+        ("neither", []),
+    ]
+    text = report.render_environment_check(rows, ["N"])
+    assert "1 pairs compared; 2 with one side not measured (flagged below); 1 with neither" in text
+    body = [cells(r) for r in table_rows(text)[2:]]
+    assert [r[4] for r in body] == ["N=1", "N=2", "N=3"]  # neither side: no row
+    assert body[1][5:] == ["error / ok", "—", "status"]
+    assert body[2][5:] == ["ok / error", "—", "status"]
+    assert (
+        "- **c** (`x`) against a, fwd_bwd bf16 at N=2: control `error` (OutOfMemoryError: "
+        "CUDA out of memory.), original `ok`: the environment makes a difference there."
+    ) in text
+    assert "control `ok`, original `error` (RuntimeError: boom)" in text
+    assert "Every control is within the limits" not in text
+    # Only the pair of both ok: within the limits.
+    text = report.render_environment_check(rows[:2], ["N"])
+    assert "1 pairs compared; 0 with one side not measured; 0 with neither" in text
+    assert "Every control is within the limits" in text
+    # Neither side measured anywhere: counted, no table.
+    text = report.render_environment_check(rows[6:], ["N"])
+    assert "0 pairs compared; 0 with one side not measured; 1 with neither" in text
+    assert "| control |" not in text and "Every control" not in text
+
+
 def test_not_measured(synth):
     text = section(make(synth), "## Not measured")
     assert (

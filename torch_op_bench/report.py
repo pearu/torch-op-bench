@@ -567,20 +567,42 @@ def parity_ratios(control: Row, original: Row) -> dict[str, dict[str, Any]]:
 
 
 def environment_check(rows: Sequence[Row], axes: Sequence[str]) -> list[dict[str, Any]]:
-    """For every control, against its original, at every point and mode both have ok:
-    the time ratio (control / original), the peak difference (control − original)
-    and the ratio of each parity metric (control / original)."""
-    originals = {
-        (row["implementation"], row["mode"], analysis.case_of(row, axes)): row
-        for row in rows
-        if row.get("status") == "ok"
+    """For every control, against its original, at every point and mode both have a
+    record: when both are ok, the time ratio (control / original), the peak
+    difference (control − original) and the ratio of each parity metric (control /
+    original); when only one is ok (``measured`` is "one"), the flag ``status``: the
+    environment makes that difference (R1-30 F2); when neither is ("neither"), the
+    pair only."""
+    by_key = {
+        (row["implementation"], row["mode"], analysis.case_of(row, axes)): row for row in rows
     }
     found = []
     for row in rows:
-        if row.get("role") != "control" or row.get("status") != "ok":
+        if row.get("role") != "control":
             continue
-        original = originals.get((row.get("control_of"), row["mode"], analysis.case_of(row, axes)))
+        original = by_key.get((row.get("control_of"), row["mode"], analysis.case_of(row, axes)))
         if original is None:
+            continue
+        check = {
+            "control": row["implementation"],
+            "original": row["control_of"],
+            "env_name": row.get("env_name"),
+            "mode": row["mode"],
+            "dtype": row.get("dtype"),
+            "case": case_text(row, axes),
+            "status": (row.get("status"), original.get("status")),
+            "measured": "both",
+            "time_ratio": None,
+            "peak_diff": None,
+            "parity": {},
+            "flags": [],
+        }
+        found.append(check)
+        both = [r.get("status") == "ok" for r in (row, original)]
+        if not all(both):
+            check["measured"] = "one" if any(both) else "neither"
+            check["flags"] = ["status"] if any(both) else []
+            check["reason"] = (row if not both[0] else original).get("reason")
             continue
         time_ratio = ratio(row.get("median_ms"), original.get("median_ms"))
         peak_a, peak_b = row.get("peak_above_baseline"), original.get("peak_above_baseline")
@@ -598,20 +620,7 @@ def environment_check(rows: Sequence[Row], axes: Sequence[str]) -> list[dict[str
                 flags.append(name)
             elif value["ratio"] is None and value["side"] is None:  # 0 against nonzero
                 flags.append(name)
-        found.append(
-            {
-                "control": row["implementation"],
-                "original": row["control_of"],
-                "env_name": row.get("env_name"),
-                "mode": row["mode"],
-                "dtype": row.get("dtype"),
-                "case": case_text(row, axes),
-                "time_ratio": time_ratio,
-                "peak_diff": peak_diff,
-                "parity": parity,
-                "flags": flags,
-            }
-        )
+        check.update(time_ratio=time_ratio, peak_diff=peak_diff, parity=parity, flags=flags)
     return found
 
 
@@ -626,9 +635,10 @@ def _parity_cell(value: Mapping[str, Any] | None) -> str:
 
 
 def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
-    checks = environment_check(rows, axes)
+    pairs = environment_check(rows, axes)
+    checks = [c for c in pairs if c["measured"] != "neither"]
     lines = ["## Environment check", ""]
-    if not checks:
+    if not pairs:
         lines.append("No control has a record at a point where its original has one.")
         return "\n".join(lines) + "\n"
     low, high = TIME_RATIO_RANGE
@@ -640,9 +650,20 @@ def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
         f"[{low}, {high}], a peak difference beyond {PEAK_DIFF_LIMIT // MIB} MiB or a "
         f"parity ratio outside [{p_low}, {p_high}] means the environment, not the "
         f"counterpart, makes a difference there, and a counterpart must be compared "
-        f"with the control of its own environment.",
+        f"with the control of its own environment; so does a pair where only one side "
+        f"is `ok` (flag `status`, its statuses, control / original, in the time ratio's "
+        f"place).",
         "",
     ]
+    count = {kind: sum(c["measured"] == kind for c in pairs) for kind in ("both", "one", "neither")}
+    lines += [
+        f"{count['both']} pairs compared; {count['one']} with one side not measured"
+        f"{' (flagged below)' if count['one'] else ''}; {count['neither']} with neither "
+        f"side measured.",
+        "",
+    ]
+    if not checks:
+        return "\n".join(lines) + "\n"
     metrics = sorted({name for c in checks for name in c["parity"]})
     body = [
         [
@@ -651,7 +672,7 @@ def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
             c["mode"],
             text(c["dtype"]),
             c["case"],
-            sig3(c["time_ratio"]),
+            sig3(c["time_ratio"]) if c["measured"] == "both" else " / ".join(c["status"]),
             mib(c["peak_diff"]),
             *(_parity_cell(c["parity"].get(name)) for name in metrics),
             ", ".join(c["flags"]) or "",
@@ -666,6 +687,17 @@ def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
     if not noted:
         lines.append("Every control is within the limits: the environments do not differ here.")
     for c in noted:
+        if c["measured"] == "one":
+            control, original = (
+                f"`{status}`" + ("" if status == "ok" else f" ({cause(status, c['reason'])[0]})")
+                for status in c["status"]
+            )
+            lines.append(
+                f"- **{c['control']}** (`{c['env_name']}`) against {c['original']}, "
+                f"{c['mode']} {c['dtype']} at {c['case']}: control {control}, original "
+                f"{original}: the environment makes a difference there."
+            )
+            continue
         what = []
         if "time" in c["flags"]:
             what.append(f"time ratio {sig3(c['time_ratio'])} outside [{low}, {high}]")

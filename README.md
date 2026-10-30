@@ -401,7 +401,14 @@ torch-op-bench commits). Its sections:
    and the counterpart must be compared with its own environment's control. Another
    torch build can move the error of the same code (by 23 % in `grad_hidden` at one
    shape between torch 2.14 and 2.16), so a parity comparison across environments
-   needs this too. A parity metric on one side only is reported as such.
+   needs this too. A parity metric on one side only is reported as such. A pair
+   where only one side is `ok` (a control out of memory where its original fits) is
+   a row too, flagged `status`, with the statuses (control / original) in the time
+   ratio's place and a sentence naming the cause: the environment makes that
+   difference. A pair where neither is `ok` has no row; the paragraph above the
+   table counts the pairs compared, those with one side and those with neither side
+   measured, and "Every control is within the limits" is said only when no row is
+   flagged.
 6. **Not measured**: every `error` and `unavailable` record, grouped by cause, with
    the number of records: for an `error`, the message up to its first number, less
    the unfinished sentence there (one group for every CUDA out-of-memory error,
