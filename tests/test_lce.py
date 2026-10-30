@@ -1518,3 +1518,35 @@ def test_cuda_torchtitan_through_runner(tmp_path, titan_python):
     peak = {name: r["memory"]["peak_bytes"] for name, r in fwd_bwd.items()}
     # Eight chunks of fp32 logits against the full bf16 logits plus their fp32 gradient.
     assert peak["torchtitan_chunked"] < peak["torch_eager_torchtitan"], peak
+
+
+def test_parity_note_bf16_running_loss():
+    # R1-30 F1: torch_lce_no_override's bf16 running loss, on CUDA, in both modes and
+    # at every shape, in builds before the fix (pytorch#202050, unmerged: every build).
+    [note] = lce.LCE.parity_notes
+    assert note.implementation == "torch_lce_no_override"
+    assert note.metrics == ("loss_rel_err", "grad_hidden_rel_l2")
+    for ref in (
+        "linear_cross_entropy.py:534",
+        "2.16.0.dev20261017",
+        "issues/201659",
+        "pull/202050",
+    ):
+        assert ref in note.text
+    assert lce.BF16_LOSS_FIX_DATE is None
+    nightly, release = "2.16.0.dev20261017", "2.14.1"
+    for version in (nightly, release, "2.16.0a0+gitabc", None):
+        assert lce.before_bf16_loss_fix(version)
+    # Once the fix is in main from a date: a nightly by its date; a build without one
+    # stays before it.
+    assert lce.before_bf16_loss_fix(nightly, "20261018")
+    assert not lce.before_bf16_loss_fix(nightly, "20261017")
+    assert not lce.before_bf16_loss_fix("2.16.0.dev20261102+cu130", "20261101")
+    assert lce.before_bf16_loss_fix(release, "20261018")
+    params = {"N": 1024, "H": 4096, "V": 131072, "ignore_frac": "0"}
+    for mode in ("fwd", "fwd_bwd"):
+        assert note.applies(Case(params, "bfloat16", "cuda"), mode, {}, nightly)
+        assert note.applies(Case(params, "bfloat16", "cuda:1"), mode, {}, release)
+        assert not note.applies(Case(params, "float16", "cuda"), mode, {}, nightly)
+        assert not note.applies(Case(params, "float32", "cuda"), mode, {}, nightly)
+        assert not note.applies(Case(params, "bfloat16", "cpu"), mode, {}, nightly)

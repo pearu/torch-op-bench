@@ -91,11 +91,51 @@ def case_text(row: Row, axes: Sequence[str]) -> str:
     return ", ".join(f"{name}={row.get(name)}" for name in axes)
 
 
-def parity_text(row: Row) -> str:
+def parity_text(row: Row, footnotes: Footnotes | None = None) -> str:
+    """The parity status; for a ``fail``, the metrics, and the marks of the notes
+    that explain any of them (``fail¹``) when ``footnotes`` collects them."""
     status = row.get("parity_status")
     if status == "fail" and row.get("parity_failed"):
-        return f"fail: {row['parity_failed']}"
+        marks = footnotes.marks(row) if footnotes is not None else ""
+        return f"fail{marks}: {row['parity_failed']}"
     return text(status)
+
+
+SUPERSCRIPTS = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+
+def note_text(note: Any) -> str:
+    """A parity note with what it covers: the implementation and its metrics."""
+    metrics = ", ".join(note.metrics) if note.metrics is not None else "any metric"
+    return f"`{note.implementation}`, {metrics}: {note.text}"
+
+
+class Footnotes:
+    """The parity notes of one table, numbered in the order they are first marked."""
+
+    def __init__(self, notes: Sequence[Any], axes: Sequence[str]) -> None:
+        self.notes, self.axes = notes, axes
+        self.marked: list[Any] = []
+
+    def marks(self, row: Row) -> str:
+        """The marks of the distinct notes explaining any metric ``row`` failed on."""
+        found = []
+        for note in analysis.explained(row, self.notes, self.axes).values():
+            if note is not None and note not in found:
+                found.append(note)
+        for note in found:
+            if note not in self.marked:
+                self.marked.append(note)
+        return "".join(self.mark(note) for note in found)
+
+    def mark(self, note: Any) -> str:
+        return str(self.marked.index(note) + 1).translate(SUPERSCRIPTS)
+
+    def lines(self) -> list[str]:
+        """The footnotes, each a paragraph, under the table."""
+        return [
+            line for note in self.marked for line in ("", f"{self.mark(note)} {note_text(note)}")
+        ]
 
 
 def override_text(row: Row) -> str:
@@ -245,10 +285,16 @@ def _parity_columns(rows: Sequence[Row]) -> list[str]:
 
 
 def render_default(
-    rows: Sequence[Row], point: Mapping[str, Any], baseline: str, *, title: str
+    rows: Sequence[Row],
+    point: Mapping[str, Any],
+    baseline: str,
+    *,
+    title: str,
+    notes: Sequence[Any] = (),
 ) -> str:
     """One row per implementation at the default point, the baseline first and each
-    control right after its original."""
+    control right after its original; a parity failure that one of ``notes`` (the
+    op's ``parity_notes``) explains is marked, with the note under the table."""
     here = [row for row in rows if all(row.get(k) == v for k, v in point.items())]
     if not here:
         return f"### {title}\n\nNo records at the default point.\n"
@@ -273,6 +319,7 @@ def render_default(
     ]
     numeric = [False, False, *[True] * 8, False, *[True] * len(parity), False]
     body = []
+    footnotes = Footnotes(notes, list(point))
     names = analysis.implementations(here, baseline)
     for name in names:
         row = by_impl[name]
@@ -293,7 +340,7 @@ def render_default(
                 ),
                 sig3(row.get("time_x_peak")),
                 sig3(ratio(row.get("time_x_peak"), base_ok and base_ok.get("time_x_peak"))),
-                parity_text(row),
+                parity_text(row, footnotes),
                 *(sig3(row.get(p)) for p in parity),
                 override_text(row),
             ]
@@ -302,6 +349,7 @@ def render_default(
     if base_ok is None:
         lines += [f"The baseline `{baseline}` has no `ok` record here: no ratios.", ""]
     lines.append(table(header, body, numeric))
+    lines += footnotes.lines()
     lines += dispatch_only_note([by_impl[name] for name in names], here)
     lines += entry_details([by_impl[name] for name in names], here)
     return "\n".join(lines) + "\n"
@@ -347,11 +395,15 @@ def entry_details(entries: Sequence[Row], labels: Sequence[Row]) -> list[str]:
 # --- 3. the sweeps --------------------------------------------------------------------
 
 
-def _cell(row: Row | None, what: str, base: Row | None = None) -> str:
+def _cell(
+    row: Row | None, what: str, base: Row | None = None, footnotes: Footnotes | None = None
+) -> str:
     if row is None:
         return MISSING
     if what == "parity":
-        return parity_text(row) if row.get("status") == "ok" else text(row.get("status"))
+        if row.get("status") != "ok":
+            return text(row.get("status"))
+        return parity_text(row, footnotes)
     if row.get("status") != "ok":
         return text(row.get("status"))
     if what == "median":
@@ -366,11 +418,17 @@ def _cell(row: Row | None, what: str, base: Row | None = None) -> str:
 
 
 def render_sweeps(
-    rows: Sequence[Row], point: Mapping[str, Any], baseline: str, *, title: str
+    rows: Sequence[Row],
+    point: Mapping[str, Any],
+    baseline: str,
+    *,
+    title: str,
+    notes: Sequence[Any] = (),
 ) -> str:
     """For each axis that varies around the default point: median, peak, time × peak
     (with its ratio to the baseline's) and parity, one row per axis value and one
-    column per implementation."""
+    column per implementation; the parity tables mark the failures ``notes``
+    explain, as ``render_default``."""
     names = analysis.implementations(rows, baseline)
     parts = []
     for axis, swept in analysis.sweeps(rows, point).items():
@@ -384,11 +442,17 @@ def render_sweeps(
             ("time_x_peak", "time × peak, ms·MiB (/ baseline's)"),
             ("parity", "parity"),
         ):
+            footnotes = Footnotes(notes, list(point))
             body = [
                 [
                     str(value),
                     *(
-                        _cell(by_key.get((value, name)), what, by_key.get((value, baseline)))
+                        _cell(
+                            by_key.get((value, name)),
+                            what,
+                            by_key.get((value, baseline)),
+                            footnotes,
+                        )
                         for name in names
                     ),
                 ]
@@ -400,6 +464,7 @@ def render_sweeps(
                 f"#### {title}: {label} against {axis}",
                 "",
                 table([axis, *(impl_label(n, rows) for n in names)], body, numeric),
+                *footnotes.lines(),
                 "",
             ]
     if not parts:
@@ -408,7 +473,12 @@ def render_sweeps(
 
 
 def render_per_case(
-    rows: Sequence[Row], axes: Sequence[str], baseline: str, dtype: str, mode: str
+    rows: Sequence[Row],
+    axes: Sequence[str],
+    baseline: str,
+    dtype: str,
+    mode: str,
+    notes: Sequence[Any] = (),
 ) -> str:
     """The default-point table at every case present, for records whose cases do not
     form a sweep (one case, or cases that differ in more than one axis)."""
@@ -417,7 +487,7 @@ def render_per_case(
     for values in cases:
         here = dict(zip(axes, values, strict=True))
         title = f"{mode}, {dtype}: {analysis.point_text(here)}"
-        parts.append(render_default(rows, here, baseline, title=title))
+        parts.append(render_default(rows, here, baseline, title=title, notes=notes))
     return "\n".join(parts)
 
 
@@ -795,7 +865,50 @@ def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-# --- 6. not measured -----------------------------------------------------------------------
+# --- 6. parity failures --------------------------------------------------------------------
+
+PARITY_FAILURES_TITLE = "## Parity failures"
+
+
+def render_parity_failures(
+    rows: Sequence[Row], axes: Sequence[str], notes: Sequence[Any], *, unread: str | None = None
+) -> str:
+    """Every ``fail`` of ``rows``, by entry and metric: explained by a note of the op,
+    or unexplained; and the count the "final" check reads. ``unread`` is the
+    ``op_ref`` of an op that does not import here, whose notes were not read: a
+    sentence says so, so the count does not read as a real failure (R1-38 R1)."""
+    groups: dict[tuple[str, str, Any], list[Row]] = defaultdict(list)
+    for row in rows:
+        for metric, note in analysis.explained(row, notes, axes).items():
+            groups[(row["implementation"], metric, note)].append(row)
+    total, explained = analysis.parity_failures(rows, notes, axes)
+    lines = [PARITY_FAILURES_TITLE, ""]
+    if not total:
+        lines.append("No record fails parity.")
+    else:
+        lines += [
+            "Every record that fails parity, by entry and metric: explained when one of "
+            "the op's parity notes names the cause there, else unexplained. A record "
+            "counts as explained when every metric it fails is.",
+            "",
+        ]
+        # Per entry and metric, the explained group first.
+        for key in sorted(groups, key=lambda k: (k[0], k[1], k[2] is None)):
+            name, metric, note = key
+            verdict = f"explained: {note.text}" if note is not None else "**unexplained**"
+            lines.append(f"- `{name}`, {metric} ({len(groups[key])}): {verdict}")
+            for row in groups[key]:
+                lines.append(f"  - {row['mode']}, {row.get('dtype')} {case_text(row, axes)}")
+    lines += ["", f"{total} parity failure{'' if total == 1 else 's'}, {explained} explained."]
+    if unread is not None:
+        lines.append(
+            f"The op `{unread}` does not import here: its parity notes are not read, and "
+            "every failure counts as unexplained."
+        )
+    return "\n".join(lines) + "\n"
+
+
+# --- 7. not measured -----------------------------------------------------------------------
 
 
 REASON_WIDTH = 200
@@ -896,6 +1009,7 @@ def report(
         recs_strict = [] if strict is None else analysis.load(strict, op=op_name, device_slug=slug)
     rows = analysis.to_rows(recs)
     axes = analysis.axes_of(recs)
+    notes = analysis.parity_notes(recs)
     point = analysis.default_point(recs, point=point)
     dtypes = [dtype] if dtype else list(dict.fromkeys(row["dtype"] for row in rows))
     modes = [mode] if mode else [m for m in MODES if any(row["mode"] == m for row in rows)]
@@ -916,7 +1030,9 @@ def report(
     for d in dtypes:
         for m in modes:
             selected = analysis.at(rows, dtype=d, mode=m)
-            lines.append(render_default(selected, point["params"], baseline, title=f"{m}, {d}"))
+            lines.append(
+                render_default(selected, point["params"], baseline, title=f"{m}, {d}", notes=notes)
+            )
     lines += ["## Sweeps", ""]
     # Per (dtype, mode), as plot decides: the sweeps around the point, or, when no
     # axis varies there, the default-point table at every case present.
@@ -925,19 +1041,21 @@ def report(
         for m in modes:
             selected = analysis.at(rows, dtype=d, mode=m)
             if selected:
-                swept = render_sweeps(selected, point["params"], baseline, title=f"{m}, {d}")
+                swept = render_sweeps(
+                    selected, point["params"], baseline, title=f"{m}, {d}", notes=notes
+                )
                 pairs.append((d, m, selected, swept))
     if not any(swept for *_, swept in pairs):
         # No pair has a sweep: one line for all of them.
         lines += [f"{NO_SWEEP} in these records: one table per case instead.", ""]
-        lines += [render_per_case(sel, axes, baseline, d, m) for d, m, sel, _ in pairs]
+        lines += [render_per_case(sel, axes, baseline, d, m, notes) for d, m, sel, _ in pairs]
     else:
         for d, m, selected, swept in pairs:
             if swept:
                 lines.append(swept)
                 continue
             lines += [f"**{m}, {d}:** {NO_SWEEP.lower()}: one table per case instead.", ""]
-            lines.append(render_per_case(selected, axes, baseline, d, m))
+            lines.append(render_per_case(selected, axes, baseline, d, m, notes))
     if strict is not None:
         lines.append(
             render_reduction_section(
@@ -951,6 +1069,8 @@ def report(
             )
         )
     scope = [row for row in rows if row["dtype"] in dtypes and row["mode"] in modes]
+    unread = None if analysis.spec_of(recs[0]) else recs[0].get("op_ref") or recs[0]["op"]
+    lines.append(render_parity_failures(scope, axes, notes, unread=unread))
     lines.append(render_environment_check(scope, axes))
     lines.append(render_not_measured(scope, axes))
     return "\n".join(lines).rstrip() + "\n"

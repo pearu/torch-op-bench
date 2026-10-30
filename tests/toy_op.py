@@ -18,7 +18,7 @@ FLAG_AT_IMPORT = os.environ.get("TOB_TOY_FLAG")
 
 import torch  # noqa: E402
 
-from torch_op_bench.spec import Axis, Case, Implementation, OpSpec  # noqa: E402
+from torch_op_bench.spec import Axis, Case, Implementation, OpSpec, ParityNote  # noqa: E402
 
 
 def make_inputs(case: Case, device, generator):
@@ -136,4 +136,13 @@ TOY = OpSpec(
     tolerances={"y_rel_err": 1e-4, "grad_a_rel_l2": 1e-4, "grad_b_rel_l2": 1e-4},
     work=lambda case: {"flops": 2.0 * case.params["M"] * case.params["K"] * case.params["N"]},
     defaults={"M": 16},
+    # A cause that holds in fwd_bwd only: a failure in fwd stays unexplained.
+    parity_notes=[
+        ParityNote(
+            "chunked",
+            None,
+            lambda case, mode, metrics, torch_version: mode == "fwd_bwd",
+            "chunked sums its chunks in another order in fwd_bwd (toy#1).",
+        )
+    ],
 )

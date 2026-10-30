@@ -73,8 +73,10 @@ OVERLAY_LINESTYLE = ("-", "--")
 # one, their points lie within COINCIDENT_MARKER_FRACTION of the marker size of each
 # other, in display points, after the layout (P1, I1-14 round 2): the upper marker
 # would cover the lower. A control and its original never do: the control has its own
-# style by design. Series that coincide, directly or through another, form a stack:
-# each is drawn a level above those drawn before it (the baseline is drawn first).
+# style by design; nor do two controls of one original (R1-34 R1), which the
+# environment check compares each with the original. Series that coincide, directly
+# or through another, form a stack: each is drawn a level above those drawn before it
+# (the baseline is drawn first).
 # Levels above the bottom are dashed, at COINCIDENT_SCALE of their line width and
 # marker size; from level 2 on each is also shifted sideways, alternately left and
 # right, by COINCIDENT_DODGE of the bottom's marker size per step, so the small markers
@@ -348,8 +350,15 @@ def provenance(rows: Sequence[Row], label: str | None = None) -> str:
     return f"{prefix}{text}; host {', '.join(hosts) or '?'}"
 
 
-def left_out(rows: Sequence[Row], metrics: Sequence[str]) -> str:
-    """How many of the figure's records are not drawn, and why."""
+def left_out(
+    rows: Sequence[Row],
+    metrics: Sequence[str],
+    notes: Sequence[Any] = (),
+    axes: Sequence[str] = (),
+) -> str:
+    """How many of the figure's records are not drawn, and why; and how many fail
+    parity (drawn hollow, in every panel when any metric failed) and how many of
+    those the op's parity ``notes`` explain."""
     counts = Counter(row["status"] for row in rows if row.get("status") != "ok")
     skipped = sum(
         1
@@ -357,11 +366,17 @@ def left_out(rows: Sequence[Row], metrics: Sequence[str]) -> str:
         if row.get("status") == "ok" and row.get("parity_status") not in ("ok", "fail")
     )
     parts = [f"{n} {status}" for status, n in sorted(counts.items())]
-    if skipped and any(m.startswith(analysis.PARITY_PREFIX) for m in metrics):
+    parity = any(m.startswith(analysis.PARITY_PREFIX) for m in metrics)
+    if skipped and parity:
         parts.append(f"{skipped} without parity (parity rows only)")
     if not parts:
-        return "Every record of this figure is drawn."
-    return f"Left out: {', '.join(parts)} (gaps in the lines)."
+        line = "Every record of this figure is drawn."
+    else:
+        line = f"Left out: {', '.join(parts)} (gaps in the lines)."
+    failed, explained = analysis.parity_failures(rows, notes, axes)
+    if failed:
+        line += f" Parity failures: {failed} ({explained} explained), drawn hollow."
+    return line
 
 
 def y_exponent(values: Sequence[float | None]) -> int:
@@ -549,6 +564,9 @@ def _coincide(lower: Mapping[str, Any], upper: Mapping[str, Any]) -> bool:
     if lower["set"] != upper["set"]:
         return False
     if upper.get("control_of") == lower["name"] or lower.get("control_of") == upper["name"]:
+        return False
+    # Two controls of one original (R1-34 R1): see COINCIDENT_MARKER_FRACTION.
+    if upper.get("control_of") and upper.get("control_of") == lower.get("control_of"):
         return False
     a, b = lower["display"], upper["display"]
     if [p is None for p in a] != [p is None for p in b]:
@@ -1188,6 +1206,7 @@ def plot(
     recs_strict = [] if strict is None else _load(strict, recs[0]["op"], recs[0]["device_slug"])
     rows = analysis.to_rows(recs)
     axes_all = analysis.axes_of(recs)
+    notes = analysis.parity_notes(recs)
     point = analysis.default_point(recs, point=point)["params"]
     rows_b: list[Row] = []
     if overlay is not None:
@@ -1242,7 +1261,7 @@ def plot(
                 warnings.warn(f"{m}, {d}: none of the metrics has values: no grid", stacklevel=2)
             suffix = f"{m}-{d}" if len(dtypes) > 1 else m
             title = f"{recs[0]['op']} on {recs[0]['device_slug']}: {m}, {d}"
-            footer = [left_out(scope, chosen), provenance(selected)]
+            footer = [left_out(scope, chosen, notes, axes_all), provenance(selected)]
             if chosen:
                 written.append(
                     _figure(
@@ -1274,7 +1293,12 @@ def plot(
                     baseline,
                     f"{title}: against {baseline}",
                     [
-                        left_out([r for r in scope if r["implementation"] != baseline], []),
+                        left_out(
+                            [r for r in scope if r["implementation"] != baseline],
+                            [],
+                            notes,
+                            axes_all,
+                        ),
                         provenance(selected),
                     ],
                     palette=palette,
@@ -1300,8 +1324,8 @@ def plot(
                         baseline,
                         f"{title}: {a} (solid) against {b} (dashed)",
                         [
-                            f"{a}: {left_out(scope, chosen)}",
-                            f"{b}: {left_out(scope_b, chosen)}",
+                            f"{a}: {left_out(scope, chosen, notes, axes_all)}",
+                            f"{b}: {left_out(scope_b, chosen, notes, axes_all)}",
                             provenance(selected, a),
                             provenance(selected_b, b),
                         ],

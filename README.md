@@ -167,6 +167,14 @@ variables are set.
   device's free memory to itself.
 - `work(case)`: work units of a case (e.g. `{"tokens": N, "flops": ...}`) from which
   reports derive throughput.
+- `parity_notes`: a list of `ParityNote(implementation, metrics, applies, text)`, each
+  a known cause of a parity failure outside the tool: `metrics` the metrics it
+  explains (`None`: any), `applies(case, mode, metrics, torch_version)` whether it
+  holds for a record (its case, mode, parity metrics and the worker's torch
+  version), and `text` the cause in a sentence or two, with its source (file and
+  line, the torch version it was verified on) and a reference (an issue or PR URL).
+  The reports mark a failure a note explains (see "Reports"); the note lives with the
+  op, not in the records, so a cause found after a run needs no rerun.
 
 Each (case, implementation, mode) runs in a fresh worker
 (`python -m torch_op_bench.worker`, a JSON payload on stdin, one JSON record on
@@ -302,7 +310,14 @@ What the records say:
   of that environment has no `torch._native`.
 - `parity`: errors against the fp32 reference. The tolerances are 4× the bf16 error
   of `torch_eager` (see `ops/lce.py`). A failure is a finding for the report, not a
-  failure of the run.
+  failure of the run. One cause is known and noted (`lce.PARITY_NOTES`):
+  `torch_lce_no_override` in bf16 on CUDA fails `loss_rel_err` and
+  `grad_hidden_rel_l2` at some shapes where `torch_lce` passes, because torch's eager
+  chunked path keeps the running loss in bf16
+  (`torch/nn/modules/linear_cross_entropy.py:534` in torch 2.16.0.dev20261017) and
+  the override keeps it in fp32; reported as pytorch#201659, fix pytorch#202050.
+  Once the fix merges, `lce.BF16_LOSS_FIX_DATE` takes the day it reached torch main,
+  and the note no longer applies to a nightly from that day on.
 - `info`: the contract's constants, `compiled`, and for `torch_lce*` the resolved
   `options` and `lce_source_md5`. That is an md5 of torch's LCE source files, which
   the build hash misses when an editable install's Python files are edited.
@@ -383,7 +398,9 @@ torch-op-bench commits). Its sections:
    status instead when it is not `ok`), time against the baseline, tokens/s, TFLOP/s,
    peak memory above baseline and against the baseline's, **time × peak** (median ms ×
    peak above baseline in MiB, in ms·MiB) and against the baseline's, parity and its
-   metrics, and `override`: `kernel` (the override dispatched and its kernel ran),
+   metrics (`fail¹` when a parity note of the op explains the failure there, the
+   note numbered under the table: one footnote per distinct note per table, the same
+   in the sweeps' parity tables), and `override`: `kernel` (the override dispatched and its kernel ran),
    `dispatch only` (it dispatched, and ran no kernel of its own), or `no` (`dispatch`
    for a record older than `override_kernel_ran`; `—` for an entry that records
    neither), from `verify.override_ran` and `verify.override_kernel_ran`. When an
@@ -416,7 +433,13 @@ torch-op-bench commits). Its sections:
    and, for each torch LCE entry, whether its default parity equals its strict
    parity: the check that, once PR pytorch#195707 lands as reviewed, torch LCE
    accumulates in fp32 under the defaults while Liger and torchtitan do not.
-5. **Environment check**: each control (`torch_eager_<env>`) against its original at
+5. **Parity failures**: every record whose parity is `fail`, grouped by entry and
+   metric, "explained: <note>" when one of the op's `parity_notes` applies there,
+   else "**unexplained**"; then "N parity failures, M explained", a record counting
+   as explained when every metric it fails is. When the op cannot be imported,
+   there are no notes and every failure is unexplained, and a last sentence says so
+   ("The op `<op_ref>` does not import here: …").
+6. **Environment check**: each control (`torch_eager_<env>`) against its original at
    every point both have, as the time ratio (control / original), the peak
    difference, and the ratio of each parity metric. A time ratio outside [0.95,
    1.05], a difference beyond 64 MiB or a parity ratio outside [0.9, 1.1] is named
@@ -432,7 +455,7 @@ torch-op-bench commits). Its sections:
    table counts the pairs compared, those with one side and those with neither side
    measured, and "Every control is within the limits" is said only when no row is
    flagged.
-6. **Not measured**: every `error` and `unavailable` record, grouped by cause, with
+7. **Not measured**: every `error` and `unavailable` record, grouped by cause, with
    the number of records: for an `error`, the message up to its first number (a
    token of its own, such as `4.00`, `cuda:0` or `4096x1024`; digits inside a word,
    as in `mat1`, `sm_80` or `2D`, are part of the cause), less the unfinished
@@ -488,9 +511,13 @@ imported), so an implementation has the same colour in every figure and every
 invocation. A point whose parity failed has a hollow marker, so a fast but wrong
 number does not read as a win: in a parity panel when that panel's metric failed, in
 every other panel when any metric did. A missing point (`error`, `unavailable`, no
-parity) is a gap, and the footer counts what was left out and why. Two series of a
+parity) is a gap, and the footer counts what was left out and why, and the parity
+failures with how many of them the op's parity notes explain ("Parity failures: 4
+(4 explained), drawn hollow."); a failure stays hollow when explained. Two series of a
 panel coincide when, at every point, they lie within half a marker of each other as
-drawn (a control and its own original excepted: the control is styled apart). Series
+drawn (a control and its own original excepted, and two controls of one original:
+a control is styled apart, and the environment check compares each with the
+original). Series
 that coincide, directly or through another, are stacked in drawing order: each one
 above the first is drawn on top, dashed, at half its line width and marker size, and
 from the third on also shifted sideways, alternately left and right, by half a

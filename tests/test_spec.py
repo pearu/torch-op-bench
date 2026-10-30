@@ -2,7 +2,15 @@ import pytest
 import toy_op
 
 from torch_op_bench import ops
-from torch_op_bench.spec import Axis, Case, Implementation, OpSpec, resolve_op, to_json
+from torch_op_bench.spec import (
+    Axis,
+    Case,
+    Implementation,
+    OpSpec,
+    ParityNote,
+    resolve_op,
+    to_json,
+)
 
 
 def test_axis_parse_and_validation():
@@ -105,6 +113,10 @@ def test_opspec_validation():
             OpSpec(implementations=[impl], default_dtypes=bad, **kwargs)
     assert OpSpec(implementations=[impl], default_dtypes=["float32"], **kwargs).default_dtypes
     assert OpSpec(implementations=[impl], **kwargs).work(None) == {}
+    note = ParityNote("y", None, lambda *args: True, "why")
+    with pytest.raises(ValueError, match=r"parity notes for unknown implementations \['y'\]"):
+        OpSpec(implementations=[impl], parity_notes=[note], **kwargs)
+    assert OpSpec(implementations=[impl], **kwargs).parity_notes == []
 
 
 def test_resolve_dotted_path():
