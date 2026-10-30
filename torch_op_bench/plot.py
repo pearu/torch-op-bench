@@ -10,6 +10,7 @@ lazily, with the Agg backend set in code: no display is needed.
 from __future__ import annotations
 
 import csv
+import itertools
 import math
 import textwrap
 import warnings
@@ -68,6 +69,22 @@ COLORS = (
 CONTROL_MARKERS = ("s", "^", "D", "v", "P", "X", "<", ">")
 # The overlay tells its two result sets apart by line style.
 OVERLAY_LINESTYLE = ("-", "--")
+# Two series of a panel coincide when they have values at the same x and, at every
+# one, their points lie within COINCIDENT_MARKER_FRACTION of the marker size of each
+# other, in display points, after the layout (P1, I1-14 round 2): the upper marker
+# would cover the lower. A control and its original never do: the control has its own
+# style by design. Series that coincide, directly or through another, form a stack:
+# each is drawn a level above those drawn before it (the baseline is drawn first).
+# Levels above the bottom are dashed, at COINCIDENT_SCALE of their line width and
+# marker size; from level 2 on each is also shifted sideways, alternately left and
+# right, by COINCIDENT_DODGE of the bottom's marker size per step, so the small markers
+# sit side by side and every colour shows at a shared point (F7 of I1-12, F1 of
+# R1-33).
+COINCIDENT_MARKER_FRACTION = 0.5
+COINCIDENT_SCALE = 0.5
+COINCIDENT_DODGE = 0.5
+# Layouts tried until the coincident series found on one are those its footer names.
+COINCIDENT_PASSES = 3
 
 METRIC_LABELS = {
     "median_ms": "median (ms)",
@@ -84,6 +101,15 @@ METRIC_LABELS = {
     "throughput_ratio": "throughput ratio (impl / baseline)",
     "time_x_peak_ratio": "time × peak ratio (impl / baseline)",
 }
+# A linear y axis whose values reach above SCALE_ABOVE, or stay below SCALE_BELOW, is
+# drawn in a unit scaled by a power of 10³, which its label names ("time × peak
+# (10⁶ ms·MiB)"): with its tick labels never in scientific notation or offset
+# (ScalarFormatter), no panel has an offset text above it, which would make its row
+# taller than the others (N2, R1-30). The power is chosen per metric of a figure, so
+# a row of panels reads in one unit.
+SCALE_ABOVE = 1e5
+SCALE_BELOW = 1e-4
+SUPERSCRIPT = str.maketrans("-0123456789", "⁻⁰¹²³⁴⁵⁶⁷⁸⁹")
 NUMERIC = ("median_ms", "min_ms", "mean_ms", "iqr_ms", "tokens_per_s", "tflops", "time_x_peak")
 MEMORY = ("peak_above_baseline", "peak_bytes")
 DEFAULT_PARITY = {"fwd_bwd": "parity_grad_hidden_rel_l2", "fwd": "parity_loss_rel_err"}
@@ -100,6 +126,7 @@ CSV_COLUMNS = [
     "y",
     "parity_status",
     "parity_fail",
+    "parity_fail_metric",
     "dtype",
     "mode",
     "point",
@@ -221,6 +248,19 @@ def swept_axes(rows: Sequence[Row], point: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def failed_metrics(row: Row) -> set[str]:
+    """The parity metrics a row failed on, from ``parity_failed``."""
+    return set(filter(None, (row.get("parity_failed") or "").split(",")))
+
+
+def parity_fail_metric(row: Row, metric: str) -> bool | None:
+    """Whether the row failed on ``metric`` itself, when it is a parity metric
+    (``parity_<name>``); ``None`` for any other metric."""
+    if not metric.startswith(analysis.PARITY_PREFIX):
+        return None
+    return metric.removeprefix(analysis.PARITY_PREFIX) in failed_metrics(row)
+
+
 def _value(row: Row, metric: str) -> float | None:
     value = row.get(metric)
     if value is None:
@@ -324,6 +364,35 @@ def left_out(rows: Sequence[Row], metrics: Sequence[str]) -> str:
     return f"Left out: {', '.join(parts)} (gaps in the lines)."
 
 
+def y_exponent(values: Sequence[float | None]) -> int:
+    """The power of 10 (a multiple of 3) a linear axis of ``values`` is drawn in."""
+    top = max((abs(v) for v in values if v is not None and math.isfinite(v)), default=0.0)
+    if top == 0 or SCALE_BELOW <= top <= SCALE_ABOVE:
+        return 0
+    return 3 * math.floor(math.log10(top) / 3)
+
+
+def scaled_label(label: str, exponent: int) -> str:
+    """``label`` in the unit scaled by 10**exponent: "time × peak (10⁶ ms·MiB)";
+    a label without a unit gains one, "tokens/s (×10³)"."""
+    if not exponent:
+        return label
+    power = "10" + str(exponent).translate(SUPERSCRIPT)
+    head, sep, tail = label.partition(" (")
+    if sep and tail.endswith(")"):
+        return f"{head} ({power} {tail}"
+    return f"{label} (×{power})"
+
+
+def _plain_ticks(ax: Any) -> None:
+    """Tick labels of a linear y axis as plain numbers: no offset, no 1eN above."""
+    from matplotlib.ticker import ScalarFormatter
+
+    formatter = ScalarFormatter(useOffset=False, useMathText=True)
+    formatter.set_scientific(False)
+    ax.yaxis.set_major_formatter(formatter)
+
+
 def _positions(values: Sequence[Any]) -> tuple[list[float], bool]:
     """x positions: the values themselves (log scale) for numbers, else indices."""
     numeric = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values)
@@ -344,15 +413,21 @@ def _draw_panel(
     baseline: str,
     figure: str,
     handles: dict[str, Any],
+    drawn: list[tuple[Any, str, str, list[dict[str, Any]]]],
+    exponent: int = 0,
 ) -> list[dict[str, Any]]:
-    """One metric against one axis, for every result set; returns the CSV rows."""
+    """One metric against one axis, for every result set, its y drawn in units of
+    10**exponent; returns the CSV rows (with the values, not scaled).
+    (ax, metric, axis, series) is appended to ``drawn``: each series with its artists,
+    for ``stack_coincident`` once the layout is final."""
     from matplotlib.lines import Line2D
 
     all_swept = [analysis.sweeps(rows, point)[axis] for _, rows, _ in sets]
     values = analysis.axis_values([r for swept in all_swept for r in swept], axis)
     xs, log = _positions(values)
     plotted = []
-    for (label, _, linestyle), swept in zip(sets, all_swept, strict=True):
+    series = []
+    for index, ((label, _, linestyle), swept) in enumerate(zip(sets, all_swept, strict=True)):
         for name in names:
             role = role_of(swept, name, baseline)
             style = {**STYLE[role], "marker": markers.get(name, STYLE[role]["marker"])}
@@ -368,7 +443,9 @@ def _draw_panel(
                 if y is None:
                     continue
                 fail = row.get("parity_status") == "fail"
-                (fail_pts if fail else ok_pts).append((x, y))
+                # Hollow: in a parity panel, this metric failed; elsewhere, any did.
+                own = parity_fail_metric(row, metric)
+                (fail_pts if (fail if own is None else own) else ok_pts).append((x, y))
                 plotted.append(
                     {
                         "figure": figure,
@@ -382,6 +459,7 @@ def _draw_panel(
                         "y": y,
                         "parity_status": row.get("parity_status"),
                         "parity_fail": fail,
+                        "parity_fail_metric": own,
                         "dtype": row.get("dtype"),
                         "mode": row.get("mode"),
                         "point": ", ".join(f"{k}={row.get(k)}" for k in point),
@@ -390,22 +468,22 @@ def _draw_panel(
                     }
                 )
             line = linestyle or style["linestyle"]
-            # The baseline on top: a counterpart with equal values must not hide it.
-            z = 3 if role == "baseline" else 2
-            ax.plot(xs, ys, color=color, linestyle=line, linewidth=style["linewidth"], zorder=z)
-            for pts, face in ((ok_pts, color), (fail_pts, "none")):
-                if pts:
-                    ax.plot(
-                        [p[0] for p in pts],
-                        [p[1] for p in pts],
-                        linestyle="none",
-                        marker=style["marker"],
-                        markersize=style["size"] + (2 if face == "none" else 0),
-                        color=color,
-                        markerfacecolor=face,
-                        markeredgecolor=color,
-                        zorder=z,
-                    )
+            series.append(
+                {
+                    "set": index,
+                    "name": name,
+                    "control_of": next(
+                        (r.get("control_of") for r in by_x.values() if r.get("control_of")),
+                        None,
+                    ),
+                    "role": role,
+                    "style": style,
+                    "color": color,
+                    "line": line,
+                    "ys": ys,
+                    "points": (ok_pts, fail_pts),
+                }
+            )
             key = f"{name} [{label}]" if label else name
             handles.setdefault(
                 key,
@@ -420,19 +498,175 @@ def _draw_panel(
                     label=key,
                 ),
             )
+    unit = 10.0**exponent
+    for s in series:
+        style, color = s["style"], s["color"]
+        # The baseline on top of an equal counterpart, which must not hide it.
+        z = 3 if s["role"] == "baseline" else 2
+        (line,) = ax.plot(
+            xs,
+            [y / unit for y in s["ys"]],
+            color=color,
+            linestyle=s["line"],
+            linewidth=style["linewidth"],
+            zorder=z,
+        )
+        s["artists"] = [(line, 0.0)]
+        for pts, face in zip(s["points"], (color, "none"), strict=True):
+            if pts:
+                (markers_,) = ax.plot(
+                    [p[0] for p in pts],
+                    [p[1] / unit for p in pts],
+                    linestyle="none",
+                    marker=style["marker"],
+                    markersize=style["size"] + (2 if face == "none" else 0),
+                    color=color,
+                    markerfacecolor=face,
+                    markeredgecolor=color,
+                    zorder=z,
+                )
+                s["artists"].append((markers_, 2.0 if face == "none" else 0.0))
+    drawn.append((ax, metric, axis, series))
     if log:
         ax.set_xscale("log", base=2)
         ax.minorticks_off()
     ax.set_xticks(xs)
     ax.set_xticklabels([str(v) for v in values])
     ax.set_xlabel(axis)
-    ax.set_ylabel(
-        ylabel_text(METRIC_LABELS.get(metric, metric.removeprefix(analysis.PARITY_PREFIX)))
-    )
+    label = METRIC_LABELS.get(metric, metric.removeprefix(analysis.PARITY_PREFIX))
+    ax.set_ylabel(ylabel_text(scaled_label(label, exponent)))
     if metric.startswith(analysis.PARITY_PREFIX):
         ax.set_yscale("log")
+    else:
+        _plain_ticks(ax)
     ax.grid(True, alpha=0.3)
     return plotted
+
+
+def _coincide(lower: Mapping[str, Any], upper: Mapping[str, Any]) -> bool:
+    """Whether two series of a panel coincide (COINCIDENT_MARKER_FRACTION); see
+    ``coincident_pairs``."""
+    if lower["set"] != upper["set"]:
+        return False
+    if upper.get("control_of") == lower["name"] or lower.get("control_of") == upper["name"]:
+        return False
+    a, b = lower["display"], upper["display"]
+    if [p is None for p in a] != [p is None for p in b]:
+        return False
+    limit = COINCIDENT_MARKER_FRACTION * lower["style"]["size"]
+    pairs = [(p, q) for p, q in zip(a, b, strict=True) if p is not None]
+    return bool(pairs) and all(p == q or math.dist(p, q) <= limit for p, q in pairs)
+
+
+def coincident_pairs(series: Sequence[Mapping[str, Any]]) -> dict[int, int]:
+    """Of a panel's series (``set``, ``name``, ``control_of``, the marker ``size`` of
+    its ``style``, ``display``: each value's (x, y) in display points, None for no
+    value), in drawing order: each one that coincides with an earlier one of its set
+    -> the first such one, the one the footer names."""
+    on = {}
+    for k, s in enumerate(series):
+        for j, t in enumerate(series[:k]):
+            if _coincide(t, s):
+                on[k] = j
+                break
+    return on
+
+
+def coincident_levels(series: Sequence[Mapping[str, Any]]) -> dict[int, tuple[int, int, int]]:
+    """Each series of a panel (as for ``coincident_pairs``) -> (its level, the number
+    of levels of its stack, its stack's bottom series). A stack is a series with every
+    one that coincides with it, directly or through another; each member is a level
+    above the members drawn before it, so no two share a level (R1-33 F1)."""
+    root = list(range(len(series)))
+
+    def find(k: int) -> int:
+        while root[k] != k:
+            k = root[k]
+        return k
+
+    for k, s in enumerate(series):
+        for j, t in enumerate(series[:k]):
+            if _coincide(t, s):
+                a, b = find(j), find(k)
+                root[max(a, b)] = min(a, b)
+    level: dict[int, int] = {}
+    height: dict[int, int] = {}
+    for k in range(len(series)):
+        bottom = find(k)
+        level[k] = height.get(bottom, 0)
+        height[bottom] = level[k] + 1
+    return {k: (level[k], height[find(k)], find(k)) for k in range(len(series))}
+
+
+def stack_coincident(
+    fig: Any, drawn: Sequence[tuple[Any, str, str, Sequence[dict[str, Any]]]]
+) -> dict[tuple[int, str, str], list[tuple[str, str]]]:
+    """Restyle the coincident series of every drawn panel (``_draw_panel``), measured
+    in display points on ``fig`` as it is laid out now; returns (set index, upper,
+    lower) -> the (metric, axis) panels, for the footer."""
+    from matplotlib.transforms import offset_copy
+
+    coincident: dict[tuple[int, str, str], list[tuple[str, str]]] = {}
+    to_points = 72.0 / fig.dpi
+    for ax, metric, axis, series in drawn:
+        ax.get_xlim(), ax.get_ylim()  # the limits autoscaled before the transform
+        for s in series:
+            line, _ = s["artists"][0]
+            s["display"] = [
+                None
+                if math.isnan(y)
+                else tuple(v * to_points for v in ax.transData.transform((x, y)))
+                for x, y in zip(line.get_xdata(), line.get_ydata(), strict=True)
+            ]
+        on = coincident_pairs(series)
+        for upper, lower in on.items():
+            key = (series[upper]["set"], series[upper]["name"], series[lower]["name"])
+            coincident.setdefault(key, []).append((metric, axis))
+        levels = coincident_levels(series)
+        for s, (level, _, bottom) in zip(series, levels.values(), strict=True):
+            style = s["style"]
+            scale = COINCIDENT_SCALE if level else 1.0
+            z = (3 if s["role"] == "baseline" else 2) + 2 * level
+            transform = ax.transData
+            if level >= 2:
+                step = (level // 2) * (1 if level % 2 else -1)
+                dx = step * COINCIDENT_DODGE * series[bottom]["style"]["size"]
+                transform = offset_copy(ax.transData, fig=fig, x=dx, y=0, units="points")
+            line, _ = s["artists"][0]
+            line.set_linestyle("--" if level else s["line"])
+            line.set_linewidth(style["linewidth"] * scale)
+            for artist, extra in s["artists"]:
+                artist.set_zorder(z)
+                artist.set_transform(transform)
+                if artist is not line:
+                    artist.set_markersize(style["size"] * scale + extra)
+    return coincident
+
+
+def coincident_text(
+    coincident: Mapping[tuple[int, str, str], Sequence[tuple[str, str]]],
+    index: int,
+    axes: Sequence[str],
+    modes: Sequence[str],
+) -> str | None:
+    """The footer's clause on the coincident series of set ``index``, one per pair,
+    its panels grouped by metric (the axes named when not every one)."""
+    clauses = []
+    for (i, upper, lower), panels in coincident.items():
+        if i != index:
+            continue
+        by_metric: dict[str, list[str]] = {}
+        for metric, axis in panels:
+            by_metric.setdefault(metric, []).append(axis)
+        names = []
+        for metric, on in by_metric.items():
+            label = METRIC_LABELS.get(metric, metric.removeprefix(analysis.PARITY_PREFIX))
+            name = label.partition(" (")[0]
+            names.append(name if len(on) == len(axes) else f"{name} on {'/'.join(on)}")
+        clauses.append(f"{upper} on {lower} ({'/'.join(modes)}: {', '.join(names)})")
+    if not clauses:
+        return None
+    return f"Coincident, the first drawn dashed on the second: {'; '.join(clauses)}."
 
 
 def _figure(
@@ -459,8 +693,20 @@ def _figure(
         len(metrics), max(1, len(axes)), figsize=(width, PANEL_HEIGHT * len(metrics)), squeeze=False
     )
     handles: dict[str, Any] = {}
+    drawn: list[tuple[Any, str, str, list[dict[str, Any]]]] = []
     plotted: list[dict[str, Any]] = []
     for i, metric in enumerate(metrics):
+        exponent = 0
+        if not metric.startswith(analysis.PARITY_PREFIX):
+            exponent = y_exponent(
+                [
+                    _value(r, metric)
+                    for _, rows, _ in sets
+                    for axis in axes
+                    for r in analysis.sweeps(rows, point)[axis]
+                    if r.get("status") == "ok"
+                ]
+            )
         for j, axis in enumerate(axes):
             ax = grid[i][j]
             plotted += _draw_panel(
@@ -475,6 +721,8 @@ def _figure(
                 baseline,
                 path.stem,
                 handles,
+                drawn,
+                exponent,
             )
             if ratio_line:
                 base = STYLE["baseline"]
@@ -484,17 +732,13 @@ def _figure(
                     linestyle=base["linestyle"],
                     linewidth=base["linewidth"],
                 )
+    modes = [m for m in MODES if any(row.get("mode") == m for row in union)]
     # Bands in inches, top to bottom: title, legend, panels, footer. The title and the
     # footer wrap to the figure's width, so neither is cut off in a one-column figure.
     # Each band is as high as its rendered text, measured, and the bands are stacked
     # with GAP between them, so the white space between title, legend, panels and
     # footer is at most about the height of a capital letter of that text.
     columns = max(1, min(4, int(width // 2.2)))
-    lines = [
-        part
-        for line in footer
-        for part in textwrap.wrap(line, int(width * 17), break_on_hyphens=False)
-    ]
     title_lines = textwrap.wrap(title, int(width * TITLE_CHARS_PER_INCH), break_on_hyphens=False)
     # fig.text, not fig.suptitle: tight_layout makes room for a suptitle on top of
     # its rect, which would count the title band twice.
@@ -511,26 +755,54 @@ def _figure(
             borderaxespad=0,
             fontsize="small",
         )
-    footer_text = fig.text(
-        0.01, 0, "\n".join(lines), ha="left", va="bottom", fontsize="x-small", gid="footer"
-    )
+    footer_text = fig.text(0.01, 0, "", ha="left", va="bottom", fontsize="x-small", gid="footer")
     renderer = fig.canvas.get_renderer()
 
     def inches(artist: Any) -> float:
         return artist.get_window_extent(renderer).height / fig.dpi if artist else 0.0
 
-    title_h, legend_h, footer_h = inches(title_text), inches(legend), inches(footer_text)
-    legend_band = GAP + legend_h if legend is not None else 0.0  # below the title
-    # tight_layout keeps LAYOUT_PAD (a fraction of the font size) between its rect
-    # and the panels' outer edges (tick labels, axis labels): that is the gap there.
-    height = MARGIN + title_h + legend_band + PANEL_HEIGHT * len(metrics) + footer_h + MARGIN
-    fig.set_size_inches(width, height)
-    title_text.set_y(1 - MARGIN / height)
-    if legend is not None:
-        legend.set_bbox_to_anchor((0.5, 1 - (MARGIN + title_h + GAP) / height), fig.transFigure)
-    footer_text.set_y(MARGIN / height)
-    top = 1 - (MARGIN + title_h + legend_band) / height
-    _layout(fig, (0, (MARGIN + footer_h) / height, 1, top))
+    def arrange(coincident: Mapping[tuple[int, str, str], Sequence[tuple[str, str]]]) -> None:
+        # The footer's first lines are the sets' "Left out" lines: each gains its
+        # set's coincident series.
+        lines = list(footer)
+        for index in range(len(sets)):
+            clause = coincident_text(coincident, index, axes, modes)
+            if clause:
+                lines[index] = f"{lines[index]} {clause}"
+        lines = [
+            part
+            for line in lines
+            for part in textwrap.wrap(line, int(width * 17), break_on_hyphens=False)
+        ]
+        footer_text.set_text("\n".join(lines))
+        title_h, legend_h, footer_h = inches(title_text), inches(legend), inches(footer_text)
+        legend_band = GAP + legend_h if legend is not None else 0.0  # below the title
+        # tight_layout keeps LAYOUT_PAD (a fraction of the font size) between its rect
+        # and the panels' outer edges (tick labels, axis labels): that is the gap there.
+        height = MARGIN + title_h + legend_band + PANEL_HEIGHT * len(metrics) + footer_h + MARGIN
+        fig.set_size_inches(width, height)
+        title_text.set_y(1 - MARGIN / height)
+        if legend is not None:
+            legend.set_bbox_to_anchor((0.5, 1 - (MARGIN + title_h + GAP) / height), fig.transFigure)
+        footer_text.set_y(MARGIN / height)
+        top = 1 - (MARGIN + title_h + legend_band) / height
+        _layout(fig, (0, (MARGIN + footer_h) / height, 1, top))
+
+    # Coincidence is measured in display points, so on the laid-out panels; the footer
+    # it names changes the layout. A first guess from the panels as created, then
+    # until the layout and what it shows agree.
+    coincident = stack_coincident(fig, drawn)
+    for _ in range(COINCIDENT_PASSES):
+        arrange(coincident)
+        found = stack_coincident(fig, drawn)
+        if found == coincident:
+            break
+        coincident = found
+    else:
+        # Not settled (a pair at the threshold): the footer names what the last
+        # layout showed.
+        arrange(coincident)
+        stack_coincident(fig, drawn)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=DPI)
     plt.close(fig)
@@ -604,6 +876,10 @@ def _fit_ylabels(fig: Any) -> bool:
 
 # The strict bar of a pair: the default's colour, hatched.
 STRICT_HATCH = "///"
+# Each bar's value above it (F9, I1-12: a bar too short to see still reads), in
+# points: its size below the tick labels', and its distance from the bar.
+BAR_LABEL_SMALLER = 2
+BAR_LABEL_PAD = 2
 REDUCTION_SETS = ("default", "strict")
 
 
@@ -648,9 +924,15 @@ def reduction_figure(
         len(metrics), 1, figsize=(width, PANEL_HEIGHT * len(metrics)), squeeze=False, sharex=True
     )
     plotted = []
+    labels: dict[Any, list[tuple[Any, float]]] = {}  # per panel: (label, bar value)
+    size = _font_points(plt.rcParams["ytick.labelsize"]) - BAR_LABEL_SMALLER
     xs = list(range(len(names)))
     for ax, metric in zip((row[0] for row in axes), metrics, strict=True):
         parity = metric != "median_ms"
+        exponent = y_exponent(
+            [_reduction_value(e, metric, which) for e in entries for which in REDUCTION_SETS]
+        )
+        unit = 10.0**exponent
         for x, entry in zip(xs, entries, strict=True):
             color = palette.get(entry["implementation"], "#7f7f7f")
             for offset, which in zip((-0.2, 0.2), REDUCTION_SETS, strict=True):
@@ -658,14 +940,18 @@ def reduction_figure(
                 if y is None:
                     continue  # nothing to draw
                 strict_bar = which == "strict"
-                ax.bar(
+                bars = ax.bar(
                     x + offset,
-                    y,
+                    y / unit,
                     width=0.4,
                     color="white" if strict_bar else color,
                     edgecolor=color,
                     hatch=STRICT_HATCH if strict_bar else None,
                 )
+                (text,) = ax.bar_label(
+                    bars, labels=[f"{y:.3g}"], padding=BAR_LABEL_PAD, fontsize=size
+                )
+                labels.setdefault(ax, []).append((text, y / unit))
                 row = entry[which]
                 plotted.append(
                     {
@@ -680,6 +966,9 @@ def reduction_figure(
                         "y": y,
                         "parity_status": row.get("parity_status"),
                         "parity_fail": row.get("parity_status") == "fail",
+                        "parity_fail_metric": parity_fail_metric(
+                            row, analysis.PARITY_PREFIX + metric if parity else metric
+                        ),
                         "dtype": entry["dtype"],
                         "mode": entry["mode"],
                         "point": analysis.point_text(point),
@@ -688,7 +977,8 @@ def reduction_figure(
                     }
                 )
         label = METRIC_LABELS.get(metric, metric) if not parity else metric
-        ax.set_ylabel(ylabel_text(label))
+        ax.set_ylabel(ylabel_text(scaled_label(label, exponent)))
+        _plain_ticks(ax)
         # Linear from zero (R1-26 F1): a bar's length is its value, so the pair's
         # lengths compare as the values do, and a zero parity error shows as zero.
         ax.set_ylim(bottom=0)
@@ -739,7 +1029,14 @@ def reduction_figure(
     legend.set_bbox_to_anchor((0.5, 1 - (MARGIN + title_h + GAP) / height), fig.transFigure)
     footer_text.set_y(MARGIN / height)
     top = 1 - (MARGIN + title_h + GAP + legend_h) / height
-    _layout(fig, (0, (MARGIN + footer_h) / height, 1, top))
+    rect = (0, (MARGIN + footer_h) / height, 1, top)
+    _layout(fig, rect)
+    # The labels rotated when two would overlap, and room for them above the bars:
+    # each change resizes the panels, so lay out again.
+    for _ in range(LAYOUT_PASSES):
+        if not _fit_bar_labels(fig, labels):
+            break
+        _layout(fig, rect)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=DPI)
     plt.close(fig)
@@ -748,6 +1045,44 @@ def reduction_figure(
         writer.writeheader()
         writer.writerows(plotted)
     return path
+
+
+def _font_points(size: Any) -> float:
+    from matplotlib.font_manager import FontProperties
+
+    return FontProperties(size=size).get_size_in_points()
+
+
+def _fit_bar_labels(fig: Any, labels: Mapping[Any, Sequence[tuple[Any, float]]]) -> bool:
+    """Rotate every bar label upright when two of a panel overlap side by side, and
+    raise each panel's top until its labels fit inside it; whether anything changed."""
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    changed = False
+    texts = [text for these in labels.values() for text, _ in these]
+    if texts and texts[0].get_rotation() == 0:
+        for these in labels.values():
+            boxes = sorted(tuple(text.get_window_extent(renderer).intervalx) for text, _ in these)
+            if any(b[0] < a[1] + 1 for a, b in itertools.pairwise(boxes)):
+                for text in texts:
+                    text.set_rotation(90)
+                fig.canvas.draw()
+                changed = True
+                break
+    pad = BAR_LABEL_PAD * fig.dpi / 72
+    for ax, these in labels.items():
+        height = ax.bbox.height
+        bottom, top = ax.get_ylim()
+        # A bar of value v reaches v / top of the panel; its label, pad and the
+        # label's height above that.
+        needed = max(
+            v * height / max(height - pad - text.get_window_extent(renderer).height, 1)
+            for text, v in these
+        )
+        if needed > top * 1.001:
+            ax.set_ylim(bottom, needed * 1.02)
+            changed = True
+    return changed
 
 
 def plot_reduction(

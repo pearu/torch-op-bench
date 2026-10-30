@@ -450,7 +450,9 @@ results hold several):
   point a pair of bars, default (filled) and strict (hatched), for the median time
   and for the mode's parity metric (`grad_hidden` or `loss` error), as the report's
   "Reduction setting" compares them, each on a linear axis from zero, so the bars'
-  lengths compare as the values do. It is drawn also when nothing is swept.
+  lengths compare as the values do. Each bar carries its value (3 significant
+  digits), so a bar too short to see still reads. It is drawn also when nothing is
+  swept.
 
 When no axis varies around the point, `plot` draws nothing and says so on stderr,
 once per mode and dtype, and exits 0; the report's per-case tables are then the
@@ -462,16 +464,29 @@ one original stay apart (`plot.STYLE`, `plot.COLORS`, `plot.CONTROL_MARKERS`).
 Colours follow the op's implementation order (sorted names when the op cannot be
 imported), so an implementation has the same colour in every figure and every
 invocation. A point whose parity failed has a hollow marker, so a fast but wrong
-number does not read as a win. A missing point (`error`, `unavailable`, no parity)
-is a gap, and the footer counts what was left out and why. The footer also gives the
-provenance (each environment's torch and torch-op-bench commit, and the hosts); a
-figure without it is not a result. `--metric`, `--sweep` and `--impl` restrict what
-is drawn (the baseline is always drawn).
+number does not read as a win: in a parity panel when that panel's metric failed, in
+every other panel when any metric did. A missing point (`error`, `unavailable`, no
+parity) is a gap, and the footer counts what was left out and why. Two series of a
+panel coincide when, at every point, they lie within half a marker of each other as
+drawn (a control and its own original excepted: the control is styled apart). Series
+that coincide, directly or through another, are stacked in drawing order: each one
+above the first is drawn on top, dashed, at half its line width and marker size, and
+from the third on also shifted sideways, alternately left and right, by half a
+marker per step, so every colour shows. The footer names each such series and the
+first one it lies on, with its panels ("Coincident, …").
+A linear y axis whose values exceed 10⁵, or stay below 10⁻⁴, is drawn in a unit
+scaled by a power of 10³, which its label names ("time × peak (10⁶ ms·MiB)"), the
+same in every panel of a row; tick labels are plain numbers, with no offset or "1e7"
+above the panel. The footer also gives the provenance (each environment's torch and
+torch-op-bench commit, and the hosts); a figure without it is not a result.
+`--metric`, `--sweep` and `--impl` restrict what is drawn (the baseline is always
+drawn).
 
 Next to every PNG, a CSV of the same name holds exactly the plotted points, one row
 per point: the metric, axis, x, implementation, environment, role, y, parity status,
-whether parity failed, the point, and the work (with the baseline's, in a ratio
-figure). The write-up quotes those numbers, not values read off a figure.
+whether parity failed (on any metric, and, in a parity panel, on the panel's own),
+the point, and the work (with the baseline's, in a ratio figure). The write-up
+quotes those numbers, not values read off a figure.
 
 `torch_op_bench.analysis` turns records into flat rows (`load`, `to_rows`,
 `default_point`, `sweeps`) for anything else; it needs no pandas.

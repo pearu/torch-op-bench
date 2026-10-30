@@ -1,5 +1,6 @@
 import csv
 import itertools
+import math
 import re
 import struct
 import sys
@@ -78,6 +79,52 @@ def test_grid_csv_is_what_was_drawn(synth, tmp_path):
         "chunked": "counterpart",
         "base_other": "control",
     }
+
+
+def test_hollow_marker_per_parity_metric(synth, tmp_path, monkeypatch):
+    # F8 (I1-12): in a parity panel a marker is hollow when that metric failed, not
+    # when any did. chunked at M=256 fails only grad_rel: its marker is filled in the
+    # loss_rel_err panel, hollow in the grad_rel panel and in the time panel.
+    import matplotlib.pyplot as plt
+
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    metrics = ["median_ms", "parity_loss_rel_err", "parity_grad_rel"]
+    draw(synth, tmp_path, dtype="float32", mode="fwd_bwd", sweep=["M"], metrics=metrics)
+    monkeypatch.undo()
+    fig = closed[0]  # the grid
+    color = plot.colors(analysis.to_rows(load_quiet(synth)), "base")["chunked"]
+
+    def faces(ax):
+        """The face of chunked's marker at M=256 in a panel."""
+        return [
+            line.get_markerfacecolor()
+            for line in ax.lines
+            if line.get_linestyle() == "None"
+            and line.get_color() == color
+            and 256 in list(line.get_xdata())
+        ]
+
+    time, loss, grad = (fig.axes[i] for i in range(3))
+    assert faces(time) == ["none"]
+    assert faces(grad) == ["none"]
+    assert faces(loss) != ["none"]
+    assert len(faces(loss)) == 1
+    for f in closed:
+        plt.close(f)
+    rows = read_csv(tmp_path / "grid-fwd_bwd.csv")
+    at = {
+        r["metric"]: (r["parity_fail"], r["parity_fail_metric"])
+        for r in rows
+        if (r["implementation"], r["axis"], r["x"]) == ("chunked", "M", "256")
+    }
+    assert at == {
+        "median_ms": ("True", ""),
+        "parity_loss_rel_err": ("True", "False"),
+        "parity_grad_rel": ("True", "True"),
+    }
+    others = [r for r in rows if r["metric"].startswith("parity_") and r["parity_fail"] == "False"]
+    assert others and {r["parity_fail_metric"] for r in others} == {"False"}
 
 
 def test_ratio_csv(synth, tmp_path):
@@ -166,6 +213,165 @@ def test_restrictions(synth, tmp_path):
         draw(synth, tmp_path, sweep=["Q"])
     with pytest.raises(ValueError, match=r"unknown implementation \['nope'\]"):
         draw(synth, tmp_path, impls=["nope"])
+
+
+def colours_near(fig, ax, x, y, colours, radius=6):
+    """Which of ``colours`` the rendered raster holds within ``radius`` pixels of the
+    data point (x, y) of ``ax``."""
+    import numpy as np
+    from matplotlib.colors import to_rgb
+
+    fig.canvas.draw()
+    raster = np.asarray(fig.canvas.buffer_rgba())[..., :3].astype(int)
+    px, py = ax.transData.transform((x, y))
+    row, col = round(raster.shape[0] - py), round(px)
+    window = raster[row - radius : row + radius + 1, col - radius : col + radius + 1]
+    found = set()
+    for colour in colours:
+        rgb = np.array([round(255 * c) for c in to_rgb(colour)])
+        if (np.abs(window - rgb).max(axis=-1) <= 24).any():
+            found.add(colour)
+    return found
+
+
+@pytest.mark.parametrize("twins", [1, 3])
+@pytest.mark.parametrize("original", ["compiled", "base"])
+def test_coincident_series_both_shown(synth, tmp_path, monkeypatch, original, twins):
+    # F7 (I1-12): a series equal to another one in a panel is drawn on top of it,
+    # dashed and smaller, so both colours show at a shared point; the footer says so.
+    # A twin of a counterpart, and of the baseline (which keeps its style). Three
+    # twins (R1-33 F1): each a level up on the one before, so all four colours show.
+    import matplotlib.pyplot as plt
+
+    rows = analysis.at(analysis.to_rows(load_quiet(synth)), dtype="float32", mode="fwd")
+    names = ["twin", "twin2", "twin3"][:twins]
+    rows += [
+        {**r, "implementation": name}
+        for name in names
+        for r in rows
+        if r["implementation"] == original
+    ]
+    palette = plot.colors(rows, "base")
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    plot._figure(
+        tmp_path / "grid.png",
+        [(None, rows, None)],
+        ["median_ms", "tokens_per_s"],
+        ["M", "K"],
+        S.DEFAULT,
+        "base",
+        "synth: fwd",
+        [plot.left_out(rows, ["median_ms"]), "provenance"],
+        palette=palette,
+    )
+    monkeypatch.undo()
+    (fig,) = closed
+    y = S.median_ms(original, "fwd", "float32", S.DEFAULT)
+    stack = [original, *names]
+    every = {palette[name] for name in stack}
+    assert len(every) == len(stack)
+    for ax in fig.axes[:2]:  # median against M and K
+        assert colours_near(fig, ax, S.DEFAULT[ax.get_xlabel()], y, every) == every
+
+    def lines_of(name):
+        return [line for line in fig.axes[0].lines if line.get_color() == palette[name]]
+
+    # The one below keeps its style (base_other, black too, is a dotted control).
+    role = "baseline" if original == "base" else "counterpart"
+    style = plot.STYLE[role]
+    under = lines_of(original)
+    lines = [line for line in under if line.get_linestyle() not in ("None", ":")]
+    assert [(line.get_linestyle(), line.get_linewidth()) for line in lines] == [
+        (style["linestyle"], style["linewidth"])
+    ]
+    # Each twin a level up, dashed at half its width and marker size; from level 2 on
+    # shifted left, then right, by half the bottom's marker size per step.
+    twin_style = plot.STYLE["counterpart"]
+    scale = plot.COINCIDENT_SCALE
+    ax = fig.axes[0]
+    to_points = 72.0 / fig.dpi
+    centre = ax.transData.transform((S.DEFAULT["M"], y))[0] * to_points
+    for level, name in enumerate(names, start=1):
+        upper = lines_of(name)
+        assert min(line.get_zorder() for line in upper) > max(line.get_zorder() for line in under)
+        drawn = [line for line in upper if line.get_linestyle() != "None"]
+        assert [(line.get_linestyle(), line.get_linewidth()) for line in drawn] == [
+            ("--", twin_style["linewidth"] * scale)
+        ]
+        markers = [line for line in upper if line.get_linestyle() == "None"]
+        assert {line.get_markersize() for line in markers} == {twin_style["size"] * scale}
+        step = {1: 0, 2: -1, 3: 1}[level]
+        for line in markers:
+            x = line.get_transform().transform((S.DEFAULT["M"], y))[0] * to_points
+            assert x - centre == pytest.approx(step * plot.COINCIDENT_DODGE * style["size"])
+        under = upper
+    footer = next(t for t in fig.texts if t.get_gid() == "footer").get_text()
+    for upper in names:  # the footer names the first one each lies on
+        clause = f"{upper} on {original} (fwd: median, tokens/s)"
+        assert clause in footer.replace("\n", " ")
+    assert footer.startswith("Left out:")
+    plt.close(fig)
+
+
+def test_coincident_pairs():
+    # In display points (P1, I1-14 round 2): within half the lower series' marker size
+    # (5 pt here) at every x.
+    size = 5
+    limit = plot.COINCIDENT_MARKER_FRACTION * size
+    assert limit == 2.5
+
+    def series(ys, set_=0, name="s", control_of=None):
+        display = [None if y is None else (10.0 * i, y) for i, y in enumerate(ys)]
+        return {
+            "set": set_,
+            "name": name,
+            "control_of": control_of,
+            "style": {"size": size},
+            "display": display,
+        }
+
+    drawn = [
+        series([100.0, 200.0, None], name="a"),
+        series([100.0 + 2.4, 200.0 - 2.4, None], name="b"),  # just inside: on a
+        series([100.0, 200.0, 300.0]),  # another x set
+        series([100.0, 200.0 + 2.6, None]),  # just outside at one x
+        series([100.0, 200.0, None], set_=1),  # another result set
+        series([None, None, None]),
+        series([None, None, None]),  # nothing drawn: nothing coincides
+        series([100.0, 200.0, None], name="c"),  # on a, the first
+        series([100.0, 200.0, None], name="a_ctl", control_of="a"),  # on b, not on a
+    ]
+    assert plot.coincident_pairs(drawn) == {1: 0, 7: 0, 8: 1}
+    # One stack of a, b, c, a_ctl: four levels, none shared, even where two lie on
+    # the same one; the control is in it through b.
+    levels = plot.coincident_levels(drawn)
+    assert [levels[k] for k in (0, 1, 7, 8)] == [(k, 4, 0) for k in range(4)]
+    assert levels[2] == (0, 1, 2) and levels[4] == (0, 1, 4)
+    # A control alone on its original is not coincident (P1, I1-14 round 2).
+    for pair in ([drawn[0], drawn[8]], [drawn[8], drawn[0]]):
+        assert plot.coincident_pairs(pair) == {}
+        assert plot.coincident_levels(pair) == {0: (0, 1, 0), 1: (0, 1, 1)}
+    # Two on one that are not on each other (2.4 pt either side of it, 4.8 pt apart):
+    # still a level each, so the later does not cover the earlier.
+    fan = [
+        series([100.0, 200.0, None], name="a"),
+        series([102.4, 200.0, None], name="b"),
+        series([97.6, 200.0, None], name="c"),
+    ]
+    assert plot.coincident_pairs(fan) == {1: 0, 2: 0}
+    assert plot.coincident_levels(fan) == {0: (0, 3, 0), 1: (1, 3, 0), 2: (2, 3, 0)}
+    text = plot.coincident_text(
+        {(0, "b", "a"): [("median_ms", "M"), ("median_ms", "K"), ("tokens_per_s", "M")]},
+        0,
+        ["M", "K"],
+        ["fwd"],
+    )
+    assert (
+        text
+        == "Coincident, the first drawn dashed on the second: b on a (fwd: median, tokens/s on M)."
+    )
+    assert plot.coincident_text({(1, "b", "a"): [("median_ms", "M")]}, 0, ["M"], ["fwd"]) is None
 
 
 def test_styles(synth):
@@ -607,34 +813,86 @@ def test_gaps_between_bands(synth, synth_strict, tmp_path, monkeypatch, kwargs):
         plt.close(fig)
 
 
-def test_panel_gap_measured(synth, tmp_path, monkeypatch):
-    # The bound on the gap between stacked panels is not met vacuously: with
-    # tight_layout's former h_pad (1.08 font sizes, 10.8 pt) the same measurement
-    # reports a gap above it.
+def nightly_time_x_peak(synth):
+    """fwd_bwd rows of the synthetic set with time × peak planted in the 10⁶–10⁷ range
+    of I1-12's records (ms·MiB), where an offset text "1e7" stood above the panel."""
+    rows = [r for r in analysis.to_rows(load_quiet(synth)) if r["mode"] == "fwd_bwd"]
+    rows = [r for r in rows if r["dtype"] == "float32"]
+    for i, r in enumerate(rows):
+        if r.get("time_x_peak") is not None:
+            r["time_x_peak"] = 1.4e6 + 9.7e5 * (i % 13)
+    return rows
+
+
+PANEL_GAP_CASES = {
+    # tight_layout's former h_pad (1.08 font sizes, 10.8 pt).
+    "h_pad": (
+        lambda synth: [r for r in analysis.to_rows(load_quiet(synth)) if r["mode"] == "fwd"],
+        ["median_ms", "tokens_per_s"],
+        {"PANEL_PAD": 1.08},
+    ),
+    # R1-30 N2 (R1-28's "nightly time_x_peak"): five metrics, time × peak in the
+    # 10⁶–10⁷ range, in plain numbers of the unit as it was (no scaled unit).
+    "time_x_peak": (
+        nightly_time_x_peak,
+        ["median_ms", "time_x_peak", "parity_grad_rel", "tflops", "iqr_ms"],
+        {"SCALE_ABOVE": math.inf, "_plain_ticks": lambda ax: None},
+    ),
+}
+
+
+@pytest.mark.parametrize("case", PANEL_GAP_CASES)
+def test_panel_gap_measured(synth, tmp_path, monkeypatch, case):
+    # The bound on the gap between stacked panels is not met vacuously: with the
+    # layout as it was (``broken``) the same measurement reports a gap above it, and
+    # as it is, every gap is within it.
     import matplotlib.pyplot as plt
 
-    closed = []
-    monkeypatch.setattr(plt, "close", closed.append)
-    monkeypatch.setattr(plot, "PANEL_PAD", 1.08)
-    rows = [r for r in analysis.to_rows(load_quiet(synth)) if r["mode"] == "fwd"]
-    rows = [r for r in rows if r["dtype"] == "float32"]
-    plot._figure(
-        tmp_path / "two.png",
-        [(None, rows, None)],
-        ["median_ms", "tokens_per_s"],
-        ["M"],
-        S.DEFAULT,
-        "base",
-        "synth: fwd",
-        ["footer"],
-    )
-    monkeypatch.undo()
-    (fig,) = closed
-    gaps = rendered_gaps(fig)
-    gap, bound = gaps["panels-0-1"]
-    assert gap > bound, (gap, bound)
-    assert panel_gaps(gaps) == ["panels-0-1"]
-    plt.close(fig)
+    select, metrics, broken = PANEL_GAP_CASES[case]
+    rows = [r for r in select(synth) if r["dtype"] == "float32"]
+    figures = {}
+    for name, patch in (("broken", broken), ("now", {})):
+        closed = []
+        monkeypatch.setattr(plt, "close", closed.append)
+        for attr, value in patch.items():
+            monkeypatch.setattr(plot, attr, value)
+        plot._figure(
+            tmp_path / f"{name}.png",
+            [(None, rows, None)],
+            metrics,
+            ["M"],
+            S.DEFAULT,
+            "base",
+            "synth",
+            ["footer"],
+        )
+        monkeypatch.undo()
+        (figures[name],) = closed
+    gaps = rendered_gaps(figures["broken"])
+    assert panel_gaps(gaps) == [f"panels-{i}-{i + 1}" for i in range(len(metrics) - 1)]
+    assert max(gaps[name][0] - gaps[name][1] for name in panel_gaps(gaps)) > 0, gaps
+    for name, (gap, bound) in rendered_gaps(figures["now"]).items():
+        assert -0.5 <= gap <= bound, (case, name, gap, bound)
+    if case == "time_x_peak":
+        broken_offsets = [ax.yaxis.get_offset_text().get_text() for ax in figures["broken"].axes]
+        assert any(broken_offsets)  # the 1e6 above the panel
+        figures["now"].canvas.draw()
+        assert [ax.yaxis.get_offset_text().get_text() for ax in figures["now"].axes] == [""] * 5
+        assert figures["now"].axes[1].get_ylabel() == "time × peak\n(10⁶ ms·MiB)"
+    for fig in figures.values():
+        plt.close(fig)
+
+
+def test_y_exponent_and_scaled_label():
+    assert plot.y_exponent([1.4e6, 9.9e6, None]) == 6
+    assert plot.y_exponent([2e5]) == 3
+    assert plot.y_exponent([1e5, 3.0]) == 0  # at most SCALE_ABOVE: plain
+    assert plot.y_exponent([2.25e-6, 0.0]) == -6
+    assert plot.y_exponent([0.0, None]) == 0
+    assert plot.scaled_label("time × peak (ms·MiB)", 6) == "time × peak (10⁶ ms·MiB)"
+    assert plot.scaled_label("tokens/s", 3) == "tokens/s (×10³)"
+    assert plot.scaled_label("loss_rel_err", -6) == "loss_rel_err (×10⁻⁶)"
+    assert plot.scaled_label("median (ms)", 0) == "median (ms)"
 
 
 def drawn_texts(fig):
@@ -827,7 +1085,12 @@ def test_ylabels_split_before_parentheses(synth, tmp_path, monkeypatch, kwargs):
     written = draw(synth, tmp_path / "out", dtype="float32", overlay=other, **kwargs)
     assert {p.name.split("-")[0] for p in written} == {"grid", "ratio", "overlay"}
     monkeypatch.undo()
-    labels = {plot.METRIC_LABELS.get(m, m) for m in plot.METRIC_LABELS}
+    # A label as in METRIC_LABELS, or in a scaled unit (synth's TFLOP/s are ~10⁻⁶).
+    labels = {
+        plot.scaled_label(label, k)
+        for label in plot.METRIC_LABELS.values()
+        for k in range(-12, 13, 3)
+    }
     seen = set()
     for path, fig in zip(written, closed, strict=True):
         for ax in fig.axes:
@@ -941,6 +1204,47 @@ def test_reduction_figure_draws_a_zero(synth, synth_strict, tmp_path, monkeypatc
     assert all(
         float(r["y"]) == 0 for r in rows if r["set"] == "strict" and r["metric"] != "median_ms"
     )
+
+
+@pytest.mark.parametrize("impls", [None, ["chunked"]], ids=["three-entries", "two-entries"])
+def test_reduction_bars_carry_their_values(synth, synth_strict, tmp_path, monkeypatch, impls):
+    # F9 (I1-12): torchtitan_ce's loss error of 2.25e-6 had no visible bar on the
+    # linear axis. Every bar carries its value, inside its panel, and the layout
+    # rules hold with the labels.
+    import matplotlib.pyplot as plt
+
+    value = plot._reduction_value
+
+    def planted(entry, metric, which):
+        y = value(entry, metric, which)
+        tiny = entry["implementation"] == "chunked" and metric != "median_ms"
+        return 2.25e-6 if y is not None and tiny else y
+
+    monkeypatch.setattr(plot, "_reduction_value", planted)
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    out = tmp_path / "out"
+    draw(synth, out, dtype="float32", mode="fwd_bwd", strict=synth_strict, impls=impls)
+    monkeypatch.undo()
+    fig = closed[-1]
+    rows = read_csv(out / "reduction-fwd_bwd.csv")
+    for ax, metric in zip(fig.axes, ("median_ms", "parity_grad_rel"), strict=True):
+        texts = [t for t in ax.texts if t.get_text()]
+        ys = sorted(float(r["y"]) for r in rows if r["metric"] == metric)
+        assert len(texts) == len(ax.patches) == len(ys)
+        assert sorted(float(t.get_text()) for t in texts) == pytest.approx(ys, rel=5e-3)
+        assert ax.get_ylim()[0] == 0  # still linear from zero
+        renderer = fig.canvas.get_renderer()
+        for t in texts:
+            box = t.get_window_extent(renderer)
+            assert all(ax.bbox.contains(x, y) for x, y in box.corners()), t.get_text()
+    parity = [t.get_text() for t in fig.axes[1].texts]
+    assert parity.count("2.25e-06") == 2
+    assert_inside(fig, "reduction-fwd_bwd.png")
+    for name, (gap, bound) in rendered_gaps(fig).items():
+        assert -0.5 <= gap <= bound, (name, gap, bound)
+    for f in closed:
+        plt.close(f)
 
 
 def test_reduction_figure_with_impl_and_cli(synth, synth_strict, tmp_path):
