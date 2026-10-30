@@ -321,7 +321,7 @@ def test_environment_check_status_mismatch():
         ("neither", []),
     ]
     text = report.render_environment_check(rows, ["N"])
-    assert "1 pairs compared; 2 with one side not measured (flagged below); 1 with neither" in text
+    assert "1 pair compared; 2 with one side not measured (flagged below); 1 with neither" in text
     body = [cells(r) for r in table_rows(text)[2:]]
     assert [r[4] for r in body] == ["N=1", "N=2", "N=3"]  # neither side: no row
     assert body[1][5:] == ["error / ok", "—", "status"]
@@ -334,7 +334,7 @@ def test_environment_check_status_mismatch():
     assert "Every control is within the limits" not in text
     # Only the pair of both ok: within the limits.
     text = report.render_environment_check(rows[:2], ["N"])
-    assert "1 pairs compared; 0 with one side not measured; 0 with neither" in text
+    assert "1 pair compared; 0 with one side not measured; 0 with neither" in text
     assert "Every control is within the limits" in text
     # Neither side measured anywhere: counted, no table.
     text = report.render_environment_check(rows[6:], ["N"])
@@ -399,8 +399,9 @@ def test_cause():
     )
     # A message that starts with a number has nothing to cut at: the whole line.
     assert report.cause("error", "ValueError: 3 is odd")[0] == "ValueError: 3 is odd"
-    # unavailable: the first line, numbers and all.
-    assert report.cause("unavailable", "needs 2 GPUs\nmore") == ("needs 2 GPUs", "")
+    # unavailable: the first line, numbers and all; the second is what it leaves out.
+    assert report.cause("unavailable", "needs 2 GPUs") == ("needs 2 GPUs", "")
+    assert report.cause("unavailable", "needs 2 GPUs\nmore") == ("needs 2 GPUs", "more")
     assert report.cause("error", None) == ("no reason recorded", "")
 
 
@@ -423,6 +424,34 @@ def test_not_measured_groups_by_cause():
     assert "- error: OutOfMemoryError: CUDA out of memory. (4)\n" in text
     assert "  - e3, fwd_bwd, bfloat16 N=16384: tried to allocate 8.00 GiB, 2.23 GiB free\n" in text
     assert "- error: RuntimeError: boom (1)\n  - x, fwd_bwd, bfloat16 N=16384: 7\n" in text
+
+
+def test_not_measured_out_of_memory_unavailable():
+    # Task I1-16: points that do not fit on the device are one group, by the reason's
+    # first line; each row has its figures from the second.
+    device = "out of memory on NVIDIA GeForce RTX 5060 Ti (15.6 GiB)"
+    figures = [
+        "tried to allocate 4.00 GiB, 2.28 GiB free; 9.13 GiB allocated, 3.97 GiB reserved "
+        "but unallocated; phase: parity",
+        "tried to allocate 8.00 GiB, 2.23 GiB free; 13.16 GiB allocated, 1.87 MiB reserved "
+        "but unallocated; phase: timing",
+    ]
+    rows = [
+        {
+            "implementation": "torchtitan_ce",
+            "mode": mode,
+            "dtype": "bfloat16",
+            "N": 16384,
+            "status": "unavailable",
+            "reason": f"{device}\n{line}",
+        }
+        for mode, line in zip(("fwd", "fwd_bwd"), figures, strict=True)
+    ]
+    text = report.render_not_measured(rows, ["N"])
+    assert text.count("\n- ") == 1
+    assert f"- unavailable: {device} (2)\n" in text
+    assert f"  - torchtitan_ce, fwd, bfloat16 N=16384: {figures[0]}\n" in text
+    assert f"  - torchtitan_ce, fwd_bwd, bfloat16 N=16384: {figures[1]}\n" in text
 
 
 def test_missing_baseline_and_point(synth):

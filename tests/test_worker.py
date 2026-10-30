@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -226,6 +227,146 @@ def test_subprocess_cuda_memory(tests_dir):
     assert record["memory"]["peak_bytes"] > record["memory"]["baseline_bytes"]
     assert record["parity"]["status"] == "ok"
     assert record["env"]["torch"]["devices"]
+
+
+# torch's CUDA out-of-memory message, as I1-12 recorded it.
+CUDA_OOM = (
+    "CUDA out of memory. Tried to allocate 4.00 GiB. GPU 0 has a total capacity of 15.57 "
+    "GiB of which 2.22 GiB is free. Including non-PyTorch memory, this process has 13.34 "
+    "GiB memory in use. Of the allocated memory 9.19 GiB is allocated by PyTorch, and 3.97 "
+    "GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is "
+    "large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid "
+    "fragmentation."
+)
+CUDA_FIGURES = (
+    "tried to allocate 4.00 GiB, 2.22 GiB free; 9.19 GiB allocated, 3.97 GiB reserved "
+    "but unallocated"
+)
+
+
+def out_of_memory_at(calls):
+    """A ``run`` that runs the toy's plain run, and runs out of memory at call ``calls``."""
+    import torch
+    import toy_op
+
+    count = []
+
+    def run(inputs, mode):
+        count.append(mode)
+        if len(count) == calls:
+            raise torch.OutOfMemoryError(CUDA_OOM)
+        return toy_op.run_plain(inputs, mode)
+
+    return run
+
+
+# On CPU, with peak_memory calling fn once: the plain run's calls are parity (1),
+# memory (2), warmup (3, SETTINGS' one) and timing (4 to 6).
+@pytest.mark.parametrize(
+    ("phase", "calls"), [("parity", 1), ("memory", 2), ("warmup", 3), ("timing", 5)]
+)
+def test_out_of_memory_is_unavailable(tests_dir, monkeypatch, phase, calls):
+    # Task I1-16: a point that does not fit is foreseen, not an error.
+    import torch
+    import toy_op
+
+    from torch_op_bench import measure
+
+    monkeypatch.setattr(measure, "peak_memory", lambda fn, device, reset: fn() and {})
+    monkeypatch.setattr(toy_op.TOY.implementation("plain"), "run", out_of_memory_at(calls))
+    record = worker.run_payload(payload(tests_dir))
+    assert record["status"] == "unavailable", record["traceback"]
+    first, second = record["reason"].split("\n")
+    assert first == f"out of memory on {worker.device_memory(torch.device('cpu'))}"
+    assert second == f"{CUDA_FIGURES}; phase: {phase}"
+    assert record["traceback"] is None
+    for field in ("times_ms", "memory", "parity", "verify"):
+        assert record[field] is None, field
+    assert record["env"]["packages"]["pytest"]
+
+
+@pytest.mark.parametrize("phase", ["setup", "verify"])
+def test_out_of_memory_in_setup_and_verify(tests_dir, monkeypatch, phase):
+    import toy_op
+
+    def oom(*args):
+        raise MemoryError()
+
+    monkeypatch.setattr(toy_op.TOY.implementation("plain"), phase, oom)
+    record = worker.run_payload(payload(tests_dir))
+    assert record["status"] == "unavailable", record["traceback"]
+    assert record["reason"].split("\n")[1] == f"MemoryError; phase: {phase}"
+
+
+def test_out_of_memory_of_the_cpu_allocator(tests_dir, monkeypatch):
+    # The CPU allocator raises a RuntimeError, not torch.OutOfMemoryError.
+    import torch
+    import toy_op
+
+    def run(inputs, mode):
+        return torch.empty(1 << 52, dtype=torch.uint8)  # 4 PiB
+
+    monkeypatch.setattr(toy_op.TOY.implementation("plain"), "run", run)
+    record = worker.run_payload(payload(tests_dir))
+    assert record["status"] == "unavailable", record["traceback"]
+    assert record["reason"].endswith("\ntried to allocate 4194304.00 GiB; phase: parity")
+
+
+def test_out_of_memory_reason_parts(monkeypatch):
+    import torch
+
+    class Props:
+        name = "NVIDIA GeForce RTX 5060 Ti"
+        total_memory = 16_718_757_888  # ey's: 15.57 GiB
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: Props)
+    assert worker.out_of_memory_reason(
+        torch.device("cuda:0"), torch.OutOfMemoryError(CUDA_OOM), "timing"
+    ) == (f"out of memory on NVIDIA GeForce RTX 5060 Ti (15.6 GiB)\n{CUDA_FIGURES}; phase: timing")
+    # A message without the figures: its first line.
+    assert worker.memory_figures(torch.OutOfMemoryError("odd\nmore")) == "OutOfMemoryError: odd"
+    assert not worker.is_out_of_memory(RuntimeError("toy failure"))
+
+
+def test_reference_out_of_memory_skips_parity(tests_dir, monkeypatch):
+    # The reference not fitting (reference_fits was wrong) leaves the measurement
+    # sound: ok, parity skipped.
+    import torch
+    import toy_op
+
+    def oom(*args):
+        raise torch.OutOfMemoryError(CUDA_OOM)
+
+    monkeypatch.setattr(toy_op.TOY.reference, "run", oom)
+    record = worker.run_payload(payload(tests_dir))
+    assert record["status"] == "ok", record["traceback"]
+    assert len(record["times_ms"]) == SETTINGS["repeat"]
+    assert record["parity"]["status"] == "skipped"
+    assert record["parity"]["reason"] == f"reference out of memory: {CUDA_FIGURES}"
+    assert record["parity"]["metrics"] == {}
+    monkeypatch.undo()
+    monkeypatch.setattr(toy_op.TOY, "compare", oom)
+    record = worker.run_payload(payload(tests_dir))
+    assert record["status"] == "ok", record["traceback"]
+    assert record["parity"]["reason"] == f"comparison out of memory: {CUDA_FIGURES}"
+    # Any other failure of the reference is still an error.
+    monkeypatch.undo()
+    monkeypatch.setattr(toy_op.TOY.reference, "run", toy_op.run_broken)
+    assert worker.run_payload(payload(tests_dir))["status"] == "error"
+
+
+@pytest.mark.cuda
+def test_subprocess_cuda_out_of_memory(tests_dir):
+    # torch's own message on this device: its figures are read.
+    record, _ = run_subprocess(payload(tests_dir, device="cuda", M=1 << 20, K=1 << 13))
+    assert record["status"] == "unavailable", record["traceback"]
+    first, second = record["reason"].split("\n")
+    assert first.startswith("out of memory on ") and first.endswith(" GiB)")
+    assert re.fullmatch(
+        r"tried to allocate 32\.00 GiB, [\d.]+ \w+ free; [\d.]+ \w+ allocated, [\d.]+ \w+ "
+        r"reserved but unallocated; phase: setup",
+        second,
+    ), second
 
 
 @pytest.mark.parametrize("pairs", [True, False])
