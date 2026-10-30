@@ -220,12 +220,62 @@ def test_environment_check_without_controls():
 def test_not_measured(synth):
     text = section(make(synth), "## Not measured")
     assert (
-        "- error: RuntimeError: boom\n  - compiled, fwd, float32 M=64, K=32, N=16, layout=a" in text
+        "- error: RuntimeError: boom (1)\n  - compiled, fwd, float32 M=64, K=32, N=16, layout=a\n"
+        in text
     )
     assert "second line" not in text  # the reason's first line only
-    assert "- unavailable: needs a GPU\n  - chunked, fwd_bwd, float32 M=128, K=16" in text
+    assert "- unavailable: needs a GPU (1)\n  - chunked, fwd_bwd, float32 M=128, K=16" in text
     rows = [{"status": "ok"}]
     assert "Every record is `ok`." in report.render_not_measured(rows, [])
+
+
+# The reasons of I1-12's six out-of-memory errors, cut where the figures end.
+OOM = (
+    "OutOfMemoryError: CUDA out of memory. Tried to allocate {tried} GiB. GPU 0 has a "
+    "total capacity of 15.57 GiB of which {free} GiB is free. Including non-PyTorch "
+    "memory, this process has 13.28 GiB memory in use."
+)
+
+
+def test_cause():
+    # One cause, whatever its figures (R1-30 F5); the figures go to the row.
+    key = "OutOfMemoryError: CUDA out of memory."
+    assert report.cause("error", OOM.format(tried="4.00", free="2.28")) == (
+        key,
+        "tried to allocate 4.00 GiB, 2.28 GiB free",
+    )
+    assert report.cause("error", OOM.format(tried="8.00", free="1.31"))[0] == key
+    # Two different RuntimeErrors stay two causes.
+    shape = report.cause("error", "RuntimeError: shape mismatch: 3 against 4")
+    illegal = report.cause("error", "RuntimeError: CUDA error: an illegal memory access")
+    assert shape == ("RuntimeError: shape mismatch:", "3 against 4")
+    assert illegal == ("RuntimeError: CUDA error: an illegal memory access", "")
+    # A message that starts with a number has nothing to cut at: the whole line.
+    assert report.cause("error", "ValueError: 3 is odd")[0] == "ValueError: 3 is odd"
+    # unavailable: the first line, numbers and all.
+    assert report.cause("unavailable", "needs 2 GPUs\nmore") == ("needs 2 GPUs", "")
+    assert report.cause("error", None) == ("no reason recorded", "")
+
+
+def test_not_measured_groups_by_cause():
+    figures = [("4.00", "2.28"), ("4.00", "2.22"), ("4.00", "2.22"), ("8.00", "2.23")]
+    rows = [
+        {
+            "implementation": f"e{i}",
+            "mode": "fwd_bwd",
+            "dtype": "bfloat16",
+            "N": 16384,
+            "status": "error",
+            "reason": OOM.format(tried=tried, free=free),
+        }
+        for i, (tried, free) in enumerate(figures)
+    ]
+    rows.append({**rows[0], "implementation": "x", "reason": "RuntimeError: boom 7"})
+    text = report.render_not_measured(rows, ["N"])
+    assert text.count("\n- ") == 2
+    assert "- error: OutOfMemoryError: CUDA out of memory. (4)\n" in text
+    assert "  - e3, fwd_bwd, bfloat16 N=16384: tried to allocate 8.00 GiB, 2.23 GiB free\n" in text
+    assert "- error: RuntimeError: boom (1)\n  - x, fwd_bwd, bfloat16 N=16384: 7\n" in text
 
 
 def test_missing_baseline_and_point(synth):

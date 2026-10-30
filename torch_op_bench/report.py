@@ -7,6 +7,7 @@ Pure functions ``render_*`` turn rows (``analysis.to_rows``) into markdown;
 from __future__ import annotations
 
 import math
+import re
 import shlex
 import warnings
 from collections import defaultdict
@@ -694,23 +695,58 @@ def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
 # --- 6. not measured -----------------------------------------------------------------------
 
 
+REASON_WIDTH = 200
+# An error's cause ends where its first number starts: what follows (sizes, free
+# memory, indices) differs from record to record of one cause.
+FIRST_NUMBER = re.compile(r"\d")
+OOM_SPECIFICS = re.compile(
+    r"Tried to allocate (?P<tried>[\d.]+ \w+)\..*? of which (?P<free>[\d.]+ \w+) is free"
+)
+
+
+def cause(status: str, reason: str | None) -> tuple[str, str]:
+    """The group of a not-measured record: its cause, and what of its reason's first
+    line the cause leaves out. For an ``error``, the cause is the message up to its
+    first number, with the unfinished sentence there dropped ("OutOfMemoryError: CUDA
+    out of memory. Tried to allocate 4.00 GiB. …" is "OutOfMemoryError: CUDA out of
+    memory."); for ``unavailable``, whose reasons are written to be stable, the whole
+    first line."""
+    line = (reason or "no reason recorded").strip().splitlines()[0]
+    found = FIRST_NUMBER.search(line) if status == "error" else None
+    if found is None:
+        return line[:REASON_WIDTH], ""
+    head = line[: found.start()]
+    # "…: CUDA out of memory. Tried to allocate " -> "…: CUDA out of memory."
+    sentence = head.rfind(". ")
+    key = head[: sentence + 1] if sentence != -1 else head.rstrip()
+    name, colon, message = key.partition(":")
+    if not (message if colon and " " not in name else key).strip(" :"):
+        # The message starts with a number: no cause to cut it at.
+        return line[:REASON_WIDTH], ""
+    oom = OOM_SPECIFICS.search(line)
+    if oom:
+        rest = f"tried to allocate {oom['tried']}, {oom['free']} free"
+    else:
+        rest = line[len(key) :].strip()
+    return key[:REASON_WIDTH], rest
+
+
 def render_not_measured(rows: Sequence[Row], axes: Sequence[str]) -> str:
     missing = [row for row in rows if row.get("status") in ("error", "unavailable")]
     lines = ["## Not measured", ""]
     if not missing:
         lines.append("Every record is `ok`.")
         return "\n".join(lines) + "\n"
-    groups: dict[tuple[str, str], list[Row]] = defaultdict(list)
+    groups: dict[tuple[str, str], list[tuple[Row, str]]] = defaultdict(list)
     for row in missing:
-        reason = (row.get("reason") or "no reason recorded").strip().splitlines()[0]
-        groups[(row["status"], reason[:200])].append(row)
-    for (status, reason), group in sorted(groups.items()):
-        lines.append(f"- {status}: {text(reason)}")
-        for row in group:
-            lines.append(
-                f"  - {row['implementation']}, {row['mode']}, "
-                f"{row.get('dtype')} {case_text(row, axes)}"
-            )
+        key, rest = cause(row["status"], row.get("reason"))
+        groups[(row["status"], key)].append((row, rest))
+    for (status, key), group in sorted(groups.items()):
+        lines.append(f"- {status}: {text(key)} ({len(group)})")
+        for row, rest in group:
+            where = f"{row['implementation']}, {row['mode']}, {row.get('dtype')}"
+            where += f" {case_text(row, axes)}" + (f": {text(rest, REASON_WIDTH)}" if rest else "")
+            lines.append(f"  - {where}")
     return "\n".join(lines) + "\n"
 
 

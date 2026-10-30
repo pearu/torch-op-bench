@@ -402,8 +402,13 @@ torch-op-bench commits). Its sections:
    torch build can move the error of the same code (by 23 % in `grad_hidden` at one
    shape between torch 2.14 and 2.16), so a parity comparison across environments
    needs this too. A parity metric on one side only is reported as such.
-6. **Not measured**: every `error` and `unavailable` record, grouped by the first
-   line of its reason.
+6. **Not measured**: every `error` and `unavailable` record, grouped by cause, with
+   the number of records: for an `error`, the message up to its first number, less
+   the unfinished sentence there (one group for every CUDA out-of-memory error,
+   whatever the sizes); each row then names the entry, mode and case, and what the
+   cause left out (for out of memory, the size tried and the free memory). For
+   `unavailable`, whose reasons are written to be stable, the first line of the
+   reason.
 
 Numbers have 3 significant digits and memory is in MiB with one decimal.
 
