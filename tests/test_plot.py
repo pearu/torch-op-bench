@@ -1087,6 +1087,47 @@ def test_reduction_figure_draws_a_zero(synth, synth_strict, tmp_path, monkeypatc
     )
 
 
+@pytest.mark.parametrize("impls", [None, ["chunked"]], ids=["three-entries", "two-entries"])
+def test_reduction_bars_carry_their_values(synth, synth_strict, tmp_path, monkeypatch, impls):
+    # F9 (I1-12): torchtitan_ce's loss error of 2.25e-6 had no visible bar on the
+    # linear axis. Every bar carries its value, inside its panel, and the layout
+    # rules hold with the labels.
+    import matplotlib.pyplot as plt
+
+    value = plot._reduction_value
+
+    def planted(entry, metric, which):
+        y = value(entry, metric, which)
+        tiny = entry["implementation"] == "chunked" and metric != "median_ms"
+        return 2.25e-6 if y is not None and tiny else y
+
+    monkeypatch.setattr(plot, "_reduction_value", planted)
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    out = tmp_path / "out"
+    draw(synth, out, dtype="float32", mode="fwd_bwd", strict=synth_strict, impls=impls)
+    monkeypatch.undo()
+    fig = closed[-1]
+    rows = read_csv(out / "reduction-fwd_bwd.csv")
+    for ax, metric in zip(fig.axes, ("median_ms", "parity_grad_rel"), strict=True):
+        texts = [t for t in ax.texts if t.get_text()]
+        ys = sorted(float(r["y"]) for r in rows if r["metric"] == metric)
+        assert len(texts) == len(ax.patches) == len(ys)
+        assert sorted(float(t.get_text()) for t in texts) == pytest.approx(ys, rel=5e-3)
+        assert ax.get_ylim()[0] == 0  # still linear from zero
+        renderer = fig.canvas.get_renderer()
+        for t in texts:
+            box = t.get_window_extent(renderer)
+            assert all(ax.bbox.contains(x, y) for x, y in box.corners()), t.get_text()
+    parity = [t.get_text() for t in fig.axes[1].texts]
+    assert parity.count("2.25e-06") == 2
+    assert_inside(fig, "reduction-fwd_bwd.png")
+    for name, (gap, bound) in rendered_gaps(fig).items():
+        assert -0.5 <= gap <= bound, (name, gap, bound)
+    for f in closed:
+        plt.close(f)
+
+
 def test_reduction_figure_with_impl_and_cli(synth, synth_strict, tmp_path):
     out = tmp_path / "out"
     argv = ["plot", str(synth), "--out", str(out), "--baseline", "base", "--mode", "fwd_bwd"]

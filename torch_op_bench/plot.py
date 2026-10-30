@@ -10,6 +10,7 @@ lazily, with the Agg backend set in code: no display is needed.
 from __future__ import annotations
 
 import csv
+import itertools
 import math
 import textwrap
 import warnings
@@ -717,6 +718,10 @@ def _fit_ylabels(fig: Any) -> bool:
 
 # The strict bar of a pair: the default's colour, hatched.
 STRICT_HATCH = "///"
+# Each bar's value above it (F9, I1-12: a bar too short to see still reads), in
+# points: its size below the tick labels', and its distance from the bar.
+BAR_LABEL_SMALLER = 2
+BAR_LABEL_PAD = 2
 REDUCTION_SETS = ("default", "strict")
 
 
@@ -761,6 +766,8 @@ def reduction_figure(
         len(metrics), 1, figsize=(width, PANEL_HEIGHT * len(metrics)), squeeze=False, sharex=True
     )
     plotted = []
+    labels: dict[Any, list[tuple[Any, float]]] = {}  # per panel: (label, bar value)
+    size = _font_points(plt.rcParams["ytick.labelsize"]) - BAR_LABEL_SMALLER
     xs = list(range(len(names)))
     for ax, metric in zip((row[0] for row in axes), metrics, strict=True):
         parity = metric != "median_ms"
@@ -771,7 +778,7 @@ def reduction_figure(
                 if y is None:
                     continue  # nothing to draw
                 strict_bar = which == "strict"
-                ax.bar(
+                bars = ax.bar(
                     x + offset,
                     y,
                     width=0.4,
@@ -779,6 +786,10 @@ def reduction_figure(
                     edgecolor=color,
                     hatch=STRICT_HATCH if strict_bar else None,
                 )
+                (text,) = ax.bar_label(
+                    bars, labels=[f"{y:.3g}"], padding=BAR_LABEL_PAD, fontsize=size
+                )
+                labels.setdefault(ax, []).append((text, y))
                 row = entry[which]
                 plotted.append(
                     {
@@ -855,7 +866,14 @@ def reduction_figure(
     legend.set_bbox_to_anchor((0.5, 1 - (MARGIN + title_h + GAP) / height), fig.transFigure)
     footer_text.set_y(MARGIN / height)
     top = 1 - (MARGIN + title_h + GAP + legend_h) / height
-    _layout(fig, (0, (MARGIN + footer_h) / height, 1, top))
+    rect = (0, (MARGIN + footer_h) / height, 1, top)
+    _layout(fig, rect)
+    # The labels rotated when two would overlap, and room for them above the bars:
+    # each change resizes the panels, so lay out again.
+    for _ in range(LAYOUT_PASSES):
+        if not _fit_bar_labels(fig, labels):
+            break
+        _layout(fig, rect)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=DPI)
     plt.close(fig)
@@ -864,6 +882,44 @@ def reduction_figure(
         writer.writeheader()
         writer.writerows(plotted)
     return path
+
+
+def _font_points(size: Any) -> float:
+    from matplotlib.font_manager import FontProperties
+
+    return FontProperties(size=size).get_size_in_points()
+
+
+def _fit_bar_labels(fig: Any, labels: Mapping[Any, Sequence[tuple[Any, float]]]) -> bool:
+    """Rotate every bar label upright when two of a panel overlap side by side, and
+    raise each panel's top until its labels fit inside it; whether anything changed."""
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    changed = False
+    texts = [text for these in labels.values() for text, _ in these]
+    if texts and texts[0].get_rotation() == 0:
+        for these in labels.values():
+            boxes = sorted(tuple(text.get_window_extent(renderer).intervalx) for text, _ in these)
+            if any(b[0] < a[1] + 1 for a, b in itertools.pairwise(boxes)):
+                for text in texts:
+                    text.set_rotation(90)
+                fig.canvas.draw()
+                changed = True
+                break
+    pad = BAR_LABEL_PAD * fig.dpi / 72
+    for ax, these in labels.items():
+        height = ax.bbox.height
+        bottom, top = ax.get_ylim()
+        # A bar of value v reaches v / top of the panel; its label, pad and the
+        # label's height above that.
+        needed = max(
+            v * height / max(height - pad - text.get_window_extent(renderer).height, 1)
+            for text, v in these
+        )
+        if needed > top * 1.001:
+            ax.set_ylim(bottom, needed * 1.02)
+            changed = True
+    return changed
 
 
 def plot_reduction(

@@ -434,7 +434,9 @@ results hold several):
   point a pair of bars, default (filled) and strict (hatched), for the median time
   and for the mode's parity metric (`grad_hidden` or `loss` error), as the report's
   "Reduction setting" compares them, each on a linear axis from zero, so the bars'
-  lengths compare as the values do. It is drawn also when nothing is swept.
+  lengths compare as the values do. Each bar carries its value (3 significant
+  digits), so a bar too short to see still reads. It is drawn also when nothing is
+  swept.
 
 When no axis varies around the point, `plot` draws nothing and says so on stderr,
 once per mode and dtype, and exits 0; the report's per-case tables are then the
