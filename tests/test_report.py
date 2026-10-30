@@ -373,8 +373,30 @@ def test_cause():
     # Two different RuntimeErrors stay two causes.
     shape = report.cause("error", "RuntimeError: shape mismatch: 3 against 4")
     illegal = report.cause("error", "RuntimeError: CUDA error: an illegal memory access")
-    assert shape == ("RuntimeError: shape mismatch:", "3 against 4")
+    assert shape == ("RuntimeError: shape mismatch", "3 against 4")
     assert illegal == ("RuntimeError: CUDA error: an illegal memory access", "")
+    # Digits in a word name the cause; a number token ends it (R1-31 F1): no two of
+    # these six causes share a group.
+    lines = [
+        "RuntimeError: mat1 and mat2 shapes cannot be multiplied (4096x1024 and 2048x131072)",
+        "RuntimeError: mat1 and mat2 must have the same dtype, but got BFloat16 and Float",
+        "RuntimeError: Expected 2D tensor for input, got 3D",
+        "RuntimeError: Expected 3 arguments, got 2",
+        "ValueError: sm_80 or newer is required",
+        "ValueError: sm_90 kernels are not built for this wheel",
+    ]
+    keys = [report.cause("error", line)[0] for line in lines]
+    assert len(set(keys)) == 6
+    assert keys[0] == "RuntimeError: mat1 and mat2 shapes cannot be multiplied"
+    assert keys[1:3] + keys[4:] == lines[1:3] + lines[4:]  # no number: the whole line
+    assert keys[3] == "RuntimeError: Expected"
+    # ... and other shapes of the same cause stay in its group.
+    other = "RuntimeError: mat1 and mat2 shapes cannot be multiplied (8x16 and 32x64)"
+    assert report.cause("error", other) == (keys[0], "(8x16 and 32x64)")
+    assert report.cause("error", "TimeoutError: worker exceeded 600.0 s") == (
+        "TimeoutError: worker exceeded",
+        "600.0 s",
+    )
     # A message that starts with a number has nothing to cut at: the whole line.
     assert report.cause("error", "ValueError: 3 is odd")[0] == "ValueError: 3 is odd"
     # unavailable: the first line, numbers and all.

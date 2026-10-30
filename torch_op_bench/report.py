@@ -765,8 +765,10 @@ def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
 
 REASON_WIDTH = 200
 # An error's cause ends where its first number starts: what follows (sizes, free
-# memory, indices) differs from record to record of one cause.
-FIRST_NUMBER = re.compile(r"\d")
+# memory, indices) differs from record to record of one cause. A number is a token
+# of its own ("4.00", "cuda:0", "4096x1024"), not digits in a word ("mat1", "sm_80",
+# "2D", "BFloat16"), which name the cause (R1-31 F1).
+FIRST_NUMBER = re.compile(r"(?<![A-Za-z0-9_.])\d+(?:[.x]\d+)*(?![A-Za-z0-9_])")
 OOM_SPECIFICS = re.compile(
     r"Tried to allocate (?P<tried>[\d.]+ \w+)\..*? of which (?P<free>[\d.]+ \w+) is free"
 )
@@ -775,10 +777,10 @@ OOM_SPECIFICS = re.compile(
 def cause(status: str, reason: str | None) -> tuple[str, str]:
     """The group of a not-measured record: its cause, and what of its reason's first
     line the cause leaves out. For an ``error``, the cause is the message up to its
-    first number, with the unfinished sentence there dropped ("OutOfMemoryError: CUDA
-    out of memory. Tried to allocate 4.00 GiB. …" is "OutOfMemoryError: CUDA out of
-    memory."); for ``unavailable``, whose reasons are written to be stable, the whole
-    first line."""
+    first number (``FIRST_NUMBER``), with the unfinished sentence there dropped
+    ("OutOfMemoryError: CUDA out of memory. Tried to allocate 4.00 GiB. …" is
+    "OutOfMemoryError: CUDA out of memory."); for ``unavailable``, whose reasons are
+    written to be stable, the whole first line."""
     line = (reason or "no reason recorded").strip().splitlines()[0]
     found = FIRST_NUMBER.search(line) if status == "error" else None
     if found is None:
@@ -786,16 +788,16 @@ def cause(status: str, reason: str | None) -> tuple[str, str]:
     head = line[: found.start()]
     # "…: CUDA out of memory. Tried to allocate " -> "…: CUDA out of memory."
     sentence = head.rfind(". ")
-    key = head[: sentence + 1] if sentence != -1 else head.rstrip()
-    name, colon, message = key.partition(":")
-    if not (message if colon and " " not in name else key).strip(" :"):
+    key = head[: sentence + 1] if sentence != -1 else head.rstrip(" ([{:,=")
+    name, colon, message = head.partition(":")
+    if not (message if colon and " " not in name else head).strip(" :([{,="):
         # The message starts with a number: no cause to cut it at.
         return line[:REASON_WIDTH], ""
     oom = OOM_SPECIFICS.search(line)
     if oom:
         rest = f"tried to allocate {oom['tried']}, {oom['free']} free"
     else:
-        rest = line[len(key) :].strip()
+        rest = line[len(key) :].strip(" :,=")
     return key[:REASON_WIDTH], rest
 
 

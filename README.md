@@ -413,12 +413,13 @@ torch-op-bench commits). Its sections:
    measured, and "Every control is within the limits" is said only when no row is
    flagged.
 6. **Not measured**: every `error` and `unavailable` record, grouped by cause, with
-   the number of records: for an `error`, the message up to its first number, less
-   the unfinished sentence there (one group for every CUDA out-of-memory error,
-   whatever the sizes); each row then names the entry, mode and case, and what the
-   cause left out (for out of memory, the size tried and the free memory). For
-   `unavailable`, whose reasons are written to be stable, the first line of the
-   reason.
+   the number of records: for an `error`, the message up to its first number (a
+   token of its own, such as `4.00`, `cuda:0` or `4096x1024`; digits inside a word,
+   as in `mat1`, `sm_80` or `2D`, are part of the cause), less the unfinished
+   sentence there (one group for every CUDA out-of-memory error, whatever the
+   sizes); each row then names the entry, mode and case, and what the cause left
+   out (for out of memory, the size tried and the free memory). For `unavailable`,
+   whose reasons are written to be stable, the first line of the reason.
 
 Numbers have 3 significant digits and memory is in MiB with one decimal.
 
