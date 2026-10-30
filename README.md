@@ -172,8 +172,9 @@ Each (case, implementation, mode) runs in a fresh worker
 (`python -m torch_op_bench.worker`, a JSON payload on stdin, one JSON record on
 stdout): the implementation's environment variables are applied, the inputs are
 built, availability is checked, `setup`, parity, `verify`, peak memory and timing run
-in that order. An exception, an out-of-memory error, a crash or a timeout becomes an
-`error` record and the sweep goes on.
+in that order. A point that runs out of the device's memory in any of them becomes an
+`unavailable` record (see `status` under "Results"); an exception, a crash or a
+timeout becomes an `error` record. Either way the sweep goes on.
 
 ## Benchmarking LCE
 
@@ -245,8 +246,8 @@ and 0.1:
 torch-op-bench run lce --device cuda
 ```
 
-On a 16 GiB GPU, run only the points that fit (the larger ones become `error`
-records with an out-of-memory traceback):
+On a 16 GiB GPU, run only the points that fit (the larger ones become `unavailable`
+records, "out of memory on" the device):
 
 ```sh
 torch-op-bench run lce --device cuda --case N=1024,V=32768 --case N=4096,V=65536
@@ -324,10 +325,10 @@ concatenation; `torch_op_bench.records.read(directory)` reads a tree and
 | `case`, `case_key`, `device_slug` | `{params, dtype, device}` (device normalised: `cuda` is `cuda:0`); its stable key; results subdirectory |
 | `implementation`, `mode`, `env_name`, `python` | what ran, where |
 | `settings` | `warmup`, `repeat`, `flush_l2`, `seed`, `timeout` |
-| `status`, `reason`, `traceback`, `stderr` | `ok`, `unavailable` or `error`, and why; `unavailable` has two sources, the implementation's `available()` (a package or an API missing) and its `setup` raising `spec.Unavailable` (the case cannot run here, e.g. a device the op does not support), both before anything is timed and without a traceback; `error` is for failures nobody foresaw |
+| `status`, `reason`, `traceback`, `stderr` | `ok`, `unavailable` or `error`, and why; `unavailable` has three sources, the implementation's `available()` (a package or an API missing) and its `setup` raising `spec.Unavailable` (the case cannot run here, e.g. a device the op does not support), both before anything is timed, and the point not fitting in the device's memory, wherever it runs out (`setup`, `parity`, `verify`, `memory`, `warmup`, `timing`): its reason's first line names the device ("out of memory on NVIDIA GeForce RTX 5060 Ti (15.6 GiB)"), its second the figures and the phase ("tried to allocate 4.00 GiB, 2.22 GiB free; 9.19 GiB allocated, 3.97 GiB reserved but unallocated; phase: timing"). Whether a point at the edge fits depends on the allocator's fragmentation in that build: such a record says it did not fit on this device in this build, and a rerun retries it. `unavailable` has no traceback; `error` is for failures nobody foresaw |
 | `times_ms` | all timing samples, in milliseconds (statistics are derived, `records.stats`) |
 | `memory` | `peak_bytes`, `baseline_bytes` (inputs allocated); `null` on CPU |
-| `parity` | `status` (`ok`, `fail`, `skipped`), `reason`, `metrics`, `tolerances`, `failed` |
+| `parity` | `status` (`ok`, `fail`, `skipped`), `reason`, `metrics`, `tolerances`, `failed`; `skipped` when the reference does not fit (`reference_fits`) or, against that estimate, runs out of memory ("reference out of memory: …", the record staying `ok`) |
 | `verify`, `work`, `info` | what `verify` returned; work units; the implementation's info |
 | `env`, `env_from`, `env_error` | provenance of the worker's interpreter (`worker`), or of the parent's when the worker produced no record (`runner`, without torch); why `env` is `null` if collecting it failed; `env.packages` maps each of the implementation's `packages` to its version (`null` if not installed), or, for a package installed from a VCS URL, to `{version, url, commit, requested}` from its `direct_url.json`; `env.package_root` the directory the worker imported torch-op-bench from; `env.torch.matmul` the process-wide settings that choose how matmuls round (`allow_tf32`, `allow_bf16_reduced_precision_reduction`, `allow_fp16_reduced_precision_reduction`, and, on builds whose reduced-precision flags are pairs `(reduced_precision, split_k)`, `allow_bf16_reduced_precision_reduction_split_k` and `allow_fp16_reduced_precision_reduction_split_k` (`null` otherwise), `fp32_precision`, `float32_matmul_precision`), as the worker had them after the run (`run --matmul-reduction strict` sets the reduced-precision ones; its `_split_k` fields stay `true`, since the second element of a pair only qualifies an allowed reduced-precision reduction: torch refuses `(True, False)` with "allow_splitk=False is not supported when reduced precision reductions are enabled", and `(False, True)` is no reduced-precision reduction at all): they change parity (bf16 reduced-precision reduction, on by default, doubles the `grad_hidden` error of chunked LCE at 128-row chunks) |
 
@@ -423,7 +424,9 @@ torch-op-bench commits). Its sections:
    sentence there (one group for every CUDA out-of-memory error, whatever the
    sizes); each row then names the entry, mode and case, and what the cause left
    out (for out of memory, the size tried and the free memory). For `unavailable`,
-   whose reasons are written to be stable, the first line of the reason.
+   whose reasons are written to be stable, the first line of the reason, and the
+   second line in each row (for a point out of memory, one group per device, each
+   row with its figures and phase).
 
 Numbers have 3 significant digits and memory is in MiB with one decimal.
 

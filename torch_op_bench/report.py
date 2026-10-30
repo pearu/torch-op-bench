@@ -693,7 +693,8 @@ def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
     ]
     count = {kind: sum(c["measured"] == kind for c in pairs) for kind in ("both", "one", "neither")}
     lines += [
-        f"{count['both']} pairs compared; {count['one']} with one side not measured"
+        f"{count['both']} pair{'' if count['both'] == 1 else 's'} compared; "
+        f"{count['one']} with one side not measured"
         f"{' (flagged below)' if count['one'] else ''}; {count['neither']} with neither "
         f"side measured.",
         "",
@@ -780,9 +781,13 @@ def cause(status: str, reason: str | None) -> tuple[str, str]:
     first number (``FIRST_NUMBER``), with the unfinished sentence there dropped
     ("OutOfMemoryError: CUDA out of memory. Tried to allocate 4.00 GiB. …" is
     "OutOfMemoryError: CUDA out of memory."); for ``unavailable``, whose reasons are
-    written to be stable, the whole first line."""
-    line = (reason or "no reason recorded").strip().splitlines()[0]
-    found = FIRST_NUMBER.search(line) if status == "error" else None
+    written to be stable, the whole first line, and the second line (an out-of-memory
+    point's figures) is what it leaves out."""
+    lines = (reason or "no reason recorded").strip().splitlines()
+    line = lines[0]
+    if status != "error":
+        return line[:REASON_WIDTH], lines[1].strip() if len(lines) > 1 else ""
+    found = FIRST_NUMBER.search(line)
     if found is None:
         return line[:REASON_WIDTH], ""
     head = line[: found.start()]

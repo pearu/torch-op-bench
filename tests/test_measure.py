@@ -87,6 +87,19 @@ def test_reset_runs_before_every_call_outside_timing():
     assert events == ["reset", "fn"] * 3
 
 
+def test_on_phase_names_warmup_and_timing():
+    events = []
+    time_callable(
+        lambda: events.append("fn"),
+        device="cpu",
+        warmup=2,
+        repeat=1,
+        flush_l2=False,
+        on_phase=events.append,
+    )
+    assert events == ["warmup", "fn", "fn", "timing", "fn"]
+
+
 def test_backward_style_does_not_accumulate():
     import toy_op
 

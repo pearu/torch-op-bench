@@ -38,6 +38,7 @@ def time_callable(
     flush_l2: bool,
     flush_bytes: int = L2_FLUSH_BYTES,
     reset: Callable[[], Any] | None = None,
+    on_phase: Callable[[str], Any] | None = None,
 ) -> list[float]:
     """Run ``fn`` ``warmup`` times untimed, then ``repeat`` times timed.
 
@@ -45,15 +46,20 @@ def time_callable(
     bracketed by a pre-created pair of events and the host synchronises once, after
     the loop. ``reset`` (e.g. clearing gradients) runs before every call, and with
     ``flush_l2`` a ``flush_bytes`` buffer is overwritten before each repetition; both
-    outside the timed region.
+    outside the timed region. ``on_phase`` is told ``"warmup"`` before the warmup and
+    ``"timing"`` before the timed repetitions.
     """
     device = torch.device(device)
+    if on_phase is None:
+        on_phase = _nothing
+    on_phase("warmup")
     flush = torch.empty(flush_bytes, dtype=torch.uint8, device=device) if flush_l2 else None
     if reset is None:
         reset = _nothing
     for _ in range(warmup):
         reset()
         fn()
+    on_phase("timing")
     if device.type == "cuda":
         with torch.cuda.device(device):
             starts = [torch.cuda.Event(enable_timing=True) for _ in range(repeat)]
@@ -106,5 +112,5 @@ def peak_memory(
     return {"peak_bytes": peak, "baseline_bytes": baseline}
 
 
-def _nothing() -> None:
+def _nothing(*args: Any) -> None:
     pass
