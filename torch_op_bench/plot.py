@@ -91,6 +91,15 @@ METRIC_LABELS = {
     "throughput_ratio": "throughput ratio (impl / baseline)",
     "time_x_peak_ratio": "time × peak ratio (impl / baseline)",
 }
+# A linear y axis whose values reach above SCALE_ABOVE, or stay below SCALE_BELOW, is
+# drawn in a unit scaled by a power of 10³, which its label names ("time × peak
+# (10⁶ ms·MiB)"): with its tick labels never in scientific notation or offset
+# (ScalarFormatter), no panel has an offset text above it, which would make its row
+# taller than the others (N2, R1-30). The power is chosen per metric of a figure, so
+# a row of panels reads in one unit.
+SCALE_ABOVE = 1e5
+SCALE_BELOW = 1e-4
+SUPERSCRIPT = str.maketrans("-0123456789", "⁻⁰¹²³⁴⁵⁶⁷⁸⁹")
 NUMERIC = ("median_ms", "min_ms", "mean_ms", "iqr_ms", "tokens_per_s", "tflops", "time_x_peak")
 MEMORY = ("peak_above_baseline", "peak_bytes")
 DEFAULT_PARITY = {"fwd_bwd": "parity_grad_hidden_rel_l2", "fwd": "parity_loss_rel_err"}
@@ -345,6 +354,35 @@ def left_out(rows: Sequence[Row], metrics: Sequence[str]) -> str:
     return f"Left out: {', '.join(parts)} (gaps in the lines)."
 
 
+def y_exponent(values: Sequence[float | None]) -> int:
+    """The power of 10 (a multiple of 3) a linear axis of ``values`` is drawn in."""
+    top = max((abs(v) for v in values if v is not None and math.isfinite(v)), default=0.0)
+    if top == 0 or SCALE_BELOW <= top <= SCALE_ABOVE:
+        return 0
+    return 3 * math.floor(math.log10(top) / 3)
+
+
+def scaled_label(label: str, exponent: int) -> str:
+    """``label`` in the unit scaled by 10**exponent: "time × peak (10⁶ ms·MiB)";
+    a label without a unit gains one, "tokens/s (×10³)"."""
+    if not exponent:
+        return label
+    power = "10" + str(exponent).translate(SUPERSCRIPT)
+    head, sep, tail = label.partition(" (")
+    if sep and tail.endswith(")"):
+        return f"{head} ({power} {tail}"
+    return f"{label} (×{power})"
+
+
+def _plain_ticks(ax: Any) -> None:
+    """Tick labels of a linear y axis as plain numbers: no offset, no 1eN above."""
+    from matplotlib.ticker import ScalarFormatter
+
+    formatter = ScalarFormatter(useOffset=False, useMathText=True)
+    formatter.set_scientific(False)
+    ax.yaxis.set_major_formatter(formatter)
+
+
 def _positions(values: Sequence[Any]) -> tuple[list[float], bool]:
     """x positions: the values themselves (log scale) for numbers, else indices."""
     numeric = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values)
@@ -366,8 +404,10 @@ def _draw_panel(
     figure: str,
     handles: dict[str, Any],
     coincident: dict[tuple[int, str, str], list[tuple[str, str]]],
+    exponent: int = 0,
 ) -> list[dict[str, Any]]:
-    """One metric against one axis, for every result set; returns the CSV rows.
+    """One metric against one axis, for every result set, its y drawn in units of
+    10**exponent; returns the CSV rows (with the values, not scaled).
     Each pair of coincident series (``coincident_pairs``) is added to ``coincident``
     as (set index, upper, lower) -> the (metric, axis) panels."""
     from matplotlib.lines import Line2D
@@ -452,13 +492,14 @@ def _draw_panel(
     for k, s in enumerate(series):
         levels[k] = levels[on[k]] + 1 if k in on else 0
         style, color, level = s["style"], s["color"], levels[k]
-        scale = COINCIDENT_SCALE**level
         # The baseline on top of an equal counterpart, which must not hide it; a
         # coincident series on top of the one it lies on.
         z = (3 if s["role"] == "baseline" else 2) + 2 * level
+        scale = COINCIDENT_SCALE**level
+        unit = 10.0**exponent
         ax.plot(
             xs,
-            s["ys"],
+            [y / unit for y in s["ys"]],
             color=color,
             linestyle="--" if level else s["line"],
             linewidth=style["linewidth"] * scale,
@@ -468,7 +509,7 @@ def _draw_panel(
             if pts:
                 ax.plot(
                     [p[0] for p in pts],
-                    [p[1] for p in pts],
+                    [p[1] / unit for p in pts],
                     linestyle="none",
                     marker=style["marker"],
                     markersize=style["size"] * scale + (2 if face == "none" else 0),
@@ -483,11 +524,12 @@ def _draw_panel(
     ax.set_xticks(xs)
     ax.set_xticklabels([str(v) for v in values])
     ax.set_xlabel(axis)
-    ax.set_ylabel(
-        ylabel_text(METRIC_LABELS.get(metric, metric.removeprefix(analysis.PARITY_PREFIX)))
-    )
+    label = METRIC_LABELS.get(metric, metric.removeprefix(analysis.PARITY_PREFIX))
+    ax.set_ylabel(ylabel_text(scaled_label(label, exponent)))
     if metric.startswith(analysis.PARITY_PREFIX):
         ax.set_yscale("log")
+    else:
+        _plain_ticks(ax)
     ax.grid(True, alpha=0.3)
     return plotted
 
@@ -566,6 +608,17 @@ def _figure(
     coincident: dict[tuple[int, str, str], list[tuple[str, str]]] = {}
     plotted: list[dict[str, Any]] = []
     for i, metric in enumerate(metrics):
+        exponent = 0
+        if not metric.startswith(analysis.PARITY_PREFIX):
+            exponent = y_exponent(
+                [
+                    _value(r, metric)
+                    for _, rows, _ in sets
+                    for axis in axes
+                    for r in analysis.sweeps(rows, point)[axis]
+                    if r.get("status") == "ok"
+                ]
+            )
         for j, axis in enumerate(axes):
             ax = grid[i][j]
             plotted += _draw_panel(
@@ -581,6 +634,7 @@ def _figure(
                 path.stem,
                 handles,
                 coincident,
+                exponent,
             )
             if ratio_line:
                 base = STYLE["baseline"]
@@ -771,6 +825,10 @@ def reduction_figure(
     xs = list(range(len(names)))
     for ax, metric in zip((row[0] for row in axes), metrics, strict=True):
         parity = metric != "median_ms"
+        exponent = y_exponent(
+            [_reduction_value(e, metric, which) for e in entries for which in REDUCTION_SETS]
+        )
+        unit = 10.0**exponent
         for x, entry in zip(xs, entries, strict=True):
             color = palette.get(entry["implementation"], "#7f7f7f")
             for offset, which in zip((-0.2, 0.2), REDUCTION_SETS, strict=True):
@@ -780,7 +838,7 @@ def reduction_figure(
                 strict_bar = which == "strict"
                 bars = ax.bar(
                     x + offset,
-                    y,
+                    y / unit,
                     width=0.4,
                     color="white" if strict_bar else color,
                     edgecolor=color,
@@ -789,7 +847,7 @@ def reduction_figure(
                 (text,) = ax.bar_label(
                     bars, labels=[f"{y:.3g}"], padding=BAR_LABEL_PAD, fontsize=size
                 )
-                labels.setdefault(ax, []).append((text, y))
+                labels.setdefault(ax, []).append((text, y / unit))
                 row = entry[which]
                 plotted.append(
                     {
@@ -815,7 +873,8 @@ def reduction_figure(
                     }
                 )
         label = METRIC_LABELS.get(metric, metric) if not parity else metric
-        ax.set_ylabel(ylabel_text(label))
+        ax.set_ylabel(ylabel_text(scaled_label(label, exponent)))
+        _plain_ticks(ax)
         # Linear from zero (R1-26 F1): a bar's length is its value, so the pair's
         # lengths compare as the values do, and a zero parity error shows as zero.
         ax.set_ylim(bottom=0)

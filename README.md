@@ -454,9 +454,13 @@ parity) is a gap, and the footer counts what was left out and why. Two series of
 panel whose values agree within 0.5 % at every point would hide one another: the
 later one is drawn on top, dashed, at half the line width and marker size, so both
 colours show, and the footer names each such pair and its panels ("Coincident, …").
-The footer also gives the provenance (each environment's torch and torch-op-bench
-commit, and the hosts); a figure without it is not a result. `--metric`, `--sweep`
-and `--impl` restrict what is drawn (the baseline is always drawn).
+A linear y axis whose values exceed 10⁵, or stay below 10⁻⁴, is drawn in a unit
+scaled by a power of 10³, which its label names ("time × peak (10⁶ ms·MiB)"), the
+same in every panel of a row; tick labels are plain numbers, with no offset or "1e7"
+above the panel. The footer also gives the provenance (each environment's torch and
+torch-op-bench commit, and the hosts); a figure without it is not a result.
+`--metric`, `--sweep` and `--impl` restrict what is drawn (the baseline is always
+drawn).
 
 Next to every PNG, a CSV of the same name holds exactly the plotted points, one row
 per point: the metric, axis, x, implementation, environment, role, y, parity status,

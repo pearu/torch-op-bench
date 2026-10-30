@@ -1,5 +1,6 @@
 import csv
 import itertools
+import math
 import re
 import struct
 import sys
@@ -751,34 +752,86 @@ def test_gaps_between_bands(synth, synth_strict, tmp_path, monkeypatch, kwargs):
         plt.close(fig)
 
 
-def test_panel_gap_measured(synth, tmp_path, monkeypatch):
-    # The bound on the gap between stacked panels is not met vacuously: with
-    # tight_layout's former h_pad (1.08 font sizes, 10.8 pt) the same measurement
-    # reports a gap above it.
+def nightly_time_x_peak(synth):
+    """fwd_bwd rows of the synthetic set with time × peak planted in the 10⁶–10⁷ range
+    of I1-12's records (ms·MiB), where an offset text "1e7" stood above the panel."""
+    rows = [r for r in analysis.to_rows(load_quiet(synth)) if r["mode"] == "fwd_bwd"]
+    rows = [r for r in rows if r["dtype"] == "float32"]
+    for i, r in enumerate(rows):
+        if r.get("time_x_peak") is not None:
+            r["time_x_peak"] = 1.4e6 + 9.7e5 * (i % 13)
+    return rows
+
+
+PANEL_GAP_CASES = {
+    # tight_layout's former h_pad (1.08 font sizes, 10.8 pt).
+    "h_pad": (
+        lambda synth: [r for r in analysis.to_rows(load_quiet(synth)) if r["mode"] == "fwd"],
+        ["median_ms", "tokens_per_s"],
+        {"PANEL_PAD": 1.08},
+    ),
+    # R1-30 N2 (R1-28's "nightly time_x_peak"): five metrics, time × peak in the
+    # 10⁶–10⁷ range, in plain numbers of the unit as it was (no scaled unit).
+    "time_x_peak": (
+        nightly_time_x_peak,
+        ["median_ms", "time_x_peak", "parity_grad_rel", "tflops", "iqr_ms"],
+        {"SCALE_ABOVE": math.inf, "_plain_ticks": lambda ax: None},
+    ),
+}
+
+
+@pytest.mark.parametrize("case", PANEL_GAP_CASES)
+def test_panel_gap_measured(synth, tmp_path, monkeypatch, case):
+    # The bound on the gap between stacked panels is not met vacuously: with the
+    # layout as it was (``broken``) the same measurement reports a gap above it, and
+    # as it is, every gap is within it.
     import matplotlib.pyplot as plt
 
-    closed = []
-    monkeypatch.setattr(plt, "close", closed.append)
-    monkeypatch.setattr(plot, "PANEL_PAD", 1.08)
-    rows = [r for r in analysis.to_rows(load_quiet(synth)) if r["mode"] == "fwd"]
-    rows = [r for r in rows if r["dtype"] == "float32"]
-    plot._figure(
-        tmp_path / "two.png",
-        [(None, rows, None)],
-        ["median_ms", "tokens_per_s"],
-        ["M"],
-        S.DEFAULT,
-        "base",
-        "synth: fwd",
-        ["footer"],
-    )
-    monkeypatch.undo()
-    (fig,) = closed
-    gaps = rendered_gaps(fig)
-    gap, bound = gaps["panels-0-1"]
-    assert gap > bound, (gap, bound)
-    assert panel_gaps(gaps) == ["panels-0-1"]
-    plt.close(fig)
+    select, metrics, broken = PANEL_GAP_CASES[case]
+    rows = [r for r in select(synth) if r["dtype"] == "float32"]
+    figures = {}
+    for name, patch in (("broken", broken), ("now", {})):
+        closed = []
+        monkeypatch.setattr(plt, "close", closed.append)
+        for attr, value in patch.items():
+            monkeypatch.setattr(plot, attr, value)
+        plot._figure(
+            tmp_path / f"{name}.png",
+            [(None, rows, None)],
+            metrics,
+            ["M"],
+            S.DEFAULT,
+            "base",
+            "synth",
+            ["footer"],
+        )
+        monkeypatch.undo()
+        (figures[name],) = closed
+    gaps = rendered_gaps(figures["broken"])
+    assert panel_gaps(gaps) == [f"panels-{i}-{i + 1}" for i in range(len(metrics) - 1)]
+    assert max(gaps[name][0] - gaps[name][1] for name in panel_gaps(gaps)) > 0, gaps
+    for name, (gap, bound) in rendered_gaps(figures["now"]).items():
+        assert -0.5 <= gap <= bound, (case, name, gap, bound)
+    if case == "time_x_peak":
+        broken_offsets = [ax.yaxis.get_offset_text().get_text() for ax in figures["broken"].axes]
+        assert any(broken_offsets)  # the 1e6 above the panel
+        figures["now"].canvas.draw()
+        assert [ax.yaxis.get_offset_text().get_text() for ax in figures["now"].axes] == [""] * 5
+        assert figures["now"].axes[1].get_ylabel() == "time × peak\n(10⁶ ms·MiB)"
+    for fig in figures.values():
+        plt.close(fig)
+
+
+def test_y_exponent_and_scaled_label():
+    assert plot.y_exponent([1.4e6, 9.9e6, None]) == 6
+    assert plot.y_exponent([2e5]) == 3
+    assert plot.y_exponent([1e5, 3.0]) == 0  # at most SCALE_ABOVE: plain
+    assert plot.y_exponent([2.25e-6, 0.0]) == -6
+    assert plot.y_exponent([0.0, None]) == 0
+    assert plot.scaled_label("time × peak (ms·MiB)", 6) == "time × peak (10⁶ ms·MiB)"
+    assert plot.scaled_label("tokens/s", 3) == "tokens/s (×10³)"
+    assert plot.scaled_label("loss_rel_err", -6) == "loss_rel_err (×10⁻⁶)"
+    assert plot.scaled_label("median (ms)", 0) == "median (ms)"
 
 
 def drawn_texts(fig):
@@ -971,7 +1024,12 @@ def test_ylabels_split_before_parentheses(synth, tmp_path, monkeypatch, kwargs):
     written = draw(synth, tmp_path / "out", dtype="float32", overlay=other, **kwargs)
     assert {p.name.split("-")[0] for p in written} == {"grid", "ratio", "overlay"}
     monkeypatch.undo()
-    labels = {plot.METRIC_LABELS.get(m, m) for m in plot.METRIC_LABELS}
+    # A label as in METRIC_LABELS, or in a scaled unit (synth's TFLOP/s are ~10⁻⁶).
+    labels = {
+        plot.scaled_label(label, k)
+        for label in plot.METRIC_LABELS.values()
+        for k in range(-12, 13, 3)
+    }
     seen = set()
     for path, fig in zip(written, closed, strict=True):
         for ax in fig.axes:
