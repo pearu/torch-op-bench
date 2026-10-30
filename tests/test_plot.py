@@ -234,15 +234,23 @@ def colours_near(fig, ax, x, y, colours, radius=6):
     return found
 
 
+@pytest.mark.parametrize("twins", [1, 3])
 @pytest.mark.parametrize("original", ["compiled", "base"])
-def test_coincident_series_both_shown(synth, tmp_path, monkeypatch, original):
+def test_coincident_series_both_shown(synth, tmp_path, monkeypatch, original, twins):
     # F7 (I1-12): a series equal to another one in a panel is drawn on top of it,
     # dashed and smaller, so both colours show at a shared point; the footer says so.
-    # A twin of a counterpart, and of the baseline (which keeps its style).
+    # A twin of a counterpart, and of the baseline (which keeps its style). Three
+    # twins (R1-33 F1): each a level up on the one before, so all four colours show.
     import matplotlib.pyplot as plt
 
     rows = analysis.at(analysis.to_rows(load_quiet(synth)), dtype="float32", mode="fwd")
-    rows += [{**r, "implementation": "twin"} for r in rows if r["implementation"] == original]
+    names = ["twin", "twin2", "twin3"][:twins]
+    rows += [
+        {**r, "implementation": name}
+        for name in names
+        for r in rows
+        if r["implementation"] == original
+    ]
     palette = plot.colors(rows, "base")
     closed = []
     monkeypatch.setattr(plt, "close", closed.append)
@@ -260,46 +268,99 @@ def test_coincident_series_both_shown(synth, tmp_path, monkeypatch, original):
     monkeypatch.undo()
     (fig,) = closed
     y = S.median_ms(original, "fwd", "float32", S.DEFAULT)
-    both = {palette[original], palette["twin"]}
-    assert len(both) == 2
+    stack = [original, *names]
+    every = {palette[name] for name in stack}
+    assert len(every) == len(stack)
     for ax in fig.axes[:2]:  # median against M and K
-        assert colours_near(fig, ax, S.DEFAULT[ax.get_xlabel()], y, both) == both
-    twin = [line for line in fig.axes[0].lines if line.get_color() == palette["twin"]]
-    under = [line for line in fig.axes[0].lines if line.get_color() == palette[original]]
-    assert min(line.get_zorder() for line in twin) > max(line.get_zorder() for line in under)
-    assert {line.get_linestyle() for line in twin if line.get_linestyle() != "None"} == {"--"}
+        assert colours_near(fig, ax, S.DEFAULT[ax.get_xlabel()], y, every) == every
+
+    def lines_of(name):
+        return [line for line in fig.axes[0].lines if line.get_color() == palette[name]]
+
     # The one below keeps its style (base_other, black too, is a dotted control).
-    style = plot.STYLE["baseline" if original == "base" else "counterpart"]
+    role = "baseline" if original == "base" else "counterpart"
+    style = plot.STYLE[role]
+    under = lines_of(original)
     lines = [line for line in under if line.get_linestyle() not in ("None", ":")]
     assert [(line.get_linestyle(), line.get_linewidth()) for line in lines] == [
         (style["linestyle"], style["linewidth"])
     ]
-    width = plot.STYLE["counterpart"]["linewidth"] * plot.COINCIDENT_SCALE
-    assert {line.get_linewidth() for line in twin if line.get_linestyle() != "None"} == {width}
+    # Each twin a level up, dashed at half its width and marker size; from level 2 on
+    # shifted left, then right, by half the bottom's marker size per step.
+    twin_style = plot.STYLE["counterpart"]
+    scale = plot.COINCIDENT_SCALE
+    ax = fig.axes[0]
+    to_points = 72.0 / fig.dpi
+    centre = ax.transData.transform((S.DEFAULT["M"], y))[0] * to_points
+    for level, name in enumerate(names, start=1):
+        upper = lines_of(name)
+        assert min(line.get_zorder() for line in upper) > max(line.get_zorder() for line in under)
+        drawn = [line for line in upper if line.get_linestyle() != "None"]
+        assert [(line.get_linestyle(), line.get_linewidth()) for line in drawn] == [
+            ("--", twin_style["linewidth"] * scale)
+        ]
+        markers = [line for line in upper if line.get_linestyle() == "None"]
+        assert {line.get_markersize() for line in markers} == {twin_style["size"] * scale}
+        step = {1: 0, 2: -1, 3: 1}[level]
+        for line in markers:
+            x = line.get_transform().transform((S.DEFAULT["M"], y))[0] * to_points
+            assert x - centre == pytest.approx(step * plot.COINCIDENT_DODGE * style["size"])
+        under = upper
     footer = next(t for t in fig.texts if t.get_gid() == "footer").get_text()
-    clause = f"twin on {original} (fwd: median, tokens/s)"
-    assert clause in footer.replace("\n", " ")
+    for upper in names:  # the footer names the first one each lies on
+        clause = f"{upper} on {original} (fwd: median, tokens/s)"
+        assert clause in footer.replace("\n", " ")
     assert footer.startswith("Left out:")
     plt.close(fig)
 
 
 def test_coincident_pairs():
-    nan = float("nan")
+    # In display points (P1, I1-14 round 2): within half the lower series' marker size
+    # (5 pt here) at every x.
+    size = 5
+    limit = plot.COINCIDENT_MARKER_FRACTION * size
+    assert limit == 2.5
 
-    def series(ys, set_=0):
-        return {"set": set_, "ys": ys}
+    def series(ys, set_=0, name="s", control_of=None):
+        display = [None if y is None else (10.0 * i, y) for i, y in enumerate(ys)]
+        return {
+            "set": set_,
+            "name": name,
+            "control_of": control_of,
+            "style": {"size": size},
+            "display": display,
+        }
 
     drawn = [
-        series([1.0, 2.0, nan]),
-        series([1.004, 1.995, nan]),  # within 0.5 %: on the first
-        series([1.0, 2.0, 3.0]),  # another x set
-        series([1.0, 2.02, nan]),  # 1 % off at one x
-        series([1.0, 2.0, nan], set_=1),  # another result set
-        series([nan, nan, nan]),
-        series([nan, nan, nan]),  # nothing drawn: nothing coincides
-        series([1.0, 2.0, nan]),  # on the first, not the second
+        series([100.0, 200.0, None], name="a"),
+        series([100.0 + 2.4, 200.0 - 2.4, None], name="b"),  # just inside: on a
+        series([100.0, 200.0, 300.0]),  # another x set
+        series([100.0, 200.0 + 2.6, None]),  # just outside at one x
+        series([100.0, 200.0, None], set_=1),  # another result set
+        series([None, None, None]),
+        series([None, None, None]),  # nothing drawn: nothing coincides
+        series([100.0, 200.0, None], name="c"),  # on a, the first
+        series([100.0, 200.0, None], name="a_ctl", control_of="a"),  # on b, not on a
     ]
-    assert plot.coincident_pairs(drawn) == {1: 0, 7: 0}
+    assert plot.coincident_pairs(drawn) == {1: 0, 7: 0, 8: 1}
+    # One stack of a, b, c, a_ctl: four levels, none shared, even where two lie on
+    # the same one; the control is in it through b.
+    levels = plot.coincident_levels(drawn)
+    assert [levels[k] for k in (0, 1, 7, 8)] == [(k, 4, 0) for k in range(4)]
+    assert levels[2] == (0, 1, 2) and levels[4] == (0, 1, 4)
+    # A control alone on its original is not coincident (P1, I1-14 round 2).
+    for pair in ([drawn[0], drawn[8]], [drawn[8], drawn[0]]):
+        assert plot.coincident_pairs(pair) == {}
+        assert plot.coincident_levels(pair) == {0: (0, 1, 0), 1: (0, 1, 1)}
+    # Two on one that are not on each other (2.4 pt either side of it, 4.8 pt apart):
+    # still a level each, so the later does not cover the earlier.
+    fan = [
+        series([100.0, 200.0, None], name="a"),
+        series([102.4, 200.0, None], name="b"),
+        series([97.6, 200.0, None], name="c"),
+    ]
+    assert plot.coincident_pairs(fan) == {1: 0, 2: 0}
+    assert plot.coincident_levels(fan) == {0: (0, 3, 0), 1: (1, 3, 0), 2: (2, 3, 0)}
     text = plot.coincident_text(
         {(0, "b", "a"): [("median_ms", "M"), ("median_ms", "K"), ("tokens_per_s", "M")]},
         0,

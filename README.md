@@ -451,9 +451,13 @@ invocation. A point whose parity failed has a hollow marker, so a fast but wrong
 number does not read as a win: in a parity panel when that panel's metric failed, in
 every other panel when any metric did. A missing point (`error`, `unavailable`, no
 parity) is a gap, and the footer counts what was left out and why. Two series of a
-panel whose values agree within 0.5 % at every point would hide one another: the
-later one is drawn on top, dashed, at half the line width and marker size, so both
-colours show, and the footer names each such pair and its panels ("Coincident, …").
+panel coincide when, at every point, they lie within half a marker of each other as
+drawn (a control and its own original excepted: the control is styled apart). Series
+that coincide, directly or through another, are stacked in drawing order: each one
+above the first is drawn on top, dashed, at half its line width and marker size, and
+from the third on also shifted sideways, alternately left and right, by half a
+marker per step, so every colour shows. The footer names each such series and the
+first one it lies on, with its panels ("Coincident, …").
 A linear y axis whose values exceed 10⁵, or stay below 10⁻⁴, is drawn in a unit
 scaled by a power of 10³, which its label names ("time × peak (10⁶ ms·MiB)"), the
 same in every panel of a row; tick labels are plain numbers, with no offset or "1e7"

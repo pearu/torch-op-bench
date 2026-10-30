@@ -69,12 +69,22 @@ COLORS = (
 CONTROL_MARKERS = ("s", "^", "D", "v", "P", "X", "<", ">")
 # The overlay tells its two result sets apart by line style.
 OVERLAY_LINESTYLE = ("-", "--")
-# Two series of a panel coincide when they have the same x and their y agree within
-# this fraction at every x. The later one (the baseline is drawn first) is drawn on top
-# of the other, dashed, at COINCIDENT_SCALE of its line width and marker size, so both
-# colours show at every shared point (F7, I1-12).
-COINCIDENT_TOLERANCE = 0.005
+# Two series of a panel coincide when they have values at the same x and, at every
+# one, their points lie within COINCIDENT_MARKER_FRACTION of the marker size of each
+# other, in display points, after the layout (P1, I1-14 round 2): the upper marker
+# would cover the lower. A control and its original never do: the control has its own
+# style by design. Series that coincide, directly or through another, form a stack:
+# each is drawn a level above those drawn before it (the baseline is drawn first).
+# Levels above the bottom are dashed, at COINCIDENT_SCALE of their line width and
+# marker size; from level 2 on each is also shifted sideways, alternately left and
+# right, by COINCIDENT_DODGE of the bottom's marker size per step, so the small markers
+# sit side by side and every colour shows at a shared point (F7 of I1-12, F1 of
+# R1-33).
+COINCIDENT_MARKER_FRACTION = 0.5
 COINCIDENT_SCALE = 0.5
+COINCIDENT_DODGE = 0.5
+# Layouts tried until the coincident series found on one are those its footer names.
+COINCIDENT_PASSES = 3
 
 METRIC_LABELS = {
     "median_ms": "median (ms)",
@@ -403,13 +413,13 @@ def _draw_panel(
     baseline: str,
     figure: str,
     handles: dict[str, Any],
-    coincident: dict[tuple[int, str, str], list[tuple[str, str]]],
+    drawn: list[tuple[Any, str, str, list[dict[str, Any]]]],
     exponent: int = 0,
 ) -> list[dict[str, Any]]:
     """One metric against one axis, for every result set, its y drawn in units of
     10**exponent; returns the CSV rows (with the values, not scaled).
-    Each pair of coincident series (``coincident_pairs``) is added to ``coincident``
-    as (set index, upper, lower) -> the (metric, axis) panels."""
+    (ax, metric, axis, series) is appended to ``drawn``: each series with its artists,
+    for ``stack_coincident`` once the layout is final."""
     from matplotlib.lines import Line2D
 
     all_swept = [analysis.sweeps(rows, point)[axis] for _, rows, _ in sets]
@@ -462,6 +472,10 @@ def _draw_panel(
                 {
                     "set": index,
                     "name": name,
+                    "control_of": next(
+                        (r.get("control_of") for r in by_x.values() if r.get("control_of")),
+                        None,
+                    ),
                     "role": role,
                     "style": style,
                     "color": color,
@@ -484,40 +498,35 @@ def _draw_panel(
                     label=key,
                 ),
             )
-    on = coincident_pairs(series)
-    for upper, lower in on.items():
-        key = (series[upper]["set"], series[upper]["name"], series[lower]["name"])
-        coincident.setdefault(key, []).append((metric, axis))
-    levels: dict[int, int] = {}
-    for k, s in enumerate(series):
-        levels[k] = levels[on[k]] + 1 if k in on else 0
-        style, color, level = s["style"], s["color"], levels[k]
-        # The baseline on top of an equal counterpart, which must not hide it; a
-        # coincident series on top of the one it lies on.
-        z = (3 if s["role"] == "baseline" else 2) + 2 * level
-        scale = COINCIDENT_SCALE**level
-        unit = 10.0**exponent
-        ax.plot(
+    unit = 10.0**exponent
+    for s in series:
+        style, color = s["style"], s["color"]
+        # The baseline on top of an equal counterpart, which must not hide it.
+        z = 3 if s["role"] == "baseline" else 2
+        (line,) = ax.plot(
             xs,
             [y / unit for y in s["ys"]],
             color=color,
-            linestyle="--" if level else s["line"],
-            linewidth=style["linewidth"] * scale,
+            linestyle=s["line"],
+            linewidth=style["linewidth"],
             zorder=z,
         )
+        s["artists"] = [(line, 0.0)]
         for pts, face in zip(s["points"], (color, "none"), strict=True):
             if pts:
-                ax.plot(
+                (markers_,) = ax.plot(
                     [p[0] for p in pts],
                     [p[1] / unit for p in pts],
                     linestyle="none",
                     marker=style["marker"],
-                    markersize=style["size"] * scale + (2 if face == "none" else 0),
+                    markersize=style["size"] + (2 if face == "none" else 0),
                     color=color,
                     markerfacecolor=face,
                     markeredgecolor=color,
                     zorder=z,
                 )
+                s["artists"].append((markers_, 2.0 if face == "none" else 0.0))
+    drawn.append((ax, metric, axis, series))
     if log:
         ax.set_xscale("log", base=2)
         ax.minorticks_off()
@@ -534,25 +543,104 @@ def _draw_panel(
     return plotted
 
 
+def _coincide(lower: Mapping[str, Any], upper: Mapping[str, Any]) -> bool:
+    """Whether two series of a panel coincide (COINCIDENT_MARKER_FRACTION); see
+    ``coincident_pairs``."""
+    if lower["set"] != upper["set"]:
+        return False
+    if upper.get("control_of") == lower["name"] or lower.get("control_of") == upper["name"]:
+        return False
+    a, b = lower["display"], upper["display"]
+    if [p is None for p in a] != [p is None for p in b]:
+        return False
+    limit = COINCIDENT_MARKER_FRACTION * lower["style"]["size"]
+    pairs = [(p, q) for p, q in zip(a, b, strict=True) if p is not None]
+    return bool(pairs) and all(p == q or math.dist(p, q) <= limit for p, q in pairs)
+
+
 def coincident_pairs(series: Sequence[Mapping[str, Any]]) -> dict[int, int]:
-    """Of a panel's series (``set``, ``ys`` with NaN for no value), in drawing order:
-    each one that coincides with an earlier one of its set -> that one (the first)."""
-
-    def same(a: Sequence[float], b: Sequence[float]) -> bool:
-        if [math.isnan(y) for y in a] != [math.isnan(y) for y in b]:
-            return False
-        pairs = [(x, y) for x, y in zip(a, b, strict=True) if not math.isnan(x)]
-        return bool(pairs) and all(
-            abs(x - y) <= COINCIDENT_TOLERANCE * max(abs(x), abs(y)) for x, y in pairs
-        )
-
+    """Of a panel's series (``set``, ``name``, ``control_of``, the marker ``size`` of
+    its ``style``, ``display``: each value's (x, y) in display points, None for no
+    value), in drawing order: each one that coincides with an earlier one of its set
+    -> the first such one, the one the footer names."""
     on = {}
     for k, s in enumerate(series):
         for j, t in enumerate(series[:k]):
-            if t["set"] == s["set"] and same(t["ys"], s["ys"]):
+            if _coincide(t, s):
                 on[k] = j
                 break
     return on
+
+
+def coincident_levels(series: Sequence[Mapping[str, Any]]) -> dict[int, tuple[int, int, int]]:
+    """Each series of a panel (as for ``coincident_pairs``) -> (its level, the number
+    of levels of its stack, its stack's bottom series). A stack is a series with every
+    one that coincides with it, directly or through another; each member is a level
+    above the members drawn before it, so no two share a level (R1-33 F1)."""
+    root = list(range(len(series)))
+
+    def find(k: int) -> int:
+        while root[k] != k:
+            k = root[k]
+        return k
+
+    for k, s in enumerate(series):
+        for j, t in enumerate(series[:k]):
+            if _coincide(t, s):
+                a, b = find(j), find(k)
+                root[max(a, b)] = min(a, b)
+    level: dict[int, int] = {}
+    height: dict[int, int] = {}
+    for k in range(len(series)):
+        bottom = find(k)
+        level[k] = height.get(bottom, 0)
+        height[bottom] = level[k] + 1
+    return {k: (level[k], height[find(k)], find(k)) for k in range(len(series))}
+
+
+def stack_coincident(
+    fig: Any, drawn: Sequence[tuple[Any, str, str, Sequence[dict[str, Any]]]]
+) -> dict[tuple[int, str, str], list[tuple[str, str]]]:
+    """Restyle the coincident series of every drawn panel (``_draw_panel``), measured
+    in display points on ``fig`` as it is laid out now; returns (set index, upper,
+    lower) -> the (metric, axis) panels, for the footer."""
+    from matplotlib.transforms import offset_copy
+
+    coincident: dict[tuple[int, str, str], list[tuple[str, str]]] = {}
+    to_points = 72.0 / fig.dpi
+    for ax, metric, axis, series in drawn:
+        ax.get_xlim(), ax.get_ylim()  # the limits autoscaled before the transform
+        for s in series:
+            line, _ = s["artists"][0]
+            s["display"] = [
+                None
+                if math.isnan(y)
+                else tuple(v * to_points for v in ax.transData.transform((x, y)))
+                for x, y in zip(line.get_xdata(), line.get_ydata(), strict=True)
+            ]
+        on = coincident_pairs(series)
+        for upper, lower in on.items():
+            key = (series[upper]["set"], series[upper]["name"], series[lower]["name"])
+            coincident.setdefault(key, []).append((metric, axis))
+        levels = coincident_levels(series)
+        for s, (level, _, bottom) in zip(series, levels.values(), strict=True):
+            style = s["style"]
+            scale = COINCIDENT_SCALE if level else 1.0
+            z = (3 if s["role"] == "baseline" else 2) + 2 * level
+            transform = ax.transData
+            if level >= 2:
+                step = (level // 2) * (1 if level % 2 else -1)
+                dx = step * COINCIDENT_DODGE * series[bottom]["style"]["size"]
+                transform = offset_copy(ax.transData, fig=fig, x=dx, y=0, units="points")
+            line, _ = s["artists"][0]
+            line.set_linestyle("--" if level else s["line"])
+            line.set_linewidth(style["linewidth"] * scale)
+            for artist, extra in s["artists"]:
+                artist.set_zorder(z)
+                artist.set_transform(transform)
+                if artist is not line:
+                    artist.set_markersize(style["size"] * scale + extra)
+    return coincident
 
 
 def coincident_text(
@@ -605,7 +693,7 @@ def _figure(
         len(metrics), max(1, len(axes)), figsize=(width, PANEL_HEIGHT * len(metrics)), squeeze=False
     )
     handles: dict[str, Any] = {}
-    coincident: dict[tuple[int, str, str], list[tuple[str, str]]] = {}
+    drawn: list[tuple[Any, str, str, list[dict[str, Any]]]] = []
     plotted: list[dict[str, Any]] = []
     for i, metric in enumerate(metrics):
         exponent = 0
@@ -633,7 +721,7 @@ def _figure(
                 baseline,
                 path.stem,
                 handles,
-                coincident,
+                drawn,
                 exponent,
             )
             if ratio_line:
@@ -644,25 +732,13 @@ def _figure(
                     linestyle=base["linestyle"],
                     linewidth=base["linewidth"],
                 )
-    # The footer's first lines are the sets' "Left out" lines: each gains its set's
-    # coincident series.
     modes = [m for m in MODES if any(row.get("mode") == m for row in union)]
-    footer = list(footer)
-    for index in range(len(sets)):
-        clause = coincident_text(coincident, index, axes, modes)
-        if clause:
-            footer[index] = f"{footer[index]} {clause}"
     # Bands in inches, top to bottom: title, legend, panels, footer. The title and the
     # footer wrap to the figure's width, so neither is cut off in a one-column figure.
     # Each band is as high as its rendered text, measured, and the bands are stacked
     # with GAP between them, so the white space between title, legend, panels and
     # footer is at most about the height of a capital letter of that text.
     columns = max(1, min(4, int(width // 2.2)))
-    lines = [
-        part
-        for line in footer
-        for part in textwrap.wrap(line, int(width * 17), break_on_hyphens=False)
-    ]
     title_lines = textwrap.wrap(title, int(width * TITLE_CHARS_PER_INCH), break_on_hyphens=False)
     # fig.text, not fig.suptitle: tight_layout makes room for a suptitle on top of
     # its rect, which would count the title band twice.
@@ -679,26 +755,54 @@ def _figure(
             borderaxespad=0,
             fontsize="small",
         )
-    footer_text = fig.text(
-        0.01, 0, "\n".join(lines), ha="left", va="bottom", fontsize="x-small", gid="footer"
-    )
+    footer_text = fig.text(0.01, 0, "", ha="left", va="bottom", fontsize="x-small", gid="footer")
     renderer = fig.canvas.get_renderer()
 
     def inches(artist: Any) -> float:
         return artist.get_window_extent(renderer).height / fig.dpi if artist else 0.0
 
-    title_h, legend_h, footer_h = inches(title_text), inches(legend), inches(footer_text)
-    legend_band = GAP + legend_h if legend is not None else 0.0  # below the title
-    # tight_layout keeps LAYOUT_PAD (a fraction of the font size) between its rect
-    # and the panels' outer edges (tick labels, axis labels): that is the gap there.
-    height = MARGIN + title_h + legend_band + PANEL_HEIGHT * len(metrics) + footer_h + MARGIN
-    fig.set_size_inches(width, height)
-    title_text.set_y(1 - MARGIN / height)
-    if legend is not None:
-        legend.set_bbox_to_anchor((0.5, 1 - (MARGIN + title_h + GAP) / height), fig.transFigure)
-    footer_text.set_y(MARGIN / height)
-    top = 1 - (MARGIN + title_h + legend_band) / height
-    _layout(fig, (0, (MARGIN + footer_h) / height, 1, top))
+    def arrange(coincident: Mapping[tuple[int, str, str], Sequence[tuple[str, str]]]) -> None:
+        # The footer's first lines are the sets' "Left out" lines: each gains its
+        # set's coincident series.
+        lines = list(footer)
+        for index in range(len(sets)):
+            clause = coincident_text(coincident, index, axes, modes)
+            if clause:
+                lines[index] = f"{lines[index]} {clause}"
+        lines = [
+            part
+            for line in lines
+            for part in textwrap.wrap(line, int(width * 17), break_on_hyphens=False)
+        ]
+        footer_text.set_text("\n".join(lines))
+        title_h, legend_h, footer_h = inches(title_text), inches(legend), inches(footer_text)
+        legend_band = GAP + legend_h if legend is not None else 0.0  # below the title
+        # tight_layout keeps LAYOUT_PAD (a fraction of the font size) between its rect
+        # and the panels' outer edges (tick labels, axis labels): that is the gap there.
+        height = MARGIN + title_h + legend_band + PANEL_HEIGHT * len(metrics) + footer_h + MARGIN
+        fig.set_size_inches(width, height)
+        title_text.set_y(1 - MARGIN / height)
+        if legend is not None:
+            legend.set_bbox_to_anchor((0.5, 1 - (MARGIN + title_h + GAP) / height), fig.transFigure)
+        footer_text.set_y(MARGIN / height)
+        top = 1 - (MARGIN + title_h + legend_band) / height
+        _layout(fig, (0, (MARGIN + footer_h) / height, 1, top))
+
+    # Coincidence is measured in display points, so on the laid-out panels; the footer
+    # it names changes the layout. A first guess from the panels as created, then
+    # until the layout and what it shows agree.
+    coincident = stack_coincident(fig, drawn)
+    for _ in range(COINCIDENT_PASSES):
+        arrange(coincident)
+        found = stack_coincident(fig, drawn)
+        if found == coincident:
+            break
+        coincident = found
+    else:
+        # Not settled (a pair at the threshold): the footer names what the last
+        # layout showed.
+        arrange(coincident)
+        stack_coincident(fig, drawn)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=DPI)
     plt.close(fig)
