@@ -1,4 +1,5 @@
 import sys
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -314,8 +315,48 @@ def test_verify_on_cpu_records_no_override():
         impl.setup(c)
         x = inputs(c)
         result = impl.verify(lambda impl=impl, x=x: outputs.append(impl.run(x, "fwd_bwd")))
-        assert result == {"override_ran": False, "override_events": [], "native_events": []}
+        assert result == {
+            "override_ran": False,
+            "override_events": [],
+            "override_kernel_ran": False,
+            "override_kernels": [],
+            "native_events": [],
+        }
     assert len(outputs) == 2
+
+
+LCE_DISPATCH = "_native::_linear_cross_entropy_batch_chunked_cutedsl_2"
+LCE_KERNEL = "kernel_cutlass__kernel_tensorptrf32gmemoi641_tensorptrf32gmemo1__0"
+SCATTER = "_native::scatter_add__cutedsl_10"
+SCATTER_KERNEL = "kernel_cutlass__kernel_CopyAtom_ThrID10_Valuetypebf16_____0"
+CUBLAS_KERNEL = "void cutlass::Kernel2<cutlass_80_wmma_tensorop_s161616gemm_bf16>(Params)"
+
+
+def event(name, kernels=(), children=(), device=False):
+    """A stand-in for the profiler's ``FunctionEvent``: what ``_lce_verify`` reads."""
+    from torch.autograd import DeviceType
+
+    return SimpleNamespace(
+        name=name,
+        device_type=DeviceType.CUDA if device else DeviceType.CPU,
+        kernels=[SimpleNamespace(name=k) for k in kernels],
+        cpu_children=list(children),
+    )
+
+
+def profiled(*cpu_events):
+    """The profiler's flat list: each CPU event, its children, and the kernels."""
+    out = []
+
+    def walk(e):
+        out.append(e)
+        out.extend(event(k.name, device=True) for k in e.kernels)
+        for child in e.cpu_children:
+            walk(child)
+
+    for e in cpu_events:
+        walk(e)
+    return out
 
 
 def test_verify_raises_when_eligible_but_absent(monkeypatch):
@@ -323,9 +364,15 @@ def test_verify_raises_when_eligible_but_absent(monkeypatch):
     monkeypatch.setitem(lce._STATE, "case", c)
     monkeypatch.setitem(lce._STATE, "options", {"acc_policy": "compact", "acc_dtype": "float32"})
     monkeypatch.setitem(lce._STATE, "registration", {"registered": True, "reason": None})
+    monkeypatch.setitem(lce._STATE, "mode", "fwd_bwd")
     monkeypatch.setattr(lce, "override_eligible", lambda case, options: True)
-    scatter = "_native::scatter_add__cutedsl_10"
-    monkeypatch.setattr(lce, "native_events", lambda fn: [scatter])
+
+    def plant(*cpu_events):
+        monkeypatch.setattr(lce, "_profiled", lambda fn: profiled(*cpu_events))
+
+    # Another override's CuTeDSL kernel, under its own dispatch, is not LCE's.
+    scatter = event(SCATTER, kernels=[SCATTER_KERNEL])
+    plant(scatter)
     with pytest.raises(AssertionError, match="although eligible .*; it is registered, yet did not"):
         lce.verify_lce(lambda: None)
     reason = "disabled by TORCH_DISABLE_NATIVE_JIT=1"
@@ -336,22 +383,87 @@ def test_verify_raises_when_eligible_but_absent(monkeypatch):
     monkeypatch.setitem(lce._STATE, "registration", unknown)
     with pytest.raises(AssertionError, match="; registration unknown: RuntimeError: boom; the"):
         lce.verify_lce(lambda: None)
-    names = ["_native::_linear_cross_entropy_batch_chunked_cutedsl_2"]
-    monkeypatch.setattr(lce, "native_events", lambda fn: [*names, scatter])
+    # fwd: the dispatch runs eager ops (a cuBLAS CUTLASS kernel, not a CuTeDSL one).
+    eager = event(LCE_DISPATCH, children=[event("aten::mm", kernels=[CUBLAS_KERNEL])])
+    plant(eager, scatter)
+    monkeypatch.setitem(lce._STATE, "mode", "fwd")
     assert lce.verify_lce(lambda: None) == {
         "override_ran": True,
-        "override_events": names,
-        "native_events": [*names, scatter],
+        "override_events": [LCE_DISPATCH],
+        "override_kernel_ran": False,
+        "override_kernels": [],
+        "native_events": [LCE_DISPATCH, SCATTER],
+    }
+    # fwd_bwd: the same is an error.
+    monkeypatch.setitem(lce._STATE, "mode", "fwd_bwd")
+    with pytest.raises(AssertionError, match="dispatched but its kernel did not run"):
+        lce.verify_lce(lambda: None)
+    # The kernel, launched anywhere under the dispatch.
+    launch = event("cutlass_launch", children=[event("cuLaunchKernel", kernels=[LCE_KERNEL])])
+    plant(event(LCE_DISPATCH, children=[launch, event("aten::mm", kernels=[CUBLAS_KERNEL])]))
+    assert lce.verify_lce(lambda: None) == {
+        "override_ran": True,
+        "override_events": [LCE_DISPATCH],
+        "override_kernel_ran": True,
+        "override_kernels": [LCE_KERNEL],
+        "native_events": [LCE_DISPATCH],
     }
     with pytest.raises(AssertionError, match="ran although disabled"):
         lce.verify_lce_no_override(lambda: None)
-    # Other torch._native overrides are recorded, not mistaken for LCE's.
-    monkeypatch.setattr(lce, "native_events", lambda fn: [scatter])
-    assert lce.verify_lce_no_override(lambda: None) == {
+    # Other torch._native overrides are recorded, not mistaken for LCE's, nor their
+    # CuTeDSL kernels for its kernel.
+    plant(scatter)
+    expected = {
         "override_ran": False,
         "override_events": [],
-        "native_events": [scatter],
+        "override_kernel_ran": False,
+        "override_kernels": [],
+        "native_events": [SCATTER],
     }
+    assert lce.verify_lce_no_override(lambda: None) == expected
+    # Not eligible (fp32): nothing ran, and that is no error.
+    monkeypatch.setattr(lce, "override_eligible", lambda case, options: False)
+    assert lce.verify_lce(lambda: None) == expected
+
+
+def test_cutedsl_kernel_names():
+    assert lce._is_cutedsl_kernel(LCE_KERNEL) and lce._is_cutedsl_kernel(SCATTER_KERNEL)
+    assert not lce._is_cutedsl_kernel(CUBLAS_KERNEL)
+    assert lce.launched_under(event("a", kernels=["k1"], children=[event("b", ["k2"])])) == [
+        "k1",
+        "k2",
+    ]
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.skipif(not OVERRIDE, reason="needs a torch with the LCE override")
+def test_override_kernel_runs_with_grad_only():
+    # R1-30 N1: in fwd the override dispatches, with no CuTeDSL kernel of its own.
+    if torch.cuda.get_device_capability() < (8, 0):
+        pytest.skip("the override needs sm_80+")
+    c = case("bfloat16", device="cuda", N=256, H=128, V=1024)
+    expected = {"fwd": (True, False), "fwd_bwd": (True, True)}
+    for name in ["torch_lce", "torch_lce_no_override"]:
+        impl = SPEC.implementation(name)
+        impl.setup(c)
+        x = inputs(c)
+        for mode in ["fwd", "fwd_bwd"]:
+            impl.run(x, mode)  # compiled outside the profiled call
+            clear_grads(x)
+            result = impl.verify(lambda impl=impl, x=x, mode=mode: impl.run(x, mode))
+            clear_grads(x)
+            seen = (result["override_ran"], result["override_kernel_ran"])
+            if name == "torch_lce":
+                assert seen == expected[mode], (mode, result)
+                assert all(
+                    k.startswith(lce.CUTEDSL_KERNEL_PREFIX) for k in result["override_kernels"]
+                )
+                assert bool(result["override_kernels"]) is (mode == "fwd_bwd")
+            else:
+                assert seen == (False, False) and result["override_kernels"] == []
+                if mode == "fwd_bwd":  # its backward's scatter_add still runs CuTeDSL
+                    assert any("scatter_add" in e for e in result["native_events"])
 
 
 def test_override_registration(monkeypatch):
@@ -621,6 +733,8 @@ def test_through_worker_and_runner(tmp_path):
         assert by_impl["torch_lce"]["verify"] == {
             "override_ran": False,
             "override_events": [],
+            "override_kernel_ran": False,
+            "override_kernels": [],
             "native_events": [],
         }
         assert len(by_impl["torch_lce"]["info"]["lce_source_md5"]) == 32

@@ -143,6 +143,7 @@ def run_compiled(inputs: Any, mode: str) -> tuple:
 
 
 def run_lce(inputs: Any, mode: str) -> tuple:
+    _STATE["mode"] = mode  # for verify_lce, which sees only the call
     return _call(_lce_loss, inputs, mode)
 
 
@@ -831,15 +832,10 @@ def setup_torchtitan_ce(case: Case) -> dict[str, Any]:
 # --- verify: did the intended code path run? ----------------------------------------------
 
 
-def profile_run(fn: Any) -> list[tuple[str, bool]]:
-    """Run ``fn`` once under the profiler; its distinct events as sorted
-    ``(name, on_device)`` pairs, ``on_device`` for CUDA kernel and memcpy events.
-
-    One run serves several filters (``select``), so a verify that records more than
-    one kind of event still costs one profiled call.
-    """
+def _profiled(fn: Any) -> list[Any]:
+    """Run ``fn`` once under the profiler (CUDA activity too when there is a GPU);
+    its events, as the profiler's ``FunctionEvent`` list."""
     import torch
-    from torch.autograd import DeviceType
     from torch.profiler import ProfilerActivity, profile
 
     activities = [ProfilerActivity.CPU]
@@ -849,7 +845,31 @@ def profile_run(fn: Any) -> list[tuple[str, bool]]:
         fn()
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-    return sorted({(e.name, e.device_type == DeviceType.CUDA) for e in prof.events()})
+    return list(prof.events())
+
+
+def _pairs(events: list[Any]) -> list[tuple[str, bool]]:
+    from torch.autograd import DeviceType
+
+    return sorted({(e.name, e.device_type == DeviceType.CUDA) for e in events})
+
+
+def profile_run(fn: Any) -> list[tuple[str, bool]]:
+    """Run ``fn`` once under the profiler; its distinct events as sorted
+    ``(name, on_device)`` pairs, ``on_device`` for CUDA kernel and memcpy events.
+
+    One run serves several filters (``select``), so a verify that records more than
+    one kind of event still costs one profiled call.
+    """
+    return _pairs(_profiled(fn))
+
+
+def launched_under(event: Any) -> list[str]:
+    """The names of the device kernels launched by a CPU event or its children."""
+    names = [kernel.name for kernel in event.kernels]
+    for child in event.cpu_children:
+        names += launched_under(child)
+    return names
 
 
 def select(events: list[tuple[str, bool]], keep: Any, kernels_only: bool = False) -> list[str]:
@@ -898,15 +918,64 @@ def override_eligible(case: Case, options: dict[str, Any]) -> bool:
     return options.get("acc_policy") == "compact" and options.get("acc_dtype") == "float32"
 
 
+def _is_lce_event(name: str) -> bool:
+    return _is_native_event(name) and "linear_cross_entropy" in name
+
+
 def _lce_events(names: list[str]) -> list[str]:
-    return [name for name in names if "linear_cross_entropy" in name]
+    return [name for name in names if _is_lce_event(name)]
+
+
+# The CuTeDSL kernels' names: CUTLASS's Python DSL names a compiled kernel
+# ``kernel_cutlass_<function>_<argument types>_<n>``. cuBLAS's own CUTLASS kernels,
+# which every matmul of an eager path may launch, are ``void cutlass::Kernel2<...>``,
+# so the prefix tells the two apart. It does not tell whose: every torch._native
+# CuTeDSL override's kernels have it, so ``_lce_verify`` looks under the LCE
+# override's dispatch event only.
+CUTEDSL_KERNEL_PREFIX = "kernel_cutlass_"
+
+
+def _is_cutedsl_kernel(name: str) -> bool:
+    return name.startswith(CUTEDSL_KERNEL_PREFIX)
+
+
+def _lce_verify(fn: Any) -> dict[str, Any]:
+    """One profiled run of ``fn``: the override's dispatch events, whether a CuTeDSL
+    kernel ran under them and which, and every torch._native event.
+
+    Under the dispatch only: other torch._native overrides launch CuTeDSL kernels
+    too (``_native::scatter_add__cutedsl_*`` in the backward, with the LCE override
+    disabled or in fp32), and those are not the LCE override's.
+    """
+    events = _profiled(fn)
+    native = select(_pairs(events), _is_native_event)
+    dispatches = [e for e in events if _is_lce_event(e.name)]
+    kernels = sorted(
+        {name for e in dispatches for name in launched_under(e) if _is_cutedsl_kernel(name)}
+    )
+    lce_events = _lce_events(native)
+    return {
+        "override_ran": bool(lce_events),
+        "override_events": lce_events,
+        "override_kernel_ran": bool(kernels),
+        "override_kernels": kernels,
+        "native_events": native,
+    }
 
 
 def verify_lce(fn: Any) -> dict[str, Any]:
-    native = native_events(fn)
-    events = _lce_events(native)
+    """Whether the override ran: its dispatch (``override_ran``) and its CuTeDSL
+    kernel (``override_kernel_ran``).
+
+    In fwd (no grad) the override dispatches but forms the loss from eager ops, with
+    no CuTeDSL kernel (``cutedsl_impl``'s ``_batch_chunked_kernel``): the record
+    carries that, as the override's documented behaviour, not an error. With grad,
+    an eligible override's dispatch without its kernel is an error.
+    """
+    result = _lce_verify(fn)
     case, options = _STATE["case"], _STATE["options"]
-    if not events and override_eligible(case, options):
+    eligible = override_eligible(case, options)
+    if not result["override_ran"] and eligible:
         registration = _STATE["registration"]
         if registration["registered"]:
             cause = "it is registered, yet did not run"
@@ -919,15 +988,23 @@ def verify_lce(fn: Any) -> dict[str, Any]:
             f"({case.device}, {case.dtype}, acc_policy={options['acc_policy']}, "
             f"acc_dtype={options['acc_dtype']}); {cause}; the timing would be mislabelled"
         )
-    return {"override_ran": bool(events), "override_events": events, "native_events": native}
+    if eligible and _STATE.get("mode") == "fwd_bwd" and not result["override_kernel_ran"]:
+        raise AssertionError(
+            f"the torch._native LCE override dispatched but its kernel did not run (no "
+            f"{CUTEDSL_KERNEL_PREFIX}* kernel under the dispatch in fwd_bwd); the timing "
+            "would be mislabelled"
+        )
+    return result
 
 
 def verify_lce_no_override(fn: Any) -> dict[str, Any]:
-    native = native_events(fn)
-    events = _lce_events(native)
-    if events:
-        raise AssertionError(f"the torch._native LCE override ran although disabled: {events}")
-    return {"override_ran": False, "override_events": [], "native_events": native}
+    result = _lce_verify(fn)
+    # A kernel counts only under the dispatch, so this covers the kernel too.
+    if result["override_ran"]:
+        raise AssertionError(
+            f"the torch._native LCE override ran although disabled: {result['override_events']}"
+        )
+    return result
 
 
 def _is_liger_event(name: str) -> bool:

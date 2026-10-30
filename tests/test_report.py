@@ -125,6 +125,62 @@ def test_default_point(synth):
     assert by_name["compiled"][2] == "error"
 
 
+def test_override_column(synth):
+    # Whether an override ran: its dispatch and its own kernel (R1-30 N1), from the
+    # verify fields; the synth set records neither, so they are planted on its rows.
+    with pytest.warns(UserWarning, match=MERGE_WARNING):
+        rows = analysis.to_rows(analysis.load(synth))
+    planted = {
+        "base": (False, False),
+        "base_other": (True, True),
+        "compiled": (True, False),
+    }
+    here = [dict(r) for r in analysis.at(rows, dtype="float32", mode="fwd")]
+    for row in here:
+        ran, kernel = planted[row["implementation"]]
+        row.update(override_ran=ran, override_kernel_ran=kernel)
+    part = report.render_default(here, S.DEFAULT, "base", title="fwd, float32")
+    header = cells(tables(part)[0][0])
+    assert "override_ran" not in header and header[-1] == "override"
+    by_name = {cells(row)[0]: cells(row)[-1] for row in tables(part)[0][2:]}
+    assert by_name == {
+        "base": "no",
+        "base_other (control of base)": "kernel",
+        "compiled": "dispatch only",
+    }
+    note = (
+        "`compiled` in fwd dispatches to the override, which runs no kernel of its own "
+        "on this path (`override_kernel_ran` false): its fwd time is not the override "
+        "kernel's."
+    )
+    assert note in part
+    assert part.index(note) < part.index("Entry details")  # under the table it is about
+    # Two such entries: one sentence naming both.
+    for row in here:
+        if row["implementation"] == "base_other":
+            row["override_kernel_ran"] = False
+    part = report.render_default(here, S.DEFAULT, "base", title="fwd, float32")
+    assert (
+        "`base_other (control of base)`, `compiled` in fwd dispatch to the override, "
+        "which runs no kernel of its own on this path (`override_kernel_ran` false): "
+        "their fwd time is not the override kernel's."
+    ) in part
+    # None dispatch only: no sentence.
+    for row in here:
+        row["override_kernel_ran"] = row["override_ran"]
+    assert "dispatch" not in report.render_default(here, S.DEFAULT, "base", title="t")
+    # A record older than override_kernel_ran; an entry recording neither.
+    assert report.override_text({"override_ran": True, "override_kernel_ran": None}) == ("dispatch")
+    assert report.override_text({"override_ran": None}) == "—"
+    assert report.override_text({}) == "—"
+    # The report itself: the column, and no sentence on the synth set as it is.
+    text = make(synth)
+    part = section(text, "### fwd, float32", "\n### ")
+    assert cells(tables(part)[0][0])[-1] == "override"
+    assert {cells(row)[-1] for row in tables(part)[0][2:]} == {"—"}
+    assert "dispatches to the override" not in text
+
+
 def widen(root, out):
     """``root``'s records in the shape of I1-12's: 11 entries in fwd_bwd (copies of
     ``compiled``), four parity metrics, and two entries whose ``info`` keys are

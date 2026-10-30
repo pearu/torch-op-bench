@@ -98,6 +98,39 @@ def parity_text(row: Row) -> str:
     return text(status)
 
 
+def override_text(row: Row) -> str:
+    """Whether an override ran: ``kernel`` (its dispatch and its own kernel),
+    ``dispatch only`` (the dispatch, no kernel of its own), ``no``; ``—`` for an
+    entry that records neither. ``dispatch`` alone for a record older than
+    ``override_kernel_ran``."""
+    ran, kernel = row.get("override_ran"), row.get("override_kernel_ran")
+    if ran is None:
+        return MISSING
+    if not ran:
+        return "no"
+    if kernel is None:
+        return "dispatch"
+    return "kernel" if kernel else "dispatch only"
+
+
+def dispatch_only_note(rows: Sequence[Row], labels: Sequence[Row]) -> list[str]:
+    """One sentence under a default-point table when an entry's override dispatched
+    but ran no kernel of its own: its time is not the kernel's (R1-30 N1)."""
+    names = [impl_label(row, labels) for row in rows if override_text(row) == "dispatch only"]
+    if not names:
+        return []
+    mode = rows[0].get("mode")
+    who = ", ".join(f"`{name}`" for name in names)
+    verb = "dispatches" if len(names) == 1 else "dispatch"
+    whose = "its" if len(names) == 1 else "their"
+    return [
+        "",
+        f"{who} in {mode} {verb} to the override, which runs no kernel of its own on "
+        f"this path (`override_kernel_ran` false): {whose} {mode} time is not the "
+        "override kernel's.",
+    ]
+
+
 def impl_label(row_or_name: Row | str, rows: Sequence[Row]) -> str:
     name = row_or_name if isinstance(row_or_name, str) else row_or_name["implementation"]
     for row in rows:
@@ -236,7 +269,7 @@ def render_default(
         "time × peak / baseline's",
         "parity",
         *(p.removeprefix(analysis.PARITY_PREFIX) for p in parity),
-        "override_ran",
+        "override",
     ]
     numeric = [False, False, *[True] * 8, False, *[True] * len(parity), False]
     body = []
@@ -262,13 +295,14 @@ def render_default(
                 sig3(ratio(row.get("time_x_peak"), base_ok and base_ok.get("time_x_peak"))),
                 parity_text(row),
                 *(sig3(row.get(p)) for p in parity),
-                text(row.get("override_ran")),
+                override_text(row),
             ]
         )
     lines = [f"### {title}", "", f"At {analysis.point_text(point)}.", ""]
     if base_ok is None:
         lines += [f"The baseline `{baseline}` has no `ok` record here: no ratios.", ""]
     lines.append(table(header, body, numeric))
+    lines += dispatch_only_note([by_impl[name] for name in names], here)
     lines += entry_details([by_impl[name] for name in names], here)
     return "\n".join(lines) + "\n"
 
