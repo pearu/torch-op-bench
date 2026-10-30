@@ -27,6 +27,17 @@ def table_rows(text):
     return [line for line in text.splitlines() if line.startswith("| ")]
 
 
+def tables(text):
+    """Each markdown table of ``text``, as its lines."""
+    found = [[]]
+    for line in text.splitlines():
+        if line.startswith("| "):
+            found[-1].append(line)
+        elif found[-1]:
+            found.append([])
+    return [t for t in found if t]
+
+
 def test_numbers():
     assert report.sig3(None) == "—"
     assert report.sig3(0.5) == "0.500"
@@ -66,10 +77,10 @@ def test_default_point(synth):
     text = make(synth)
     assert "The default point is the op's defaults." in text
     part = section(text, "### fwd_bwd, float32", "\n### ")
-    names = [cells(row)[0] for row in table_rows(part)[2:]]
+    names = [cells(row)[0] for row in tables(part)[0][2:]]
     assert names == ["base", "base_other (control of base)", "compiled", "chunked"]
-    header = cells(table_rows(part)[0])
-    by_name = {cells(row)[0]: cells(row) for row in table_rows(part)[2:]}
+    header = cells(tables(part)[0][0])
+    by_name = {cells(row)[0]: cells(row) for row in tables(part)[0][2:]}
     col = header.index("time / baseline")
     for name in ["compiled", "chunked"]:
         expected = S.median_ms(name, "fwd_bwd", "float32", S.DEFAULT) / S.median_ms(
@@ -94,10 +105,74 @@ def test_default_point(synth):
     assert by_name["compiled"][product + 1] == "0.500"
     assert by_name["base_other (control of base)"][product + 1] == "1.10"
     assert by_name["base"][product + 1] == "1.00"
-    assert "api.name" in header and "num_chunks" in header  # varying info
-    # fwd: chunked has no fwd records, and no info column is empty there
+    assert header[2] == "median ms (IQR)" and "status" not in header
+    assert by_name["chunked"][2] == "256 (25.6)"
+    # The info fields that differ between records: a table of their own (R1-30 F6).
+    details = tables(part)[1]
+    assert cells(details[0]) == ["implementation", "info"]
+    by_name = {cells(row)[0]: cells(row)[1] for row in details[2:]}
+    assert list(by_name) == names
+    assert by_name["chunked"] == "api.name=v2, num_chunks=4"
+    assert by_name["compiled"] == "compile=fullgraph" and by_name["base"] == "—"
+    assert "Entry details: the `info` fields that differ between records." in part
+    # fwd: chunked has no fwd records, and no info field of its is there
     part = section(text, "### fwd, float32", "\n### ")
     assert "chunked" not in part and "api.name" not in part
+    # Not ok: the status in the median's place.
+    text = make(synth, dtype="float32", mode="fwd", point={"M": "64"})
+    part = section(text, "### fwd, float32", "\n## ")
+    by_name = {cells(row)[0]: cells(row) for row in tables(part)[0][2:]}
+    assert by_name["compiled"][2] == "error"
+
+
+def widen(root, out):
+    """``root``'s records in the shape of I1-12's: 11 entries in fwd_bwd (copies of
+    ``compiled``), four parity metrics, and two entries whose ``info`` keys are
+    disjoint, 40 in all."""
+    for path in root.rglob("*.jsonl"):
+        lines = []
+        for line in path.read_text().splitlines():
+            record = json.loads(line)
+            copies = [record]
+            if record["implementation"] == "compiled":
+                record["info"].update({f"a{i:02}": i for i in range(20)})
+                for k in range(7):
+                    copy = json.loads(line)
+                    copy["implementation"] = f"compiled_{k}"
+                    copies.append(copy)
+            if record["implementation"] == "chunked":
+                record["info"].update({f"b{i:02}": "x" * i for i in range(20)})
+            for r in copies:
+                metrics = (r.get("parity") or {}).get("metrics")
+                if metrics:
+                    metrics.update(m3=1e-3, m4=2e-3)
+            lines += [json.dumps(r) for r in copies]
+        target = out / path.relative_to(root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n".join(lines) + "\n")
+    return out
+
+
+def test_tables_within_max_columns(synth, synth_strict, tmp_path):
+    # R1-30 F6: no table of the report is wider than MAX_COLUMNS, on the synthetic set
+    # and on one of I1-12's width; and every row has the header's cells.
+    wide = widen(synth, tmp_path / "wide")
+    wide_strict = widen(synth_strict, tmp_path / "wide-strict")
+    for text in [make(synth, strict=synth_strict), make(wide, strict=wide_strict)]:
+        found = tables(text)
+        assert len(found) > 10
+        for lines in found:
+            width = len(cells(lines[0]))
+            assert width <= report.MAX_COLUMNS, lines[0]
+            assert {len(cells(line)) for line in lines} == {width}, lines[0]
+    part = section(text, "### fwd_bwd, float32", "\n### ")
+    default, details = tables(part)
+    assert len(cells(default[0])) == report.MAX_COLUMNS  # 4 parity metrics
+    assert len(default) == 2 + 11
+    by_name = {cells(row)[0]: cells(row)[1] for row in details[2:]}
+    assert by_name["compiled"].startswith("a00=0, a01=1, ") and "b00" not in by_name["compiled"]
+    assert by_name["chunked"].startswith("api.name=v2, b00=, b01=x, ")
+    assert by_name["chunked"].count("=") == 22  # api.name, b00..b19, num_chunks
 
 
 def test_sweeps(synth):
@@ -431,8 +506,8 @@ def test_without_the_default_point(synth, tmp_path):
                 assert f"### {mode}, {dtype}: {case}\n\nAt {case}.\n" in part
     # The rows of the default-point table, its ratios included.
     table = section(part, "### fwd_bwd, float32: M=64,", "\n### ")
-    header = cells(table_rows(table)[0])
-    by_name = {cells(row)[0]: cells(row) for row in table_rows(table)[2:]}
+    header = cells(tables(table)[0][0])
+    by_name = {cells(row)[0]: cells(row) for row in tables(table)[0][2:]}
     assert by_name["chunked"][header.index("time / baseline")] == "2.00"
     assert by_name["chunked"][header.index("time × peak / baseline's")] == "0.500"
     # A partial --point names one axis; the rest stay the spec's.
@@ -527,7 +602,7 @@ def test_reduction_section(synth, synth_strict):
     assert list(rows) == ["base", "base_other (control of base)", "compiled", "chunked"]
     base = rows["base"]
     assert base["time strict / default"] == "1.20"
-    assert base["grad_rel default"] == "0.00200" and base["grad_rel strict"] == "0.00100"
+    assert base["grad_rel default, strict"] == "0.00200, 0.00100"
     assert base["grad_rel default / strict"] == "2.00"
     assert base["parity moves"] == "yes: grad_rel, loss_rel_err"
     other = rows["base_other (control of base)"]

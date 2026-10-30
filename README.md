@@ -361,15 +361,18 @@ torch-op-bench commits). Its sections:
    12 characters of the commit of a git install), the torch-op-bench commit, and
    the matmul settings. It says so when the commits differ, or when one environment
    holds several builds.
-2. **At the default point** (see above), per mode and dtype: one row per
-   implementation, the baseline first and each control right after its original,
-   with its environment, median and IQR, time against the baseline, tokens/s,
+2. **At the default point** (see above), per mode and dtype, two tables. The first
+   has one row per implementation, the baseline first and each control right after
+   its original, with its environment, median and IQR (in one cell, "median (IQR)";
+   the status instead when it is not `ok`), time against the baseline, tokens/s,
    TFLOP/s, peak memory above baseline and against the baseline's, **time × peak**
    (median ms × peak above baseline in MiB, in ms·MiB) and against the baseline's,
-   parity and its
-   metrics, `override_ran`, and each `info` field that differs between records (e.g.
-   `torchtitan_api`, `compile`, `accum_dtype`), so a difference cannot hide in
-   `info`.
+   parity and its metrics, and `override_ran`. The second, "Entry details", has one
+   row per implementation in the same order and one cell: the `key=value` pairs of
+   the `info` fields that differ between records (e.g. `torchtitan_api`,
+   `compile`, `op_decisions.is_cuda`), keys sorted, those the entry lacks left
+   out, so a difference cannot hide in `info`. No table of the report is wider
+   than 16 columns.
 3. **Sweeps**: for each axis varied around the default point, four tables (median,
    peak, time × peak with its ratio to the baseline's in parentheses, parity with
    the failing metrics) with one column per implementation. A cell is `—` when there
@@ -384,7 +387,7 @@ torch-op-bench commits). Its sections:
    checked), else a warning naming the records that do not, and the section still
    renders. Then per mode and dtype, at the default point, one row per entry: the
    median of each and the time ratio strict / default; for each parity metric both
-   values and the ratio default / strict; "parity moves", yes with the metrics
+   values (in one cell, "default, strict") and the ratio default / strict; "parity moves", yes with the metrics
    named when a ratio is outside [0.9, 1.1] (the environment check's band); and,
    for the torch LCE entries, `info.op_decisions`, the values in one cell. An entry
    absent from one directory, or not `ok` in one, says "not measured" and why.
