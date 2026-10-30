@@ -68,6 +68,12 @@ COLORS = (
 CONTROL_MARKERS = ("s", "^", "D", "v", "P", "X", "<", ">")
 # The overlay tells its two result sets apart by line style.
 OVERLAY_LINESTYLE = ("-", "--")
+# Two series of a panel coincide when they have the same x and their y agree within
+# this fraction at every x. The later one (the baseline is drawn first) is drawn on top
+# of the other, dashed, at COINCIDENT_SCALE of its line width and marker size, so both
+# colours show at every shared point (F7, I1-12).
+COINCIDENT_TOLERANCE = 0.005
+COINCIDENT_SCALE = 0.5
 
 METRIC_LABELS = {
     "median_ms": "median (ms)",
@@ -358,15 +364,19 @@ def _draw_panel(
     baseline: str,
     figure: str,
     handles: dict[str, Any],
+    coincident: dict[tuple[int, str, str], list[tuple[str, str]]],
 ) -> list[dict[str, Any]]:
-    """One metric against one axis, for every result set; returns the CSV rows."""
+    """One metric against one axis, for every result set; returns the CSV rows.
+    Each pair of coincident series (``coincident_pairs``) is added to ``coincident``
+    as (set index, upper, lower) -> the (metric, axis) panels."""
     from matplotlib.lines import Line2D
 
     all_swept = [analysis.sweeps(rows, point)[axis] for _, rows, _ in sets]
     values = analysis.axis_values([r for swept in all_swept for r in swept], axis)
     xs, log = _positions(values)
     plotted = []
-    for (label, _, linestyle), swept in zip(sets, all_swept, strict=True):
+    series = []
+    for index, ((label, _, linestyle), swept) in enumerate(zip(sets, all_swept, strict=True)):
         for name in names:
             role = role_of(swept, name, baseline)
             style = {**STYLE[role], "marker": markers.get(name, STYLE[role]["marker"])}
@@ -407,22 +417,18 @@ def _draw_panel(
                     }
                 )
             line = linestyle or style["linestyle"]
-            # The baseline on top: a counterpart with equal values must not hide it.
-            z = 3 if role == "baseline" else 2
-            ax.plot(xs, ys, color=color, linestyle=line, linewidth=style["linewidth"], zorder=z)
-            for pts, face in ((ok_pts, color), (fail_pts, "none")):
-                if pts:
-                    ax.plot(
-                        [p[0] for p in pts],
-                        [p[1] for p in pts],
-                        linestyle="none",
-                        marker=style["marker"],
-                        markersize=style["size"] + (2 if face == "none" else 0),
-                        color=color,
-                        markerfacecolor=face,
-                        markeredgecolor=color,
-                        zorder=z,
-                    )
+            series.append(
+                {
+                    "set": index,
+                    "name": name,
+                    "role": role,
+                    "style": style,
+                    "color": color,
+                    "line": line,
+                    "ys": ys,
+                    "points": (ok_pts, fail_pts),
+                }
+            )
             key = f"{name} [{label}]" if label else name
             handles.setdefault(
                 key,
@@ -437,6 +443,39 @@ def _draw_panel(
                     label=key,
                 ),
             )
+    on = coincident_pairs(series)
+    for upper, lower in on.items():
+        key = (series[upper]["set"], series[upper]["name"], series[lower]["name"])
+        coincident.setdefault(key, []).append((metric, axis))
+    levels: dict[int, int] = {}
+    for k, s in enumerate(series):
+        levels[k] = levels[on[k]] + 1 if k in on else 0
+        style, color, level = s["style"], s["color"], levels[k]
+        scale = COINCIDENT_SCALE**level
+        # The baseline on top of an equal counterpart, which must not hide it; a
+        # coincident series on top of the one it lies on.
+        z = (3 if s["role"] == "baseline" else 2) + 2 * level
+        ax.plot(
+            xs,
+            s["ys"],
+            color=color,
+            linestyle="--" if level else s["line"],
+            linewidth=style["linewidth"] * scale,
+            zorder=z,
+        )
+        for pts, face in zip(s["points"], (color, "none"), strict=True):
+            if pts:
+                ax.plot(
+                    [p[0] for p in pts],
+                    [p[1] for p in pts],
+                    linestyle="none",
+                    marker=style["marker"],
+                    markersize=style["size"] * scale + (2 if face == "none" else 0),
+                    color=color,
+                    markerfacecolor=face,
+                    markeredgecolor=color,
+                    zorder=z,
+                )
     if log:
         ax.set_xscale("log", base=2)
         ax.minorticks_off()
@@ -450,6 +489,53 @@ def _draw_panel(
         ax.set_yscale("log")
     ax.grid(True, alpha=0.3)
     return plotted
+
+
+def coincident_pairs(series: Sequence[Mapping[str, Any]]) -> dict[int, int]:
+    """Of a panel's series (``set``, ``ys`` with NaN for no value), in drawing order:
+    each one that coincides with an earlier one of its set -> that one (the first)."""
+
+    def same(a: Sequence[float], b: Sequence[float]) -> bool:
+        if [math.isnan(y) for y in a] != [math.isnan(y) for y in b]:
+            return False
+        pairs = [(x, y) for x, y in zip(a, b, strict=True) if not math.isnan(x)]
+        return bool(pairs) and all(
+            abs(x - y) <= COINCIDENT_TOLERANCE * max(abs(x), abs(y)) for x, y in pairs
+        )
+
+    on = {}
+    for k, s in enumerate(series):
+        for j, t in enumerate(series[:k]):
+            if t["set"] == s["set"] and same(t["ys"], s["ys"]):
+                on[k] = j
+                break
+    return on
+
+
+def coincident_text(
+    coincident: Mapping[tuple[int, str, str], Sequence[tuple[str, str]]],
+    index: int,
+    axes: Sequence[str],
+    modes: Sequence[str],
+) -> str | None:
+    """The footer's clause on the coincident series of set ``index``, one per pair,
+    its panels grouped by metric (the axes named when not every one)."""
+    clauses = []
+    for (i, upper, lower), panels in coincident.items():
+        if i != index:
+            continue
+        by_metric: dict[str, list[str]] = {}
+        for metric, axis in panels:
+            by_metric.setdefault(metric, []).append(axis)
+        names = []
+        for metric, on in by_metric.items():
+            label = METRIC_LABELS.get(metric, metric.removeprefix(analysis.PARITY_PREFIX))
+            name = label.partition(" (")[0]
+            names.append(name if len(on) == len(axes) else f"{name} on {'/'.join(on)}")
+        clauses.append(f"{upper} on {lower} ({'/'.join(modes)}: {', '.join(names)})")
+    if not clauses:
+        return None
+    return f"Coincident, the first drawn dashed on the second: {'; '.join(clauses)}."
 
 
 def _figure(
@@ -476,6 +562,7 @@ def _figure(
         len(metrics), max(1, len(axes)), figsize=(width, PANEL_HEIGHT * len(metrics)), squeeze=False
     )
     handles: dict[str, Any] = {}
+    coincident: dict[tuple[int, str, str], list[tuple[str, str]]] = {}
     plotted: list[dict[str, Any]] = []
     for i, metric in enumerate(metrics):
         for j, axis in enumerate(axes):
@@ -492,6 +579,7 @@ def _figure(
                 baseline,
                 path.stem,
                 handles,
+                coincident,
             )
             if ratio_line:
                 base = STYLE["baseline"]
@@ -501,6 +589,14 @@ def _figure(
                     linestyle=base["linestyle"],
                     linewidth=base["linewidth"],
                 )
+    # The footer's first lines are the sets' "Left out" lines: each gains its set's
+    # coincident series.
+    modes = [m for m in MODES if any(row.get("mode") == m for row in union)]
+    footer = list(footer)
+    for index in range(len(sets)):
+        clause = coincident_text(coincident, index, axes, modes)
+        if clause:
+            footer[index] = f"{footer[index]} {clause}"
     # Bands in inches, top to bottom: title, legend, panels, footer. The title and the
     # footer wrap to the figure's width, so neither is cut off in a one-column figure.
     # Each band is as high as its rendered text, measured, and the bands are stacked

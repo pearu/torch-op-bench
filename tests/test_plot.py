@@ -214,6 +214,104 @@ def test_restrictions(synth, tmp_path):
         draw(synth, tmp_path, impls=["nope"])
 
 
+def colours_near(fig, ax, x, y, colours, radius=6):
+    """Which of ``colours`` the rendered raster holds within ``radius`` pixels of the
+    data point (x, y) of ``ax``."""
+    import numpy as np
+    from matplotlib.colors import to_rgb
+
+    fig.canvas.draw()
+    raster = np.asarray(fig.canvas.buffer_rgba())[..., :3].astype(int)
+    px, py = ax.transData.transform((x, y))
+    row, col = round(raster.shape[0] - py), round(px)
+    window = raster[row - radius : row + radius + 1, col - radius : col + radius + 1]
+    found = set()
+    for colour in colours:
+        rgb = np.array([round(255 * c) for c in to_rgb(colour)])
+        if (np.abs(window - rgb).max(axis=-1) <= 24).any():
+            found.add(colour)
+    return found
+
+
+@pytest.mark.parametrize("original", ["compiled", "base"])
+def test_coincident_series_both_shown(synth, tmp_path, monkeypatch, original):
+    # F7 (I1-12): a series equal to another one in a panel is drawn on top of it,
+    # dashed and smaller, so both colours show at a shared point; the footer says so.
+    # A twin of a counterpart, and of the baseline (which keeps its style).
+    import matplotlib.pyplot as plt
+
+    rows = analysis.at(analysis.to_rows(load_quiet(synth)), dtype="float32", mode="fwd")
+    rows += [{**r, "implementation": "twin"} for r in rows if r["implementation"] == original]
+    palette = plot.colors(rows, "base")
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    plot._figure(
+        tmp_path / "grid.png",
+        [(None, rows, None)],
+        ["median_ms", "tokens_per_s"],
+        ["M", "K"],
+        S.DEFAULT,
+        "base",
+        "synth: fwd",
+        [plot.left_out(rows, ["median_ms"]), "provenance"],
+        palette=palette,
+    )
+    monkeypatch.undo()
+    (fig,) = closed
+    y = S.median_ms(original, "fwd", "float32", S.DEFAULT)
+    both = {palette[original], palette["twin"]}
+    assert len(both) == 2
+    for ax in fig.axes[:2]:  # median against M and K
+        assert colours_near(fig, ax, S.DEFAULT[ax.get_xlabel()], y, both) == both
+    twin = [line for line in fig.axes[0].lines if line.get_color() == palette["twin"]]
+    under = [line for line in fig.axes[0].lines if line.get_color() == palette[original]]
+    assert min(line.get_zorder() for line in twin) > max(line.get_zorder() for line in under)
+    assert {line.get_linestyle() for line in twin if line.get_linestyle() != "None"} == {"--"}
+    # The one below keeps its style (base_other, black too, is a dotted control).
+    style = plot.STYLE["baseline" if original == "base" else "counterpart"]
+    lines = [line for line in under if line.get_linestyle() not in ("None", ":")]
+    assert [(line.get_linestyle(), line.get_linewidth()) for line in lines] == [
+        (style["linestyle"], style["linewidth"])
+    ]
+    width = plot.STYLE["counterpart"]["linewidth"] * plot.COINCIDENT_SCALE
+    assert {line.get_linewidth() for line in twin if line.get_linestyle() != "None"} == {width}
+    footer = next(t for t in fig.texts if t.get_gid() == "footer").get_text()
+    clause = f"twin on {original} (fwd: median, tokens/s)"
+    assert clause in footer.replace("\n", " ")
+    assert footer.startswith("Left out:")
+    plt.close(fig)
+
+
+def test_coincident_pairs():
+    nan = float("nan")
+
+    def series(ys, set_=0):
+        return {"set": set_, "ys": ys}
+
+    drawn = [
+        series([1.0, 2.0, nan]),
+        series([1.004, 1.995, nan]),  # within 0.5 %: on the first
+        series([1.0, 2.0, 3.0]),  # another x set
+        series([1.0, 2.02, nan]),  # 1 % off at one x
+        series([1.0, 2.0, nan], set_=1),  # another result set
+        series([nan, nan, nan]),
+        series([nan, nan, nan]),  # nothing drawn: nothing coincides
+        series([1.0, 2.0, nan]),  # on the first, not the second
+    ]
+    assert plot.coincident_pairs(drawn) == {1: 0, 7: 0}
+    text = plot.coincident_text(
+        {(0, "b", "a"): [("median_ms", "M"), ("median_ms", "K"), ("tokens_per_s", "M")]},
+        0,
+        ["M", "K"],
+        ["fwd"],
+    )
+    assert (
+        text
+        == "Coincident, the first drawn dashed on the second: b on a (fwd: median, tokens/s on M)."
+    )
+    assert plot.coincident_text({(1, "b", "a"): [("median_ms", "M")]}, 0, ["M"], ["fwd"]) is None
+
+
 def test_styles(synth):
     with pytest.warns(UserWarning):
         rows = analysis.to_rows(analysis.load(synth))

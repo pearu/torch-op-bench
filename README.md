@@ -448,10 +448,13 @@ imported), so an implementation has the same colour in every figure and every
 invocation. A point whose parity failed has a hollow marker, so a fast but wrong
 number does not read as a win: in a parity panel when that panel's metric failed, in
 every other panel when any metric did. A missing point (`error`, `unavailable`, no
-parity) is a gap, and the footer counts what was left out and why. The footer also
-gives the provenance (each environment's torch and torch-op-bench commit, and the
-hosts); a figure without it is not a result. `--metric`, `--sweep` and `--impl`
-restrict what is drawn (the baseline is always drawn).
+parity) is a gap, and the footer counts what was left out and why. Two series of a
+panel whose values agree within 0.5 % at every point would hide one another: the
+later one is drawn on top, dashed, at half the line width and marker size, so both
+colours show, and the footer names each such pair and its panels ("Coincident, …").
+The footer also gives the provenance (each environment's torch and torch-op-bench
+commit, and the hosts); a figure without it is not a result. `--metric`, `--sweep`
+and `--impl` restrict what is drawn (the baseline is always drawn).
 
 Next to every PNG, a CSV of the same name holds exactly the plotted points, one row
 per point: the metric, axis, x, implementation, environment, role, y, parity status,
