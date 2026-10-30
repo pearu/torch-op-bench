@@ -538,9 +538,10 @@ results hold several):
   baseline at the default point, one line per entry with variants through its
   default and variants (by peak), the baseline as a reference point, and the peak
   budgets of the report's "Time at equal peak" as dotted vertical lines; no point is
-  labelled with its parameter (the CSV names each point's entry). The footer counts
-  what is left out and the parity failures, as every footer does. With `--impl`, the
-  entries named, or one of whose variants is named.
+  labelled with its parameter (the CSV names each point's entry). Two entries whose
+  points coincide one by one, in order of peak, are stacked and named as below. The
+  footer counts what is left out and the parity failures, as every footer does.
+  With `--impl`, the entries named, or one of whose variants is named.
 
 The variants are drawn in no other figure unless `--impl` names them (and never in
 the reduction figure).

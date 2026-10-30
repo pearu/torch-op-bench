@@ -1441,3 +1441,49 @@ def test_variants_only_where_named(synth, tmp_path):
         "chunked",
         "chunked[num_chunks=2]",
     ]
+
+
+def test_equal_peak_coincident_entries_stacked(synth, tmp_path, monkeypatch):
+    # Two entries whose points coincide one by one (torch_lce and its no-override
+    # twin in fwd on ey) are stacked and named in the footer, as in every figure.
+    import matplotlib.pyplot as plt
+
+    S.write_variants(synth)
+    recs = load_quiet(synth)
+    bases, variants = analysis.split_variants(recs)
+    rows = analysis.at(analysis.to_rows(bases), dtype="bfloat16", mode="fwd_bwd")
+    variant_rows = analysis.at(analysis.to_rows(variants), dtype="bfloat16", mode="fwd_bwd")
+    twins = [
+        {**r, "implementation": r["implementation"].replace("chunked", "twin"), "base": "twin"}
+        for r in variant_rows
+        if r["base"] == "chunked"
+    ]
+    rows += [{**r, "implementation": "twin"} for r in rows if r["implementation"] == "chunked"]
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    palette = plot.colors(rows, "base")
+    plot.plot_equal_peak(
+        rows,
+        variant_rows + twins,
+        tmp_path,
+        S.DEFAULT,
+        "base",
+        palette,
+        title="synth",
+        notes=[],
+        axes=list(S.DEFAULT),
+        dtypes=["bfloat16"],
+        modes=["fwd_bwd"],
+    )
+    monkeypatch.undo()
+    (fig,) = closed
+    footer = [t for t in fig.texts if t.get_gid() == "footer"][0].get_text().replace("\n", " ")
+    assert (
+        "Coincident, the first drawn dashed on the second: twin on chunked (fwd_bwd: median)."
+        in footer
+    )
+    (ax,) = fig.axes
+    dashed = [line for line in ax.get_lines() if line.get_linestyle() == "--"]
+    assert [line.get_color() for line in dashed] == [palette["twin"]]
+    assert "compiled on" not in footer and "on compiled" not in footer
+    plt.close(fig)

@@ -706,12 +706,13 @@ def _figure(
     palette: Mapping[str, str] | None = None,
     markers: Mapping[str, str] | None = None,
     ratio_line: bool = False,
-    panel: Callable[[Any, dict[str, Any]], list[dict[str, Any]]] | None = None,
+    panel: Callable[[Any, dict[str, Any], list[Any]], list[dict[str, Any]]] | None = None,
     panel_width: float = PANEL_WIDTH,
 ) -> Path:
     """The figure of ``metrics`` (rows) against ``axes`` (columns), each panel drawn
-    by ``_draw_panel``, or by ``panel(ax, handles)`` (which adds its legend entries
-    to ``handles`` and returns its CSV rows); its bands, layout and CSV."""
+    by ``_draw_panel``, or by ``panel(ax, handles, drawn)`` (which adds its legend
+    entries to ``handles`` and its series to ``drawn``, as ``_draw_panel`` does, and
+    returns its CSV rows); its bands, layout and CSV."""
     plt = pyplot()
     union = [row for _, rows, _ in sets for row in rows]
     names = analysis.implementations(union, baseline)
@@ -727,7 +728,7 @@ def _figure(
     for i, metric in enumerate(metrics):
         if panel is not None:
             for ax in grid[i]:
-                plotted += panel(ax, handles)
+                plotted += panel(ax, handles, drawn)
             continue
         exponent = 0
         if not metric.startswith(analysis.PARITY_PREFIX):
@@ -1184,12 +1185,13 @@ def equal_peak_panel(
     palette: Mapping[str, str],
     figure: str,
     point: Mapping[str, Any],
-) -> Callable[[Any, dict[str, Any]], list[dict[str, Any]]]:
+) -> Callable[[Any, dict[str, Any], list[Any]], list[dict[str, Any]]]:
     """The panel of one ``analysis.equal_peak`` result: time against peak above
     baseline, one line per base entry through its points (default and variants, by
     peak; hollow when the record fails parity), the baseline as a reference point and
     the budgets as vertical lines. No point is labelled with its parameter: the CSV
-    names each one's entry."""
+    names each one's entry. Two entries whose points coincide, one by one in order
+    of peak, are stacked as in every other figure (``stack_coincident``)."""
     from matplotlib.lines import Line2D
 
     def csv_row(row: Row, role: str, x: Any, y: Any) -> dict[str, Any]:
@@ -1216,7 +1218,7 @@ def equal_peak_panel(
             "baseline_work": None,
         }
 
-    def draw(ax: Any, handles: dict[str, Any]) -> list[dict[str, Any]]:
+    def draw(ax: Any, handles: dict[str, Any], drawn: list[Any]) -> list[dict[str, Any]]:
         plotted = []
         base = found["baseline"]
         factors = ", ".join(f"{f:g}×" for f in analysis.EQUAL_PEAK_BUDGETS)
@@ -1226,8 +1228,9 @@ def equal_peak_panel(
             ax.axvline(budget / MIB, zorder=1, **BUDGET_STYLE)
             plotted.append(csv_row(base, "budget", budget / MIB, None))
             plotted[-1]["implementation"] = f"{factor:g}× {baseline}"
-        series =[("baseline", baseline, [base] if analysis.peak_point(base) else [])]
+        series = [("baseline", baseline, [base] if analysis.peak_point(base) else [])]
         series += [("counterpart", e["base"], e["points"]) for e in found["entries"]]
+        stacked = []
         for role, name, points in series:
             if not points:
                 continue
@@ -1236,29 +1239,42 @@ def equal_peak_panel(
             xs = [r["peak_above_baseline"] / MIB for r in points]
             ys = [r["median_ms"] for r in points]
             z = 3 if role == "baseline" else 2
-            if role != "baseline":
-                ax.plot(
-                    xs,
-                    ys,
-                    color=color,
-                    linestyle=style["linestyle"],
-                    zorder=z,
-                    linewidth=style["linewidth"],
-                )
-            for r, x, y in zip(points, xs, ys, strict=True):
-                fail = r.get("parity_status") == "fail"
-                ax.plot(
-                    [x],
-                    [y],
+            # The baseline is a point: its "line" draws nothing.
+            linestyle = "none" if role == "baseline" else style["linestyle"]
+            (line,) = ax.plot(
+                xs, ys, color=color, linestyle=linestyle, linewidth=style["linewidth"], zorder=z
+            )
+            artists = [(line, 0.0)]
+            fails = [r.get("parity_status") == "fail" for r in points]
+            for hollow in (False, True):
+                pts = [(x, y) for x, y, f in zip(xs, ys, fails, strict=True) if f == hollow]
+                if not pts:
+                    continue
+                (marks,) = ax.plot(
+                    [p[0] for p in pts],
+                    [p[1] for p in pts],
                     linestyle="none",
                     marker=style["marker"],
                     color=color,
-                    markersize=style["size"] + (2 if fail else 0),
-                    markerfacecolor="none" if fail else color,
+                    markersize=style["size"] + (2 if hollow else 0),
+                    markerfacecolor="none" if hollow else color,
                     markeredgecolor=color,
                     zorder=z,
                 )
-                plotted.append(csv_row(r, role, x, y))
+                artists.append((marks, 2.0 if hollow else 0.0))
+            plotted += [csv_row(r, role, x, y) for r, x, y in zip(points, xs, ys, strict=True)]
+            stacked.append(
+                {
+                    "set": 0,
+                    "name": name,
+                    "control_of": None,
+                    "role": role,
+                    "style": style,
+                    "color": color,
+                    "line": linestyle,
+                    "artists": artists,
+                }
+            )
             label = f"{name} (baseline)" if role == "baseline" else name
             handles.setdefault(
                 label,
@@ -1266,13 +1282,14 @@ def equal_peak_panel(
                     [],
                     [],
                     color=color,
-                    linestyle="none" if role == "baseline" else style["linestyle"],
+                    linestyle=linestyle,
                     linewidth=style["linewidth"],
                     marker=style["marker"],
                     markersize=style["size"],
                     label=label,
                 ),
             )
+        drawn.append((ax, "median_ms", "peak_above_baseline", stacked))
         if found["budgets"]:  # last in the legend: baseline, entries, budgets
             label = f"budgets: {factors} {baseline}'s peak"
             handles.setdefault(label, Line2D([], [], label=label, **BUDGET_STYLE))
