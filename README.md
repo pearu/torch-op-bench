@@ -384,14 +384,15 @@ torch-op-bench commits). Its sections:
    peak memory above baseline and against the baseline's, **time × peak** (median ms ×
    peak above baseline in MiB, in ms·MiB) and against the baseline's, parity and its
    metrics, and `override`: `kernel` (the override dispatched and its kernel ran),
-   `dispatch only` (it dispatched, and ran no kernel of its own), or `no`, from
-   `verify.override_ran` and `verify.override_kernel_ran`. When an entry is
-   `dispatch only`, a sentence under the table says its time is not the override
-   kernel's. The second, "Entry details", has one row per implementation in the same
-   order and one cell: the `key=value` pairs of the `info` fields that differ between
-   records (e.g. `torchtitan_api`, `compile`, `op_decisions.is_cuda`), keys sorted,
-   those the entry lacks left out, so a difference cannot hide in `info`. No table of
-   the report is wider than 16 columns.
+   `dispatch only` (it dispatched, and ran no kernel of its own), or `no` (`dispatch`
+   for a record older than `override_kernel_ran`; `—` for an entry that records
+   neither), from `verify.override_ran` and `verify.override_kernel_ran`. When an
+   entry is `dispatch only`, a sentence under the table says its time is not the
+   override kernel's. The second, "Entry details", has one row per implementation in
+   the same order and one cell: the `key=value` pairs of the `info` fields that differ
+   between records (e.g. `torchtitan_api`, `compile`, `op_decisions.is_cuda`), keys
+   sorted, those the entry lacks left out, so a difference cannot hide in `info`. No
+   table of the report is wider than 16 columns.
 3. **Sweeps**: for each axis varied around the default point, four tables (median,
    peak, time × peak with its ratio to the baseline's in parentheses, parity with
    the failing metrics) with one column per implementation. A cell is `—` when there
