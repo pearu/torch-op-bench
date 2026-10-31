@@ -479,7 +479,7 @@ def test_lce_notes():
     for note in lce.LCE.notes:
         assert re.match(r"\d{4}-\d{2}-\d{2}: ", note) and "reproduced by `run lce --case" in note
         assert not re.search(r"\.asb|\.py\b|Review|R1-\d", note), note
-    assert "`--case N=8192 --impl torch_eager`" in lce.LCE.notes[0]
+    assert "`run lce --case N=8192 --impl torch_eager`" in lce.LCE.notes[0]
     assert "`ey`, torch 2.16.0.dev20261017" in lce.LCE.notes[0]
     assert "on one card" in lce.LCE.notes[1]
 
