@@ -193,9 +193,10 @@ card). A case on the CPU never touches the GPU: its worker creates no CUDA conte
 (the runner hides the GPUs from it, `CUDA_VISIBLE_DEVICES=""`, as torch.compile's
 tracing would otherwise create one), and its record's `env.torch` lists no GPUs and
 no cuDNN version, only the build's CUDA version (`env.torch.cuda`), so a CPU record
-does not depend on what else runs on the GPU. A point that runs out of the device's memory in any of these phases becomes
-an `unavailable` record (see `status` under "Results"); an exception, a crash or a
-timeout becomes an `error` record. Either way the sweep goes on.
+does not depend on what else runs on the GPU. A point that runs out of the device's
+memory in any of these phases becomes an `unavailable` record (see `status` under
+"Results"); an exception, a crash or a timeout becomes an `error` record. Either way
+the sweep goes on.
 
 ## Benchmarking LCE
 
