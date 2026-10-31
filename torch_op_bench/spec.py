@@ -236,7 +236,9 @@ class OpSpec:
     ``reference_fits(case)`` is the memory guard of the parity check: ``True``, or a
     string saying why the reference is skipped. ``default_dtypes`` are the dtypes a
     run uses when none are given (``None``: all of ``dtypes``). ``parity_notes``
-    explain parity failures with a known cause (``ParityNote``).
+    explain parity failures with a known cause (``ParityNote``). ``notes`` are free
+    text the op's author vouches for, each dated and sourced (and naming the card or
+    version it was seen on), printed verbatim at the end of the report.
     """
 
     name: str
@@ -252,6 +254,7 @@ class OpSpec:
     reference_fits: Callable[[Case], bool | str] = _always_fits
     default_dtypes: list[str] | None = None
     parity_notes: list[ParityNote] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         names = [impl.name for impl in self.implementations]

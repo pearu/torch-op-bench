@@ -1231,6 +1231,27 @@ PARITY_NOTES = [
 ]
 
 
+# What the records cannot show by themselves, for the report's "Notes": each dated,
+# with the runs that reproduce it.
+NOTES = [
+    "2026-10-31: Under the default matmul setting, `grad_hidden_rel_l2` of every "
+    "unchunked entry rises at N=8192 (0.0024 against 0.0017 at N=4096 and N=16384 on "
+    "`ey`, torch 2.16.0.dev20261017): the GEMM `grad_logits @ weight` (K = V = 131072) "
+    "picks a kernel with a bf16 reduced-precision reduction at that shape; under "
+    "`--matmul-reduction strict` it is 0.0017 at all three (reproduced by `run lce "
+    "--case N=8192 --impl torch_eager` under the default setting and under "
+    "`--matmul-reduction strict`: the records' `parity.metrics.grad_hidden_rel_l2`). The "
+    "'Reduction setting' section compares the default point only, so it cannot show "
+    "this.",
+    "2026-10-31: A time ratio in the 'Reduction setting' section within the environment "
+    "check's time band is run-to-run variation, not the setting: on one card, sessions "
+    "differ by about 1–2 % (reproduced by `run lce --case N=4096` in separate sessions "
+    "on `ey`, torch 2.16.0.dev20261017 and 2.14.1, with `--env` for the 2.14.1 "
+    "environments: the records' medians); the parity columns are the section's "
+    "evidence.",
+]
+
+
 def variants(implementations: list[Implementation]) -> list[Implementation]:
     """The ``VARIANTS`` of the entries that have them, in the entries' order."""
     return [
@@ -1313,4 +1334,5 @@ LCE = OpSpec(
     work=work,
     reference_fits=reference_fits,
     parity_notes=PARITY_NOTES,
+    notes=NOTES,
 )
