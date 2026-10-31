@@ -36,6 +36,9 @@ REDUCED_PRECISION_FLAGS = (
     "allow_fp16_reduced_precision_reduction",
 )
 
+# The dtypes ``prime_device`` multiplies in; any other case dtype primes in float32.
+MATMUL_DTYPES = ("float16", "bfloat16", "float32", "float64")
+
 # An out-of-memory error's figures. CUDA's message: "Tried to allocate 4.00 GiB. GPU 0
 # has a total capacity of 15.57 GiB of which 2.28 GiB is free. … Of the allocated
 # memory 9.13 GiB is allocated by PyTorch, and 3.97 GiB is reserved by PyTorch but
@@ -187,6 +190,30 @@ def out_of_memory_reason(device: Any, exc: BaseException, phase: str) -> str:
     return f"out of memory on {device_memory(device)}\n{memory_figures(exc)}; phase: {phase}"
 
 
+def prime_device(device: Any, dtype: str) -> None:
+    """Give cuBLAS its workspaces on a CUDA ``device`` before the case's inputs exist:
+    a 64x64 matmul in ``dtype`` (float32 if it is not in ``MATMUL_DTYPES``) with a
+    backward, synchronized, its tensors dropped. Nothing on any other device.
+
+    The first GEMM on a cuBLAS handle allocates the handle's workspace (32 MiB) from
+    the caching allocator; the calling thread and autograd's device thread have a
+    handle each. Left to the op's first call, a workspace lands in whatever block is
+    free then: inside a freed temporary of several GiB it pins that segment, and the
+    later calls find the memory short (``torchtitan_ce`` fwd_bwd at V=262144 fits a
+    16 GB card as a process's first call and runs out on every later one; Review
+    R1-42). In a training process the workspaces exist long before such an op runs;
+    priming puts each in a segment of its own, as there, outside every measured
+    region, for every implementation alike."""
+    if device.type != "cuda":
+        return
+    import torch
+
+    name = dtype if dtype in MATMUL_DTYPES else "float32"
+    a = torch.ones(64, 64, dtype=getattr(torch, name), device=device, requires_grad=True)
+    (a @ a).sum().backward()
+    torch.cuda.synchronize(device)
+
+
 def _measure(
     spec: OpSpec,
     impl: Implementation,
@@ -237,6 +264,7 @@ def _phases(
 
     from .measure import clear_grads, peak_memory, time_callable
 
+    prime_device(device, case.dtype)
     generator = torch.Generator(device=device)
     generator.manual_seed(settings["seed"])
     inputs = spec.make_inputs(case, device, generator)
