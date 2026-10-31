@@ -404,6 +404,12 @@ def parity_notes(recs: Sequence[Mapping[str, Any]]) -> list[Any]:
     return list(getattr(spec, "parity_notes", None) or [])
 
 
+def op_notes(recs: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The op's ``notes`` when its spec resolves here, else none."""
+    spec = spec_of(recs[0]) if recs else None
+    return list(getattr(spec, "notes", None) or [])
+
+
 def failed_metrics(row: Row) -> list[str]:
     """The parity metrics a row failed on, from ``parity_failed``."""
     return [name for name in (row.get("parity_failed") or "").split(",") if name]

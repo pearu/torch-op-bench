@@ -175,6 +175,9 @@ variables are set.
   line, the torch version it was verified on) and a reference (an issue or PR URL).
   The reports mark a failure a note explains (see "Reports"); the note lives with the
   op, not in the records, so a cause found after a run needs no rerun.
+- `notes`: a list of strings, free text the op's author vouches for, each dated and
+  sourced (and naming the card or the version it was seen on), on what the records
+  cannot show by themselves; the report prints them verbatim in its "Notes" section.
 
 Each (case, implementation, mode) runs in a fresh worker
 (`python -m torch_op_bench.worker`, a JSON payload on stdin, one JSON record on
@@ -342,7 +345,11 @@ What the records say:
   (`torch/nn/modules/linear_cross_entropy.py:534` in torch 2.16.0.dev20261017) and
   the override keeps it in fp32; reported as pytorch#201659, fix pytorch#202050.
   Once the fix merges, `lce.BF16_LOSS_FIX_DATE` takes the day it reached torch main,
-  and the note no longer applies to a nightly from that day on.
+  and the note no longer applies to a nightly from that day on. Two more facts the
+  records cannot show by themselves are the op's `notes` (`lce.NOTES`, printed in
+  the report's "Notes"): the rise of `grad_hidden_rel_l2` at N=8192 under the
+  default matmul setting, and that a "Reduction setting" time ratio within the
+  environment check's band is run-to-run variation.
 - `info`: the contract's constants, `compiled`, and for `torch_lce*` the resolved
   `options` and `lce_source_md5`. That is an md5 of torch's LCE source files, which
   the build hash misses when an editable install's Python files are edited.
@@ -412,7 +419,9 @@ torch-op-bench plot results --out figures \
 command that made it, and any warning the merge raised (records from different
 torch-op-bench commits). Its sections:
 
-1. **Provenance**: device, hosts, the time span of the records, and one row per
+1. **Provenance**: device, hosts, the time span of the records and their number in
+   each directory read, named as given (`232 records in results, 18 in
+   results-strict`), and one row per
    environment build: torch and CUDA, Python, the packages (a version, or the first
    12 characters of the commit of a git install), the torch-op-bench commit, and
    the matmul settings. It says so when the commits differ, or when one environment
@@ -423,17 +432,18 @@ torch-op-bench commits). Its sections:
    status instead when it is not `ok`), time against the baseline, tokens/s, TFLOP/s,
    peak memory above baseline and against the baseline's, **time × peak** (median ms ×
    peak above baseline in MiB, in ms·MiB) and against the baseline's, parity and its
-   metrics (`fail¹` when a parity note of the op explains the failure there, the
-   note numbered under the table: one footnote per distinct note per table, the same
-   in the sweeps' parity tables), and `override`: `kernel` (the override dispatched and its kernel ran),
+   metrics (`fail: a¹, b`: each failed metric with the mark of the parity note of
+   the op that explains it there, `b` unexplained; the note numbered under the
+   table: one footnote per distinct note per table, the same in the sweeps' parity
+   tables), and `override`: `kernel` (the override dispatched and its kernel ran),
    `dispatch only` (it dispatched, and ran no kernel of its own), or `no` (`dispatch`
    for a record older than `override_kernel_ran`; `—` for an entry that records
    neither), from `verify.override_ran` and `verify.override_kernel_ran`. When an
    entry is `dispatch only`, a sentence under the table says its time is not the
    override kernel's. The second, "Entry details", has one row per implementation in
    the same order and one cell: the `key=value` pairs of the `info` fields that differ
-   between records (e.g. `torchtitan_api`, `compile`, `op_decisions.is_cuda`), keys
-   sorted, those the entry lacks left out, so a difference cannot hide in `info`. No
+   between records (e.g. `torchtitan_api`, `compile`, `op_decisions.is_cuda`), one
+   per line, keys sorted, those the entry lacks left out, so a difference cannot hide in `info`. No
    table of the report is wider than 16 columns.
 3. **Sweeps**: for each axis varied around the default point, four tables (median,
    peak, time × peak with its ratio to the baseline's in parentheses, parity with
@@ -450,11 +460,14 @@ torch-op-bench commits). Its sections:
    the one whose peak above baseline is the largest within the budget (of two at that
    peak, the faster), with what produced it in small print: the variant's parameter,
    or `default` with the entry's own value when its `info` records it; `—` when none
-   fits, with the entry's lowest measured peak over its default and variants in small
-   print (`— lowest 3104.0 MiB`), so the cell shows how far it misses; ", parity
-   fail" when that record fails parity. The last column is the
-   default's own time and peak. A variant that is not `ok` is in no cell, and a
-   sentence under the table names it. Variants are in no other table but "Parity
+   fits (measured; no point within the budget), with the entry's lowest measured peak
+   over its default and variants in small print (`— lowest 3104.0 MiB`), so the cell
+   shows how far it misses; ", parity fail" when that record fails parity. The last
+   column is the default's own time and peak. A variant that is not `ok` is in no
+   cell, and a sentence under the table names it. When every budget of a row picks
+   the same point, a sentence under the table names the row ("every budget admits
+   the same point"): none of the entry's points lies between the smallest budget and
+   the largest, so the budgets do not separate them there. Variants are in no other table but "Parity
    failures" (a note of an entry covers its variants) and "Not measured".
 5. **Reduction setting**, only with `--strict RESULTS_STRICT` (the results of a
    `run --matmul-reduction strict`): first a check that every record of `RESULTS`
@@ -472,9 +485,10 @@ torch-op-bench commits). Its sections:
    and, for each torch LCE entry, whether its default parity equals its strict
    parity: the check that, once PR pytorch#195707 lands as reviewed, torch LCE
    accumulates in fp32 under the defaults while Liger and torchtitan do not.
-6. **Parity failures**: every record whose parity is `fail`, grouped by entry and
-   metric, "explained: <note>" when one of the op's `parity_notes` applies there,
-   else "**unexplained**"; then "N parity failures, M explained", a record counting
+6. **Parity failures**: every record whose parity is `fail`, grouped by entry, then
+   by "explained: <note>" (the note's text once per entry) when one of the op's
+   `parity_notes` applies there, else "**unexplained**", then by metric, with the
+   records under each; then "N parity failures, M explained", a record counting
    as explained when every metric it fails is. When the op cannot be imported,
    there are no notes and every failure is unexplained, and a last sentence says so
    ("The op `<op_ref>` does not import here: …").
@@ -504,6 +518,8 @@ torch-op-bench commits). Its sections:
    whose reasons are written to be stable, the first line of the reason, and the
    second line in each row (for a point out of memory, one group per device, each
    row with its figures and phase).
+9. **Notes**, only when the op has `notes` and imports here: each note verbatim,
+   under a sentence saying they are the op author's, not computed by the report.
 
 Numbers have 3 significant digits and memory is in MiB with one decimal.
 
@@ -540,7 +556,9 @@ results hold several):
   baseline at the default point, one line per entry with variants through its
   default and variants (by peak), the baseline as a reference point, and the peak
   budgets of the report's "Time at equal peak" as dotted vertical lines; no point is
-  labelled with its parameter (the CSV names each point's entry). Two entries whose
+  labelled with its parameter (the CSV names each point's entry). Each entry's default
+  point is ringed in black ("default: edged" in the legend), and the CSV's extra
+  column `default` says which point it is (empty for the baseline and the budgets). Two entries whose
   points coincide one by one, in order of peak, are stacked and named as below. The
   footer counts what is left out and the parity failures, as every footer does.
   With `--impl`, the entries named, or one of whose variants is named.

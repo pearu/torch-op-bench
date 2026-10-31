@@ -1353,6 +1353,7 @@ def test_metric_only_away_from_the_sweeps(synth, tmp_path):
 
 
 def test_equal_peak_figure(synth, tmp_path, monkeypatch):
+    import matplotlib.colors
     import matplotlib.pyplot as plt
 
     S.write_variants(synth)
@@ -1368,22 +1369,31 @@ def test_equal_peak_figure(synth, tmp_path, monkeypatch):
         ("budget", "peak_above_baseline", "bfloat16", "fwd_bwd", point),
         ("median_ms", "peak_above_baseline", "bfloat16", "fwd_bwd", point),
     }
+    assert list(rows[0]) == [*plot.CSV_COLUMNS, "default"]
     drawn = [
-        (r["implementation"], r["role"], float(r["x"]), r["y"] and float(r["y"]), r["parity_fail"])
+        (
+            r["implementation"],
+            r["role"],
+            float(r["x"]),
+            r["y"] and float(r["y"]),
+            r["parity_fail"],
+            r["default"],
+        )
         for r in rows
     ]
     # The budgets (64 MiB the baseline's peak), the baseline, then each entry's points
-    # by peak: the planted numbers of synth_results.VARIANTS.
+    # by peak: the planted numbers of synth_results.VARIANTS; `default` names the
+    # entries' own points (I1-19 stumble 4).
     assert drawn == [
-        ("1× base", "budget", 64.0, "", ""),
-        ("0.75× base", "budget", 48.0, "", ""),
-        ("0.5× base", "budget", 32.0, "", ""),
-        ("base", "baseline", 64.0, 64.0, "False"),
-        ("compiled[mode=a]", "counterpart", 56.0, 38.4, "False"),
-        ("compiled", "counterpart", 64.0, 32.0, "False"),
-        ("chunked[num_chunks=8]", "counterpart", 8.0, 192.0, "False"),
-        ("chunked", "counterpart", 16.0, 128.0, "False"),
-        ("chunked[num_chunks=2]", "counterpart", 40.0, 102.4, "True"),
+        ("1× base", "budget", 64.0, "", "", ""),
+        ("0.75× base", "budget", 48.0, "", "", ""),
+        ("0.5× base", "budget", 32.0, "", "", ""),
+        ("base", "baseline", 64.0, 64.0, "False", ""),
+        ("compiled[mode=a]", "counterpart", 56.0, 38.4, "False", "False"),
+        ("compiled", "counterpart", 64.0, 32.0, "False", "True"),
+        ("chunked[num_chunks=8]", "counterpart", 8.0, 192.0, "False", "False"),
+        ("chunked", "counterpart", 16.0, 128.0, "False", "True"),
+        ("chunked[num_chunks=2]", "counterpart", 40.0, 102.4, "True", "False"),
     ]
     fig = closed[names.index("equal-peak-fwd_bwd.png")]
     (ax,) = fig.axes
@@ -1396,6 +1406,7 @@ def test_equal_peak_figure(synth, tmp_path, monkeypatch):
         "base (baseline)",
         "compiled",
         "chunked",
+        "default: edged",
         "budgets: 1×, 0.75×, 0.5× base's peak",
     ]
     # One line per entry through its points; the failing point hollow.
@@ -1404,8 +1415,24 @@ def test_equal_peak_figure(synth, tmp_path, monkeypatch):
     ]
     assert [list(line.get_xdata()) for line in lines] == [[56.0, 64.0], [8.0, 16.0, 40.0]]
     assert [line.get_color() for line in lines] == [palette["compiled"], palette["chunked"]]
-    hollow = [m for m in ax.get_lines() if m.get_markerfacecolor() == "none"]
+    black = matplotlib.colors.to_rgba("black")
+    # The rings: black, unfilled (the baseline's black point is filled).
+    edged = [
+        m
+        for m in ax.get_lines()
+        if matplotlib.colors.to_rgba(m.get_markeredgecolor()) == black
+        and m.get_markerfacecolor() == "none"
+    ]
+    hollow = [m for m in ax.get_lines() if m.get_markerfacecolor() == "none" and m not in edged]
     assert [(list(m.get_xdata()), list(m.get_ydata())) for m in hollow] == [([40.0], [102.4])]
+    # Each entry's default ringed in black, larger than its marker; not the baseline's.
+    assert [(list(m.get_xdata()), list(m.get_ydata())) for m in edged] == [
+        ([64.0], [32.0]),
+        ([16.0], [128.0]),
+    ]
+    size = plot.STYLE["counterpart"]["size"]
+    assert {m.get_markersize() for m in edged} == {size + plot.DEFAULT_EDGE["extra"]}
+    assert {m.get_markerfacecolor() for m in edged} == {"none"}
     footer = [t for t in fig.texts if t.get_gid() == "footer"][0].get_text().replace("\n", " ")
     assert "Left out: 1 unavailable" in footer
     assert "Parity failures: 1 (1 explained), drawn hollow." in footer

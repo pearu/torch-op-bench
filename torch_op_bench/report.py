@@ -92,12 +92,14 @@ def case_text(row: Row, axes: Sequence[str]) -> str:
 
 
 def parity_text(row: Row, footnotes: Footnotes | None = None) -> str:
-    """The parity status; for a ``fail``, the metrics, and the marks of the notes
-    that explain any of them (``fail¹``) when ``footnotes`` collects them."""
+    """The parity status; for a ``fail``, the metrics, each with the mark of the note
+    that explains it (``fail: a¹, b``: ``b`` is unexplained) when ``footnotes``
+    collects them (R1-38 R2)."""
     status = row.get("parity_status")
     if status == "fail" and row.get("parity_failed"):
-        marks = footnotes.marks(row) if footnotes is not None else ""
-        return f"fail{marks}: {row['parity_failed']}"
+        marks = footnotes.marks(row) if footnotes is not None else {}
+        failed = analysis.failed_metrics(row)
+        return "fail: " + ", ".join(metric + marks.get(metric, "") for metric in failed)
     return text(status)
 
 
@@ -117,16 +119,16 @@ class Footnotes:
         self.notes, self.axes = notes, axes
         self.marked: list[Any] = []
 
-    def marks(self, row: Row) -> str:
-        """The marks of the distinct notes explaining any metric ``row`` failed on."""
-        found = []
-        for note in analysis.explained(row, self.notes, self.axes).values():
-            if note is not None and note not in found:
-                found.append(note)
-        for note in found:
+    def marks(self, row: Row) -> dict[str, str]:
+        """Per metric ``row`` failed on that a note explains, the note's mark."""
+        found = {}
+        for metric, note in analysis.explained(row, self.notes, self.axes).items():
+            if note is None:
+                continue
             if note not in self.marked:
                 self.marked.append(note)
-        return "".join(self.mark(note) for note in found)
+            found[metric] = self.mark(note)
+        return found
 
     def mark(self, note: Any) -> str:
         return str(self.marked.index(note) + 1).translate(SUPERSCRIPTS)
@@ -196,16 +198,30 @@ def _matmul_text(matmul: Mapping[str, Any] | None) -> str:
     return ", ".join(f"{MATMUL_SHORT.get(k, k)}={v}" for k, v in matmul.items())
 
 
-def render_provenance(recs: Sequence[Mapping[str, Any]], rows: Sequence[Row]) -> str:
-    """Where and with what the records were made: one row per environment build."""
-    slugs = sorted({r["device_slug"] for r in recs})
-    hosts = sorted({h for h in (analysis.host_of(r) for r in recs) if h})
-    stamps = sorted(r["timestamp"] for r in recs if r.get("timestamp"))
+def render_provenance(
+    recs: Sequence[Mapping[str, Any]],
+    rows: Sequence[Row],
+    sets: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+) -> str:
+    """Where and with what the records were made: one row per environment build.
+    ``sets``: the records of each directory read, by its name as given (``results``
+    and ``--strict``'s), counted each and dated together; else ``recs``, unnamed."""
+    every = [r for found in sets.values() for r in found] if sets else recs
+    slugs = sorted({r["device_slug"] for r in every})
+    hosts = sorted({h for h in (analysis.host_of(r) for r in every) if h})
+    stamps = sorted(r["timestamp"] for r in every if r.get("timestamp"))
     lines = ["## Provenance", ""]
     lines.append(f"- device: {', '.join(slugs) or MISSING}")
     lines.append(f"- hosts: {', '.join(hosts) or MISSING}")
+    if not sets:
+        counted = f"{len(recs)} records"
+    else:
+        counted = ", ".join(
+            f"{len(found)}{' records' if i == 0 else ''} in `{name}`"
+            for i, (name, found) in enumerate(sets.items())
+        )
     if stamps:
-        lines.append(f"- records from {stamps[0]} to {stamps[-1]} ({len(recs)} records)")
+        lines.append(f"- records from {stamps[0]} to {stamps[-1]} ({counted})")
     builds: dict[tuple, dict[str, set]] = {}
     for r in recs:
         env = r.get("env") or {}
@@ -366,7 +382,8 @@ def entry_details(entries: Sequence[Row], labels: Sequence[Row]) -> list[str]:
     """The table below the default-point one: per entry, in one cell, the ``info``
     fields that differ between records (``analysis.varying_info``; a field the entry
     lacks is not listed), so a difference cannot hide in ``info`` (R1-30 F6: as
-    columns they made the table 64 wide)."""
+    columns they made the table 64 wide); one field per line (I1-19: the torch LCE
+    entries' ``op_decisions.*`` made one line of some 1500 characters)."""
     columns = sorted(
         c for c in _info_columns(entries) if any(r.get(c) is not None for r in entries)
     )
@@ -375,7 +392,7 @@ def entry_details(entries: Sequence[Row], labels: Sequence[Row]) -> list[str]:
     body = [
         [
             impl_label(row, labels),
-            ", ".join(
+            "<br>".join(
                 f"{c.removeprefix(analysis.INFO_PREFIX)}={text(row[c], INFO_WIDTH)}"
                 for c in columns
                 if row.get(c) is not None
@@ -528,6 +545,35 @@ def _default_cell(row: Row | None) -> str:
     return f"{sig3(row.get('median_ms'))} ms, {mib(row.get('peak_above_baseline'))} MiB"
 
 
+def same_point_note(entries: Sequence[Mapping[str, Any]]) -> list[str]:
+    """A sentence under an equal-peak table on the rows where every budget picks the
+    same point (I1-19's fwd table): there the budgets do not separate the entry's
+    points. Computed from the cells; nothing when no row, or one budget only."""
+    same = [
+        e["base"]
+        for e in entries
+        if len(e["cells"] or []) > 1
+        and e["cells"][0] is not None
+        and all(c is e["cells"][0] for c in e["cells"])
+    ]
+    if not same:
+        return []
+    where = (
+        "In every row"
+        if len(same) == len(entries)
+        else "In the row"
+        + ("s" if len(same) > 1 else "")
+        + " of "
+        + ", ".join(f"`{name}`" for name in same)
+    )
+    return [
+        "",
+        f"{where}, every budget admits the same point: none of the entry's points has "
+        "its peak between the smallest budget and the largest, so the budgets do not "
+        "separate them here.",
+    ]
+
+
 def render_equal_peak(
     found: Mapping[str, Any],
     point: Mapping[str, Any],
@@ -562,6 +608,7 @@ def render_equal_peak(
             ]
         )
     lines.append(table(header, body, [False] + [True] * (len(header) - 1)))
+    lines += same_point_note(found["entries"])
     names = {e["base"] for e in found["entries"]}
     unmeasured = [
         f"`{r['implementation']}` ({text(r.get('status'))})"
@@ -595,9 +642,9 @@ def render_equal_peak_section(
         f"{factors}, the same for every entry. A cell is the median time, in ms, of the "
         f"entry's default or of one of its variants (the entry with another value of its "
         f"own chunk parameter, in small print), the one whose peak above baseline is the "
-        f"largest within the budget; {MISSING} when none is, with the entry's lowest "
-        f"measured peak in small print. The variants exist for this "
-        f"comparison only: no value of a parameter is ranked here.",
+        f"largest within the budget; {MISSING} when none is (measured; no point within the "
+        f"budget), with the entry's lowest measured peak in small print. The variants exist "
+        f"for this comparison only: no value of a parameter is ranked here.",
         "",
     ]
     tables = [
@@ -990,10 +1037,12 @@ def render_parity_failures(
     or unexplained; and the count the "final" check reads. ``unread`` is the
     ``op_ref`` of an op that does not import here, whose notes were not read: a
     sentence says so, so the count does not read as a real failure (R1-38 R1)."""
-    groups: dict[tuple[str, str, Any], list[Row]] = defaultdict(list)
+    # Per entry, per note (None: unexplained), per metric, the records.
+    groups: dict[str, dict[Any, dict[str, list[Row]]]] = defaultdict(dict)
     for row in rows:
         for metric, note in analysis.explained(row, notes, axes).items():
-            groups[(row["implementation"], metric, note)].append(row)
+            by_metric = groups[row["implementation"]].setdefault(note, defaultdict(list))
+            by_metric[metric].append(row)
     total, explained = analysis.parity_failures(rows, notes, axes)
     lines = [PARITY_FAILURES_TITLE, ""]
     if not total:
@@ -1005,13 +1054,23 @@ def render_parity_failures(
             "counts as explained when every metric it fails is.",
             "",
         ]
-        # Per entry and metric, the explained group first.
-        for key in sorted(groups, key=lambda k: (k[0], k[1], k[2] is None)):
-            name, metric, note = key
-            verdict = f"explained: {note.text}" if note is not None else "**unexplained**"
-            lines.append(f"- `{name}`, {metric} ({len(groups[key])}): {verdict}")
-            for row in groups[key]:
-                lines.append(f"  - {row['mode']}, {row.get('dtype')} {case_text(row, axes)}")
+        # Per entry, a note's text once (R1-38 R3), the explained groups first, in
+        # the notes' order; under it, per metric, the records.
+        order = {id(note): i for i, note in enumerate(notes)}
+        for name in sorted(groups):
+            verdicts = sorted(
+                groups[name], key=lambda n: len(order) if n is None else order.get(id(n), 0)
+            )
+            for note in verdicts:
+                verdict = f"explained: {note.text}" if note is not None else "**unexplained**"
+                lines.append(f"- `{name}`, {verdict}")
+                for metric in sorted(groups[name][note]):
+                    found = groups[name][note][metric]
+                    lines.append(f"  - {metric} ({len(found)})")
+                    for row in found:
+                        lines.append(
+                            f"    - {row['mode']}, {row.get('dtype')} {case_text(row, axes)}"
+                        )
     lines += ["", f"{total} parity failure{'' if total == 1 else 's'}, {explained} explained."]
     if unread is not None:
         lines.append(
@@ -1088,6 +1147,27 @@ def render_not_measured(rows: Sequence[Row], axes: Sequence[str]) -> str:
 # --- the document -----------------------------------------------------------------------------
 
 
+# --- 9. the op's notes ----------------------------------------------------------------------
+
+NOTES_TITLE = "## Notes"
+
+
+def render_notes(op_name: str, notes: Sequence[str]) -> str:
+    """The op's ``notes``, verbatim; nothing when it has none (or does not import)."""
+    if not notes:
+        return ""
+    lines = [
+        NOTES_TITLE,
+        "",
+        f"The notes of the op `{op_name}`, as its author wrote them (`OpSpec.notes`); "
+        "the report does not compute them.",
+        "",
+    ]
+    for note in notes:
+        lines += [f"- {note}", ""]
+    return "\n".join(lines)
+
+
 def _one(values: set, what: str, flag: str) -> Any:
     values = values - {None}
     if len(values) > 1:
@@ -1123,6 +1203,7 @@ def report(
         )
         # The strict set of the same op and device as RESULTS.
         recs_strict = [] if strict is None else analysis.load(strict, op=op_name, device_slug=slug)
+        all_strict = recs_strict
         recs_strict = analysis.split_variants(recs_strict)[0]
     rows = analysis.to_rows(base_recs)
     variant_rows = analysis.to_rows(variant_recs)
@@ -1142,7 +1223,10 @@ def report(
     ]
     for warning in caught:
         lines += [f"**Warning:** {warning.message}", ""]
-    lines.append(render_provenance(recs, rows))
+    sets = {str(results_dir): recs}
+    if strict is not None:
+        sets[str(strict)] = all_strict
+    lines.append(render_provenance(recs, rows, sets))
     source = SOURCES.get(point["source"], point["source"])
     lines += ["## At the default point", "", f"The default point is {source}.", ""]
     for d in dtypes:
@@ -1204,4 +1288,5 @@ def report(
     lines.append(render_parity_failures(scope_all, axes, notes, unread=unread))
     lines.append(render_environment_check(scope, axes))
     lines.append(render_not_measured(scope_all, axes))
+    lines.append(render_notes(op_name, analysis.op_notes(recs)))
     return "\n".join(lines).rstrip() + "\n"

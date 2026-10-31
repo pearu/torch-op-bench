@@ -708,11 +708,12 @@ def _figure(
     ratio_line: bool = False,
     panel: Callable[[Any, dict[str, Any], list[Any]], list[dict[str, Any]]] | None = None,
     panel_width: float = PANEL_WIDTH,
+    csv_columns: Sequence[str] = CSV_COLUMNS,
 ) -> Path:
     """The figure of ``metrics`` (rows) against ``axes`` (columns), each panel drawn
     by ``_draw_panel``, or by ``panel(ax, handles, drawn)`` (which adds its legend
     entries to ``handles`` and its series to ``drawn``, as ``_draw_panel`` does, and
-    returns its CSV rows); its bands, layout and CSV."""
+    returns its CSV rows); its bands, layout and CSV (``csv_columns``)."""
     plt = pyplot()
     union = [row for _, rows, _ in sets for row in rows]
     names = analysis.implementations(union, baseline)
@@ -841,7 +842,7 @@ def _figure(
     fig.savefig(path, dpi=DPI)
     plt.close(fig)
     with path.with_suffix(".csv").open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        writer = csv.DictWriter(f, fieldnames=csv_columns)
         writer.writeheader()
         writer.writerows(plotted)
     return path
@@ -1177,6 +1178,11 @@ def plot_reduction(
 
 # The budgets' vertical lines: thin, grey, dotted, under the points.
 BUDGET_STYLE = {"color": "#7f7f7f", "linestyle": ":", "linewidth": 1.0}
+# The default point of each entry in an equal-peak figure: a black ring this much
+# (marker size, points) larger than its marker, so its colour and hollowness show.
+DEFAULT_EDGE = {"color": "black", "extra": 3.0, "width": 1.2}
+DEFAULT_LABEL = "default: edged"
+EQUAL_PEAK_CSV_COLUMNS = [*CSV_COLUMNS, "default"]
 
 
 def equal_peak_panel(
@@ -1190,8 +1196,10 @@ def equal_peak_panel(
     baseline, one line per base entry through its points (default and variants, by
     peak; hollow when the record fails parity), the baseline as a reference point and
     the budgets as vertical lines. No point is labelled with its parameter: the CSV
-    names each one's entry. Two entries whose points coincide, one by one in order
-    of peak, are stacked as in every other figure (``stack_coincident``)."""
+    names each one's entry, and its column ``default`` says which point is the
+    entry's default, drawn edged in black (I1-19 stumble 4). Two entries whose points
+    coincide, one by one in order of peak, are stacked as in every other figure
+    (``stack_coincident``)."""
     from matplotlib.lines import Line2D
 
     def csv_row(row: Row, role: str, x: Any, y: Any) -> dict[str, Any]:
@@ -1216,6 +1224,8 @@ def equal_peak_panel(
             "point": analysis.point_text(point),
             "work": work_text(row) if role != "budget" else None,
             "baseline_work": None,
+            # A base entry's own point, not a variant's; the baseline has no variants.
+            "default": row.get("base") is None if role == "counterpart" else None,
         }
 
     def draw(ax: Any, handles: dict[str, Any], drawn: list[Any]) -> list[dict[str, Any]]:
@@ -1262,6 +1272,22 @@ def equal_peak_panel(
                     zorder=z,
                 )
                 artists.append((marks, 2.0 if hollow else 0.0))
+            for r, x, y, hollow in zip(points, xs, ys, fails, strict=True):
+                if role != "counterpart" or r.get("base") is not None:
+                    continue
+                extra = (2.0 if hollow else 0.0) + DEFAULT_EDGE["extra"]
+                (ring,) = ax.plot(
+                    [x],
+                    [y],
+                    linestyle="none",
+                    marker=style["marker"],
+                    markersize=style["size"] + extra,
+                    markerfacecolor="none",
+                    markeredgecolor=DEFAULT_EDGE["color"],
+                    markeredgewidth=DEFAULT_EDGE["width"],
+                    zorder=z,
+                )
+                artists.append((ring, extra))
             plotted += [csv_row(r, role, x, y) for r, x, y in zip(points, xs, ys, strict=True)]
             stacked.append(
                 {
@@ -1290,6 +1316,21 @@ def equal_peak_panel(
                 ),
             )
         drawn.append((ax, "median_ms", "peak_above_baseline", stacked))
+        if found["entries"]:
+            handles.setdefault(
+                DEFAULT_LABEL,
+                Line2D(
+                    [],
+                    [],
+                    linestyle="none",
+                    marker="o",
+                    markersize=STYLE["counterpart"]["size"],
+                    markerfacecolor="#bfbfbf",
+                    markeredgecolor=DEFAULT_EDGE["color"],
+                    markeredgewidth=DEFAULT_EDGE["width"],
+                    label=DEFAULT_LABEL,
+                ),
+            )
         if found["budgets"]:  # last in the legend: baseline, entries, budgets
             label = f"budgets: {factors} {baseline}'s peak"
             handles.setdefault(label, Line2D([], [], label=label, **BUDGET_STYLE))
@@ -1359,6 +1400,7 @@ def plot_equal_peak(
                 palette=palette,
                 panel=equal_peak_panel(found, baseline, palette, path.stem, point),
                 panel_width=2 * PANEL_WIDTH,
+                csv_columns=EQUAL_PEAK_CSV_COLUMNS,
             )
         )
     return written

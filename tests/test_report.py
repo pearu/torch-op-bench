@@ -76,6 +76,21 @@ def test_provenance(synth):
     assert "**The records come from different torch-op-bench commits**" in text
 
 
+def test_provenance_counts_each_directory(synth, synth_strict):
+    # I1-19 stumble 6: the records of RESULTS and of --strict's directory, each named.
+    with pytest.warns(UserWarning, match=MERGE_WARNING):
+        n = len(analysis.load(synth))
+    with pytest.warns(UserWarning, match=MERGE_WARNING):
+        n_strict = len(analysis.load(synth_strict))
+    line = next(x for x in make(synth).splitlines() if x.startswith("- records from"))
+    assert line.endswith(f" ({n} records in `{synth}`)")
+    line = next(
+        x for x in make(synth, strict=synth_strict).splitlines() if x.startswith("- records from")
+    )
+    assert line.endswith(f" ({n} records in `{synth}`, {n_strict} in `{synth_strict}`)")
+    assert n_strict and n_strict != n
+
+
 def test_default_point(synth):
     text = make(synth)
     assert "The default point is the op's defaults." in text
@@ -115,7 +130,7 @@ def test_default_point(synth):
     assert cells(details[0]) == ["implementation", "info"]
     by_name = {cells(row)[0]: cells(row)[1] for row in details[2:]}
     assert list(by_name) == names
-    assert by_name["chunked"] == "api.name=v2, num_chunks=4"
+    assert by_name["chunked"] == "api.name=v2<br>num_chunks=4"  # one per line
     assert by_name["compiled"] == "compile=fullgraph" and by_name["base"] == "—"
     assert "Entry details: the `info` fields that differ between records." in part
     # fwd: chunked has no fwd records, and no info field of its is there
@@ -229,8 +244,8 @@ def test_tables_within_max_columns(synth, synth_strict, tmp_path):
     assert len(cells(default[0])) == report.MAX_COLUMNS  # 4 parity metrics
     assert len(default) == 2 + 11
     by_name = {cells(row)[0]: cells(row)[1] for row in details[2:]}
-    assert by_name["compiled"].startswith("a00=0, a01=1, ") and "b00" not in by_name["compiled"]
-    assert by_name["chunked"].startswith("api.name=v2, b00=, b01=x, ")
+    assert by_name["compiled"].startswith("a00=0<br>a01=1<br>") and "b00" not in by_name["compiled"]
+    assert by_name["chunked"].startswith("api.name=v2<br>b00=<br>b01=x<br>")
     assert by_name["chunked"].count("=") == 22  # api.name, b00..b19, num_chunks
 
 
@@ -260,7 +275,7 @@ def test_parity_notes(synth):
     text = make(synth, mode="fwd_bwd")
     footnote = f"¹ `chunked`, grad_rel: {synth_op.NOTE.text}"
     part = section(text, "#### fwd_bwd, bfloat16: parity against M", "\n####")
-    assert "| 256 | ok | ok | ok | fail¹: grad_rel |" in part
+    assert "| 256 | ok | ok | ok | fail: grad_rel¹ |" in part
     assert footnote in part.splitlines()
     part = section(text, "#### fwd_bwd, float32: parity against M", "\n####")
     assert "| 256 | ok | ok | ok | fail: grad_rel |" in part and "¹" not in part
@@ -269,10 +284,14 @@ def test_parity_notes(synth):
     part = section(text, "## Parity failures")
     assert text.index("## Parity failures") < text.index("## Environment check")
     lines = part.splitlines()
-    i = lines.index(f"- `chunked`, grad_rel (1): explained: {synth_op.NOTE.text}")
-    assert lines[i + 1] == "  - fwd_bwd, bfloat16 M=256, K=32, N=16, layout=a"
-    assert lines[i + 2] == "- `chunked`, grad_rel (1): **unexplained**"
-    assert lines[i + 3] == "  - fwd_bwd, float32 M=256, K=32, N=16, layout=a"
+    i = lines.index(f"- `chunked`, explained: {synth_op.NOTE.text}")
+    assert lines[i + 1 : i + 6] == [
+        "  - grad_rel (1)",
+        "    - fwd_bwd, bfloat16 M=256, K=32, N=16, layout=a",
+        "- `chunked`, **unexplained**",
+        "  - grad_rel (1)",
+        "    - fwd_bwd, float32 M=256, K=32, N=16, layout=a",
+    ]
     assert "2 parity failures, 1 explained." in lines
     # One mode with no failure.
     part = section(make(synth, mode="fwd"), "## Parity failures")
@@ -338,11 +357,11 @@ def test_parity_notes_of_the_toy_op():
     both = report.render_default(
         analysis.at(rows, mode="fwd_bwd"), point, "plain", title="b", notes=notes
     )
-    assert "| fail¹: y_rel_err |" in both
+    assert "| fail: y_rel_err¹ |" in both
     assert f"¹ `chunked`, any metric: {notes[0].text}" in both.splitlines()
     text = report.render_parity_failures(rows, list(point), notes)
-    assert f"- `chunked`, y_rel_err (1): explained: {notes[0].text}" in text
-    assert "- `chunked`, y_rel_err (1): **unexplained**" in text
+    assert f"- `chunked`, explained: {notes[0].text}\n  - y_rel_err (1)\n" in text
+    assert "- `chunked`, **unexplained**\n  - y_rel_err (1)\n" in text
     assert "2 parity failures, 1 explained." in text
     assert "1 parity failure, 0 explained." in report.render_parity_failures(
         rows[:2], list(point), notes
@@ -362,8 +381,8 @@ def test_footnotes_numbered_per_table():
         ParityNote("plain2", None, always, "third"),
     ]
     text = report.render_default(rows, point, "plain", title="b", notes=notes)
-    assert "| fail¹²: y_rel_err,grad_a_rel_l2 |" in text
-    assert "| fail³: grad_a_rel_l2 |" in text
+    assert "| fail: y_rel_err¹, grad_a_rel_l2² |" in text
+    assert "| fail: grad_a_rel_l2³ |" in text
     lines = text.splitlines()
     footnotes = [line for line in lines if line and line[0] in "¹²³"]
     assert footnotes == [
@@ -371,6 +390,165 @@ def test_footnotes_numbered_per_table():
         "² `chunked`, grad_a_rel_l2: second",
         "³ `plain2`, any metric: third",
     ]
+
+
+def test_partly_explained_cell():
+    # R1-38 R2: a record failing two metrics, one of them explained, carries the mark
+    # on that metric only; "Parity failures" lists the other as unexplained.
+    point, rows = toy_rows("y_rel_err,grad_a_rel_l2")
+    rows = analysis.at(rows, mode="fwd_bwd")
+    always = lambda *args: True  # noqa: E731
+    notes = [ParityNote("chunked", ("y_rel_err",), always, "the cause of y")]
+    text = report.render_default(rows, point, "plain", title="b", notes=notes)
+    assert "| fail: y_rel_err¹, grad_a_rel_l2 |" in text
+    assert "fail¹" not in text and "¹ `chunked`, y_rel_err: the cause of y" in text
+    failures = report.render_parity_failures(rows, list(point), notes)
+    assert failures.splitlines()[4:] == [
+        "- `chunked`, explained: the cause of y",
+        "  - y_rel_err (1)",
+        "    - fwd_bwd, float32 M=16, K=4, N=4, layout=contiguous",
+        "- `chunked`, **unexplained**",
+        "  - grad_a_rel_l2 (1)",
+        "    - fwd_bwd, float32 M=16, K=4, N=4, layout=contiguous",
+        "",
+        "1 parity failure, 0 explained.",
+    ]
+    # Without the notes: every metric unmarked.
+    assert "| fail: y_rel_err, grad_a_rel_l2 |" in report.render_default(
+        rows, point, "plain", title="b"
+    )
+
+
+def test_parity_failures_cite_a_note_once():
+    # R1-38 R3: one note covering two metrics of an entry in two modes: its text once,
+    # the (metric, case) groups under it; the count unchanged.
+    point, rows = toy_rows("y_rel_err,grad_a_rel_l2")
+    always = lambda *args: True  # noqa: E731
+    note = ParityNote("chunked", None, always, "one long cause")
+    text = report.render_parity_failures(rows, list(point), [note])
+    assert text.count("one long cause") == 1
+    assert text.splitlines()[4:] == [
+        "- `chunked`, explained: one long cause",
+        "  - grad_a_rel_l2 (2)",
+        "    - fwd, float32 M=16, K=4, N=4, layout=contiguous",
+        "    - fwd_bwd, float32 M=16, K=4, N=4, layout=contiguous",
+        "  - y_rel_err (2)",
+        "    - fwd, float32 M=16, K=4, N=4, layout=contiguous",
+        "    - fwd_bwd, float32 M=16, K=4, N=4, layout=contiguous",
+        "",
+        "2 parity failures, 2 explained.",
+    ]
+
+
+def test_op_notes(synth, monkeypatch):
+    # R1-42 N1, N2: the op's notes verbatim, last; none when it has none, or when the
+    # op does not import here.
+    assert "## Notes" not in make(synth)
+    spec = analysis.spec_of({"op_ref": S.OP_REF})
+    notes = ["2026-10-31: first, with `code` | a bar.", "2026-10-31: second."]
+    monkeypatch.setattr(spec, "notes", notes)
+    text = make(synth)
+    part = text[text.index("## Notes") :]
+    assert text.index("## Not measured") < text.index("## Notes")
+    assert part.splitlines() == [
+        "## Notes",
+        "",
+        "The notes of the op `synth`, as its author wrote them (`OpSpec.notes`); the "
+        "report does not compute them.",
+        "",
+        f"- {notes[0]}",
+        "",
+        f"- {notes[1]}",
+    ]
+
+    def unresolvable(ref):
+        raise ModuleNotFoundError(ref)
+
+    monkeypatch.setattr(analysis, "_SPECS", {})
+    monkeypatch.setattr("torch_op_bench.spec.resolve_op", unresolvable)
+    assert "## Notes" not in make(synth)
+    assert report.render_notes("x", []) == ""
+
+
+def test_lce_notes():
+    # Each LCE note dated and sourced (R1-42), and the op's text, not computed.
+    from torch_op_bench.ops import lce
+
+    assert len(lce.LCE.notes) == 2
+    for note in lce.LCE.notes:
+        assert re.match(r"\d{4}-\d{2}-\d{2}: ", note) and "Review R1-42" in note
+    assert "`ey`, torch 2.16.0.dev20261017" in lce.LCE.notes[0]
+    assert "on one card" in lce.LCE.notes[1]
+
+
+def flat_info(info, prefix=analysis.INFO_PREFIX):
+    """``info`` as ``to_rows`` flattens it: nested keys joined by dots."""
+    out = {}
+    for key, value in info.items():
+        if isinstance(value, dict):
+            out.update(flat_info(value, f"{prefix}{key}."))
+        else:
+            out[prefix + key] = value
+    return out
+
+
+# The info of torch_lce at I1-19's default point, fwd_bwd (`ey`, 9ce07bc), less the
+# fields every entry shares.
+LCE_INFO = {
+    "lce_source_files": ["_native/ops/linear_cross_entropy/__init__.py"],
+    "lce_source_md5": "64bcb6b82ab92123fb60fff7a4cfdb97",
+    "num_chunks": 32,
+    "op_decisions": {
+        "acc_dtype": "float32",
+        "alloc_input_grad_acc_buf": False,
+        "alloc_linear_bias_grad_chunk": False,
+        "alloc_logits_acc_buf": False,
+        "alloc_prob_target_buf": False,
+        "alloc_weight_grad_chunk": False,
+        "dtype": "bfloat16",
+        "forward_uses_acc_input": False,
+        "forward_uses_cuda_out_dtype": True,
+        "grad_input_dtype": "bfloat16",
+        "is_cuda": True,
+        "is_prob_target": False,
+        "linear_weight_cast_dtype": "bfloat16",
+        "source": "torch.nn.modules.linear_cross_entropy._ChunkContext.build",
+        "use_acc_dtype": True,
+        "weight_chunk_dtype": "float32",
+        "weight_grad_mm_same_dtype": True,
+        "weight_grad_uses_logits_buf_temp": True,
+    },
+    "options": {
+        "acc_dtype": "float32",
+        "acc_policy": "compact",
+        "batch_chunk_size": 128,
+        "chunking_method": "aspect_ratio",
+        "resolved": True,
+    },
+}
+
+
+def test_entry_details_one_field_per_line():
+    # I1-19 stumble 7: the torch LCE row's 26 fields, one per line in their cell; the
+    # table stays two columns wide.
+    rows = [
+        {"implementation": "torch_eager"},
+        {"implementation": "torch_lce", **flat_info(LCE_INFO)},
+        {"implementation": "torch_compiled", **flat_info({"compile": "torch.compile"})},
+    ]
+    # As to_rows makes them: every row has every column.
+    columns = dict.fromkeys(k for row in rows for k in row)
+    rows = [{**dict.fromkeys(columns), **row} for row in rows]
+    lines = report.entry_details(rows, rows)
+    body = {cells(r)[0]: cells(r) for r in tables("\n".join(lines))[0][2:]}
+    assert all(len(c) == 2 for c in body.values())
+    pairs = body["torch_lce"][1].split("<br>")
+    assert len(pairs) == 3 + 18 + 5  # lce_source_files is one field
+    assert pairs[3] == "op_decisions.acc_dtype=float32"
+    assert pairs[-1] == "options.resolved=True"
+    assert all(", " not in pair or pair.startswith("lce_source_files") for pair in pairs)
+    assert body["torch_compiled"][1] == "compile=torch.compile"
+    assert body["torch_eager"][1] == "—"
 
 
 def test_environment_check(synth):
@@ -899,6 +1077,8 @@ def test_equal_peak_section(synth):
         in text
     )
     assert "no value of a parameter is ranked here" in text
+    # I1-19 stumble 2: an empty cell is measured, not missing.
+    assert "— when none is (measured; no point within the budget), with the entry's" in text
     header = (
         "| implementation | ≤ 1× (64.0 MiB) | ≤ 0.75× (48.0 MiB) | ≤ 0.5× (32.0 MiB) "
         "| default: median ms, peak MiB |"
@@ -939,6 +1119,30 @@ def test_equal_peak_section(synth):
     ]
 
 
+def test_equal_peak_same_point_note():
+    # I1-19 stumble 3: a row whose budgets all pick one point is named under the
+    # table; a row with no point, or one budget, is not.
+    a, b = {"median_ms": 1.0}, {"median_ms": 2.0}
+    same = {"base": "same", "cells": [a, a, a]}
+    moves = {"base": "moves", "cells": [b, a, a]}
+    empty = {"base": "empty", "cells": [None, None, None]}
+    assert report.same_point_note([moves, empty]) == []
+    assert report.same_point_note([{"base": "one", "cells": [a]}]) == []
+    assert report.same_point_note([{"base": "none", "cells": None}]) == []
+    tail = (
+        ", every budget admits the same point: none of the entry's points has its peak "
+        "between the smallest budget and the largest, so the budgets do not separate "
+        "them here."
+    )
+    assert report.same_point_note([same, same]) == ["", "In every row" + tail]
+    assert report.same_point_note([same, moves]) == ["", "In the row of `same`" + tail]
+    other = {**same, "base": "other"}
+    assert report.same_point_note([same, empty, other]) == [
+        "",
+        "In the rows of `same`, `other`" + tail,
+    ]
+
+
 def test_equal_peak_without_a_baseline(synth):
     S.write_variants(synth)
     text = section(
@@ -974,7 +1178,9 @@ def test_variants_change_nothing_else(synth, synth_strict):
         == section(before, "## Sweeps").rstrip()
     )
     failures = section(after, "## Parity failures")
-    assert "- `chunked[num_chunks=2]`, grad_rel (1): explained: a planted cause" in failures
+    assert f"- `chunked[num_chunks=2]`, explained: {synth_op.NOTE.text}\n  - grad_rel (1)\n" in (
+        failures
+    )
     assert (
         "3 parity failures, 2 explained." in failures
         and "2 parity failures, 1 explained." in before
