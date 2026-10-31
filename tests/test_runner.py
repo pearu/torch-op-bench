@@ -1,4 +1,5 @@
 import io
+import os
 import subprocess
 import sys
 
@@ -211,6 +212,48 @@ def test_launch_failures(tests_dir, tmp_path):
     record = runner.launch(payload, str(fake), 10)
     assert record["reason"] == "worker exited with code 3 without a record"
     assert record["stderr"] == "broken\n"
+
+
+def test_launch_hides_the_gpus_from_a_cpu_case(tmp_path):
+    # torch.compile's tracing saves the CUDA RNG state whenever a GPU is visible:
+    # a CPU case's worker sees none. A CUDA case's sees what the runner sees.
+    fake = tmp_path / "fake-python"
+    fake.write_text('#!/bin/sh\necho "[${CUDA_VISIBLE_DEVICES-unset}]" >&2\nexit 1\n')
+    fake.chmod(0o755)
+    for device, expected in [("cpu", "[]\n"), ("cuda", "[0]\n")]:
+        case = Case(SPEC.default_point, "float32", device)
+        payload = runner.make_payload(
+            SPEC, "toy_op:TOY", case, SPEC.implementation("plain"), "fwd", FAST, slug=device
+        )
+        payload["env_vars"] = {"CUDA_VISIBLE_DEVICES": "0"}
+        assert runner.launch(payload, str(fake), 10)["stderr"] == expected
+
+
+def cuda_state_reporter(directory, monkeypatch):
+    """A ``sitecustomize`` on the workers' path that appends, as the worker and each
+    Python process it starts (torch.compile's) exit, whether it initialised CUDA
+    (``torch.cuda.is_initialized()``) to the file it returns."""
+    state = directory / "cuda-state"
+    (directory / "sitecustomize.py").write_text(
+        "import atexit, os, sys\n"
+        "def _report():\n"
+        "    torch = sys.modules.get('torch')\n"
+        "    with open(os.environ['TOB_TEST_CUDA_STATE'], 'a') as f:\n"
+        "        f.write(f'{torch is not None and torch.cuda.is_initialized()}\\n')\n"
+        "atexit.register(_report)\n"
+    )
+    monkeypatch.setenv(
+        "PYTHONPATH", os.pathsep.join(filter(None, [str(directory), os.environ.get("PYTHONPATH")]))
+    )
+    monkeypatch.setenv("TOB_TEST_CUDA_STATE", str(state))
+    return state
+
+
+def test_cpu_case_through_the_runner_does_not_initialise_cuda(tests_dir, tmp_path, monkeypatch):
+    state = cuda_state_reporter(tmp_path, monkeypatch)
+    record = runner.launch(_plain_payload(tests_dir), sys.executable, 120)
+    assert record["status"] == "ok", record.get("stderr")
+    assert set(state.read_text().split()) == {"False"}
 
 
 def test_worker_error_carries_stderr(tests_dir):

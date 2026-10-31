@@ -198,7 +198,7 @@ def test_backward_style_parity_against_backward_style_reference(tests_dir, monke
 
 
 def test_env_failure_keeps_the_record(tests_dir, monkeypatch):
-    def broken(packages=()):
+    def broken(packages=(), device=None):
         raise RuntimeError("CUDA error: an illegal memory access was encountered")
 
     monkeypatch.setattr(worker.env, "collect", broken)
@@ -305,6 +305,49 @@ def test_subprocess_cuda_memory(tests_dir):
     assert record["memory"]["peak_bytes"] > record["memory"]["baseline_bytes"]
     assert record["parity"]["status"] == "ok"
     assert record["env"]["torch"]["devices"]
+
+
+# A worker's own work, in a fresh interpreter, without the runner (whose
+# CUDA_VISIBLE_DEVICES="" for a CPU case would hide what the worker touches).
+CUDA_STATE = """
+import json, sys
+from torch_op_bench import worker
+record = worker.run_payload(json.load(sys.stdin))
+import torch
+print(json.dumps({**record, "cuda_initialized": torch.cuda.is_initialized()}))
+"""
+
+
+@pytest.mark.parametrize("op", ["toy", "lce"])
+def test_cpu_case_does_not_initialise_cuda(tests_dir, op):
+    # On a machine with a GPU, the provenance (``env.collect``) and LCE's profiled
+    # verify each initialised CUDA for a CPU case (R1-43). On CPU-only CI the
+    # assertion holds trivially.
+    from torch_op_bench import runner
+    from torch_op_bench.ops import lce
+    from torch_op_bench.spec import Case
+
+    if op == "toy":
+        data = payload(tests_dir, "plain", "fwd_bwd")
+    else:
+        case = Case({"N": 64, "H": 32, "V": 96, "ignore_frac": "0.25"}, "float32", "cpu")
+        impl = lce.LCE.implementation("torch_eager")
+        data = runner.make_payload(
+            lce.LCE, "lce", case, impl, "fwd_bwd", runner.Settings(warmup=1, repeat=2), slug="cpu"
+        )
+    proc = subprocess.run(
+        [sys.executable, "-c", CUDA_STATE],
+        input=json.dumps(data),
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    record = json.loads(proc.stdout.splitlines()[-1])
+    assert record["status"] == "ok", (record["reason"], proc.stderr)
+    assert record["cuda_initialized"] is False
+    assert record["env"]["torch"]["devices"] == [] and record["env"]["torch"]["cudnn"] is None
+    if op == "lce":
+        assert record["verify"] == {"native_events": []}
 
 
 # torch's CUDA out-of-memory message, as I1-12 recorded it.

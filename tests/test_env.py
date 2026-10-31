@@ -94,6 +94,31 @@ def test_torch_without_cuda(monkeypatch):
     json.dumps(env.collect())
 
 
+def test_torch_info_of_a_cpu_case(monkeypatch):
+    # Asking a GPU's properties initialises CUDA: a CPU case asks nothing of CUDA
+    # but the build's version; a CUDA case, or none (``env``), asks as before.
+    asked = []
+
+    def ask(name, value):
+        def fake(*args):
+            asked.append(name)
+            return value
+
+        return fake
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", ask("device_count", 0))
+    monkeypatch.setattr(torch.backends.cudnn, "version", ask("cudnn", 90000))
+    info = env.torch_info("cpu")
+    assert info["devices"] == [] and info["cudnn"] is None
+    assert info["cuda"] == torch.version.cuda
+    assert env.collect(device="cpu")["torch"] == info
+    assert asked == []
+    assert env.torch_info("cuda:0")["cudnn"] == 90000
+    assert env.torch_info()["cudnn"] == 90000
+    assert asked == ["cudnn", "device_count"] * 2
+
+
 def test_without_torch(monkeypatch):
     import builtins
 

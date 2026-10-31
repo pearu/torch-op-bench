@@ -138,7 +138,9 @@ def run_payload(payload: dict[str, Any]) -> dict[str, Any]:
         record["traceback"] = traceback.format_exc()
     record["env_from"] = "worker"
     try:
-        record["env"] = env.collect(payload.get("packages", ()))
+        record["env"] = env.collect(
+            payload.get("packages", ()), device=payload.get("case", {}).get("device")
+        )
     except Exception as exc:  # e.g. CUDA in a bad state: keep the measurement anyway
         record["env_error"] = f"{type(exc).__name__}: {exc}"
     return to_json(record)

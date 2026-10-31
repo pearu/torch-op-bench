@@ -1308,28 +1308,59 @@ def test_cuda_small_case_through_runner(tmp_path):
     assert peak["torch_lce"] < peak["torch_eager"], peak
 
 
+def _unchunked_reference_bytes(c):
+    """``reference_bytes`` as it was before the reference was chunked."""
+    n, h, v = lce._shape(c)
+    return 4 * (3 * n * v + 2 * (n * h + v * h))
+
+
 @pytest.mark.cuda
-def test_cuda_parity_where_the_unchunked_reference_does_not_fit(tmp_path):
-    # N=16384 at the default H and V: the unchunked fp32 reference needed
-    # 4 (3 N V + 2 (N H + V H)) = 28.5 GiB, more than this device has; parity was
-    # skipped there (F3 of R1-30). Chunked over N it needs 8 GiB, and is measured.
-    point = {"N": 16384, "H": 4096, "V": 131072, "ignore_frac": "0.1"}
-    cases = runner.enumerate_cases(SPEC, device="cuda", cases=[point])
-    written = runner.run_sweep(
-        SPEC,
-        "lce",
-        runner.enumerate_runs(SPEC, cases, ["torch_eager"]),
-        settings=runner.Settings(warmup=1, repeat=2, timeout=900),
-        results_dir=tmp_path,
-        slug="gpu",
-        env_map=runner.parse_env_map(),
+def test_cuda_chunked_reference_memory():
+    # The chunked reference's peak, in process, at a shape of 4 chunks small enough
+    # for any card (under 3 GB): it stays within ``reference_bytes``, the estimate
+    # ``reference_fits`` relies on, and is smaller than the unchunked one's by at
+    # least half of what the two estimates predict. The parity path through the
+    # worker at large shapes rests on the arithmetic of
+    # ``test_reference_chunked_equals_unchunked`` and on the records.
+    import gc
+
+    c = case("bfloat16", "0.1", "cuda", N=4096, H=1024, V=32768)
+    assert lce._shape(c)[0] == 4 * lce.REFERENCE_CHUNK
+    device = torch.device(c.device)
+    worker.prime_device(device, c.dtype)  # cuBLAS's workspaces, as in a worker
+    x = inputs(c)
+
+    def peak(reference, x):
+        clear_grads(x)
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        before = torch.cuda.memory_allocated()
+        outputs = reference(x, "fwd_bwd")
+        torch.cuda.synchronize()
+        del outputs
+        return torch.cuda.max_memory_allocated() - before
+
+    try:
+        unchunked = peak(_reference_unchunked, x)
+        chunked = peak(SPEC.reference.run, x)
+        unchunked_again = peak(_reference_unchunked, x)
+    finally:
+        del x
+        gc.collect()
+        torch.cuda.empty_cache()
+    estimate, unchunked_estimate = lce.reference_bytes(c), _unchunked_reference_bytes(c)
+    mib = 1024**2
+    figures = (
+        f"peaks: chunked {chunked / mib:.0f} MiB, unchunked {unchunked / mib:.0f} MiB "
+        f"(again {unchunked_again / mib:.0f}); estimates: chunked {estimate / mib:.0f} MiB, "
+        f"unchunked {unchunked_estimate / mib:.0f} MiB"
     )
-    assert sorted(r["mode"] for r in written) == ["fwd", "fwd_bwd"]
-    for record in written:
-        assert record["status"] == "ok", record["reason"]
-        parity = record["parity"]
-        assert parity["status"] in ("ok", "fail"), parity
-        assert parity["metrics"]["loss_rel_err"] < 1e-2, parity
+    print(figures)
+    assert unchunked_again == unchunked, figures  # the order does not matter
+    assert chunked <= estimate, figures
+    assert unchunked - chunked >= (unchunked_estimate - estimate) / 2, figures
+    assert unchunked > estimate, figures
 
 
 @pytest.mark.cuda
@@ -1491,6 +1522,24 @@ def test_torchtitan_on_cpu_through_runner(tmp_path, titan_python):
         assert fwd_bwd[name]["info"]["num_chunks"] == 8
         assert fwd_bwd[name]["info"]["chunk_tokens"] == 8
     assert fwd_bwd["torchtitan_chunked_compiled"]["verify"]["compiled_events"]
+
+
+@pytest.mark.parametrize("titan_python", _torchtitan_environments())
+def test_torchtitan_compiled_on_cpu_does_not_initialise_cuda(tmp_path, titan_python, monkeypatch):
+    # torch.compile's tracing saves the CUDA RNG state when a GPU is visible: the
+    # runner hides the GPUs from a CPU case's worker (R1-43).
+    from test_runner import cuda_state_reporter
+
+    state = cuda_state_reporter(tmp_path, monkeypatch)
+    case = Case({**TINY, "ignore_frac": "0.25"}, "float32", "cpu")
+    impl = SPEC.implementation("torchtitan_chunked_compiled")
+    payload = runner.make_payload(
+        SPEC, "lce", case, impl, "fwd_bwd", runner.Settings(warmup=1, repeat=2), slug="cpu"
+    )
+    record = runner.launch(payload, titan_python, 600)
+    assert record["status"] == "ok", (record["reason"], record.get("stderr"))
+    assert record["verify"]["compiled_events"]
+    assert set(state.read_text().split()) == {"False"}
 
 
 @pytest.mark.cuda
