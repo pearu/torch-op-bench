@@ -1240,14 +1240,15 @@ NOTES = [
     "picks a kernel with a bf16 reduced-precision reduction at that shape; under "
     "`--matmul-reduction strict` it is 0.0017 at all three (reproduced by `run lce "
     "--case N=8192 --impl torch_eager` under the default setting and under "
-    "`--matmul-reduction strict`: the records' `parity.grad_hidden_rel_l2`). The "
+    "`--matmul-reduction strict`: the records' `parity.metrics.grad_hidden_rel_l2`). The "
     "'Reduction setting' section compares the default point only, so it cannot show "
     "this.",
     "2026-10-31: A time ratio in the 'Reduction setting' section within the environment "
     "check's time band is run-to-run variation, not the setting: on one card, sessions "
     "differ by about 1–2 % (reproduced by `run lce --case N=4096` in separate sessions "
-    "on `ey`, torch 2.16.0.dev20261017 and 2.14.1: the records' medians); the parity "
-    "columns are the section's evidence.",
+    "on `ey`, torch 2.16.0.dev20261017 and 2.14.1, with `--env` for the 2.14.1 "
+    "environments: the records' medians); the parity columns are the section's "
+    "evidence.",
 ]
 
 

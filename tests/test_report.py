@@ -480,6 +480,9 @@ def test_lce_notes():
         assert re.match(r"\d{4}-\d{2}-\d{2}: ", note) and "reproduced by `run lce --case" in note
         assert not re.search(r"\.asb|\.py\b|Review|R1-\d", note), note
     assert "`run lce --case N=8192 --impl torch_eager`" in lce.LCE.notes[0]
+    # The paths and commands a reader follows, as they are (R1-45 F1).
+    assert "`parity.metrics.grad_hidden_rel_l2`" in lce.LCE.notes[0]
+    assert "with `--env` for the 2.14.1 environments" in lce.LCE.notes[1]
     assert "`ey`, torch 2.16.0.dev20261017" in lce.LCE.notes[0]
     assert "on one card" in lce.LCE.notes[1]
 
