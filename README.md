@@ -186,8 +186,8 @@ forward's and autograd's cuBLAS workspaces each sit in a segment of their own, a
 a training process where earlier layers created them; left to the op's first call, a
 workspace can land in a freed multi-GiB temporary and pin it, and the later calls run
 out of memory where the first fit (`torchtitan_ce` fwd_bwd at V=262144 on a 16 GB
-card). A point that runs out of the device's memory in any of them becomes an
-`unavailable` record (see `status` under "Results"); an exception, a crash or a
+card). A point that runs out of the device's memory in any of these phases becomes
+an `unavailable` record (see `status` under "Results"); an exception, a crash or a
 timeout becomes an `error` record. Either way the sweep goes on.
 
 ## Benchmarking LCE
