@@ -169,6 +169,27 @@ def test_setup_dict_merged_into_info(tests_dir, monkeypatch):
     assert record["info"] == data["info"]
 
 
+def test_variant_through_worker(tests_dir):
+    # A variant's parameter reaches its setup, which its run reads, and the record's
+    # info carries both the parameter as given and what setup resolved from it.
+    import toy_op
+
+    records = {}
+    for name in ("chunked", "chunked[split=2]"):
+        data = payload(tests_dir, name, mode="fwd_bwd", M=8)
+        data["info"] = toy_op.TOY.implementation(name).info
+        records[name] = worker.run_payload(data)
+        assert records[name]["status"] == "ok", records[name]["traceback"]
+        assert records[name]["parity"]["status"] == "ok"
+    assert records["chunked"]["info"] == {"split": 4, "num_chunks": 2}
+    assert records["chunked[split=2]"]["info"] == {
+        "base": "chunked",
+        "params": {"split": 2},
+        "split": 2,
+        "num_chunks": 4,
+    }
+
+
 def test_unavailable_without_reason(tests_dir, monkeypatch):
     import toy_op
 

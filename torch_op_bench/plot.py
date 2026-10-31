@@ -15,7 +15,7 @@ import math
 import textwrap
 import warnings
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -223,11 +223,16 @@ def colors(
 
 
 def stable_order(recs: Sequence[Mapping[str, Any]]) -> list[str] | None:
-    """The spec's implementations, controls left out, when the op resolves."""
+    """The spec's implementations, controls and variants left out, when the op
+    resolves."""
     spec = analysis.spec_of(recs[0]) if recs else None
     if spec is None:
         return None
-    return [i.name for i in spec.implementations if i.info.get("role") != "control"]
+    return [
+        i.name
+        for i in spec.implementations
+        if i.info.get("role") != "control" and i.variant_of is None
+    ]
 
 
 def control_markers(rows: Sequence[Row]) -> dict[str, str]:
@@ -399,13 +404,14 @@ def scaled_label(label: str, exponent: int) -> str:
     return f"{label} (×{power})"
 
 
-def _plain_ticks(ax: Any) -> None:
-    """Tick labels of a linear y axis as plain numbers: no offset, no 1eN above."""
+def _plain_ticks(ax: Any, axis: str = "y") -> None:
+    """Tick labels of a linear axis (``y`` or ``x``) as plain numbers: no offset, no
+    1eN beside it."""
     from matplotlib.ticker import ScalarFormatter
 
     formatter = ScalarFormatter(useOffset=False, useMathText=True)
     formatter.set_scientific(False)
-    ax.yaxis.set_major_formatter(formatter)
+    getattr(ax, f"{axis}axis").set_major_formatter(formatter)
 
 
 def _positions(values: Sequence[Any]) -> tuple[list[float], bool]:
@@ -700,13 +706,19 @@ def _figure(
     palette: Mapping[str, str] | None = None,
     markers: Mapping[str, str] | None = None,
     ratio_line: bool = False,
+    panel: Callable[[Any, dict[str, Any], list[Any]], list[dict[str, Any]]] | None = None,
+    panel_width: float = PANEL_WIDTH,
 ) -> Path:
+    """The figure of ``metrics`` (rows) against ``axes`` (columns), each panel drawn
+    by ``_draw_panel``, or by ``panel(ax, handles, drawn)`` (which adds its legend
+    entries to ``handles`` and its series to ``drawn``, as ``_draw_panel`` does, and
+    returns its CSV rows); its bands, layout and CSV."""
     plt = pyplot()
     union = [row for _, rows, _ in sets for row in rows]
     names = analysis.implementations(union, baseline)
     palette = palette if palette is not None else colors(union, baseline)
     markers = markers if markers is not None else control_markers(union)
-    width = PANEL_WIDTH * max(1, len(axes))
+    width = panel_width * max(1, len(axes))
     fig, grid = plt.subplots(
         len(metrics), max(1, len(axes)), figsize=(width, PANEL_HEIGHT * len(metrics)), squeeze=False
     )
@@ -714,6 +726,10 @@ def _figure(
     drawn: list[tuple[Any, str, str, list[dict[str, Any]]]] = []
     plotted: list[dict[str, Any]] = []
     for i, metric in enumerate(metrics):
+        if panel is not None:
+            for ax in grid[i]:
+                plotted += panel(ax, handles, drawn)
+            continue
         exponent = 0
         if not metric.startswith(analysis.PARITY_PREFIX):
             exponent = y_exponent(
@@ -1157,6 +1173,197 @@ def plot_reduction(
     return written
 
 
+# --- time at equal peak ------------------------------------------------------------------------
+
+# The budgets' vertical lines: thin, grey, dotted, under the points.
+BUDGET_STYLE = {"color": "#7f7f7f", "linestyle": ":", "linewidth": 1.0}
+
+
+def equal_peak_panel(
+    found: Mapping[str, Any],
+    baseline: str,
+    palette: Mapping[str, str],
+    figure: str,
+    point: Mapping[str, Any],
+) -> Callable[[Any, dict[str, Any], list[Any]], list[dict[str, Any]]]:
+    """The panel of one ``analysis.equal_peak`` result: time against peak above
+    baseline, one line per base entry through its points (default and variants, by
+    peak; hollow when the record fails parity), the baseline as a reference point and
+    the budgets as vertical lines. No point is labelled with its parameter: the CSV
+    names each one's entry. Two entries whose points coincide, one by one in order
+    of peak, are stacked as in every other figure (``stack_coincident``)."""
+    from matplotlib.lines import Line2D
+
+    def csv_row(row: Row, role: str, x: Any, y: Any) -> dict[str, Any]:
+        if role == "budget":  # a line, not a record's point
+            row = {"implementation": row["implementation"]}
+        fail = row.get("parity_status") == "fail"
+        return {
+            "figure": figure,
+            "set": "",
+            "metric": "median_ms" if role != "budget" else "budget",
+            "axis": "peak_above_baseline",
+            "x": x,
+            "implementation": row["implementation"],
+            "env_name": row.get("env_name"),
+            "role": role,
+            "y": y,
+            "parity_status": row.get("parity_status"),
+            "parity_fail": fail if role != "budget" else None,
+            "parity_fail_metric": None,
+            "dtype": found["dtype"],
+            "mode": found["mode"],
+            "point": analysis.point_text(point),
+            "work": work_text(row) if role != "budget" else None,
+            "baseline_work": None,
+        }
+
+    def draw(ax: Any, handles: dict[str, Any], drawn: list[Any]) -> list[dict[str, Any]]:
+        plotted = []
+        base = found["baseline"]
+        factors = ", ".join(f"{f:g}×" for f in analysis.EQUAL_PEAK_BUDGETS)
+        for factor, budget in zip(
+            analysis.EQUAL_PEAK_BUDGETS, found["budgets"] or (), strict=False
+        ):
+            ax.axvline(budget / MIB, zorder=1, **BUDGET_STYLE)
+            plotted.append(csv_row(base, "budget", budget / MIB, None))
+            plotted[-1]["implementation"] = f"{factor:g}× {baseline}"
+        series = [("baseline", baseline, [base] if analysis.peak_point(base) else [])]
+        series += [("counterpart", e["base"], e["points"]) for e in found["entries"]]
+        stacked = []
+        for role, name, points in series:
+            if not points:
+                continue
+            style = STYLE[role]
+            color = palette.get(name, "#7f7f7f")
+            xs = [r["peak_above_baseline"] / MIB for r in points]
+            ys = [r["median_ms"] for r in points]
+            z = 3 if role == "baseline" else 2
+            # The baseline is a point: its "line" draws nothing.
+            linestyle = "none" if role == "baseline" else style["linestyle"]
+            (line,) = ax.plot(
+                xs, ys, color=color, linestyle=linestyle, linewidth=style["linewidth"], zorder=z
+            )
+            artists = [(line, 0.0)]
+            fails = [r.get("parity_status") == "fail" for r in points]
+            for hollow in (False, True):
+                pts = [(x, y) for x, y, f in zip(xs, ys, fails, strict=True) if f == hollow]
+                if not pts:
+                    continue
+                (marks,) = ax.plot(
+                    [p[0] for p in pts],
+                    [p[1] for p in pts],
+                    linestyle="none",
+                    marker=style["marker"],
+                    color=color,
+                    markersize=style["size"] + (2 if hollow else 0),
+                    markerfacecolor="none" if hollow else color,
+                    markeredgecolor=color,
+                    zorder=z,
+                )
+                artists.append((marks, 2.0 if hollow else 0.0))
+            plotted += [csv_row(r, role, x, y) for r, x, y in zip(points, xs, ys, strict=True)]
+            stacked.append(
+                {
+                    "set": 0,
+                    "name": name,
+                    "control_of": None,
+                    "role": role,
+                    "style": style,
+                    "color": color,
+                    "line": linestyle,
+                    "artists": artists,
+                }
+            )
+            label = f"{name} (baseline)" if role == "baseline" else name
+            handles.setdefault(
+                label,
+                Line2D(
+                    [],
+                    [],
+                    color=color,
+                    linestyle=linestyle,
+                    linewidth=style["linewidth"],
+                    marker=style["marker"],
+                    markersize=style["size"],
+                    label=label,
+                ),
+            )
+        drawn.append((ax, "median_ms", "peak_above_baseline", stacked))
+        if found["budgets"]:  # last in the legend: baseline, entries, budgets
+            label = f"budgets: {factors} {baseline}'s peak"
+            handles.setdefault(label, Line2D([], [], label=label, **BUDGET_STYLE))
+        ax.set_xlabel(METRIC_LABELS["peak_above_baseline"])
+        ax.set_ylabel(ylabel_text(METRIC_LABELS["median_ms"]))
+        _plain_ticks(ax)
+        _plain_ticks(ax, "x")
+        ax.grid(True, alpha=0.3)
+        return plotted
+
+    return draw
+
+
+def plot_equal_peak(
+    rows: Sequence[Row],
+    variant_rows: Sequence[Row],
+    out: Path,
+    point: Mapping[str, Any],
+    baseline: str,
+    palette: Mapping[str, str],
+    *,
+    title: str,
+    notes: Sequence[Any],
+    axes: Sequence[str],
+    dtypes: Sequence[str],
+    modes: Sequence[str],
+    impls: Sequence[str] | None = None,
+) -> list[Path]:
+    """``equal-peak-<mode>[-<dtype>].png`` per dtype and mode with variants at
+    ``point`` (``analysis.equal_peak``, as the report's "Time at equal peak"); with
+    ``impls``, the base entries named, or one of whose variants is."""
+    written = []
+    for found in analysis.equal_peak(rows, variant_rows, point, baseline):
+        d, m = found["dtype"], found["mode"]
+        if d not in dtypes or m not in modes:
+            continue
+        variants = analysis.at(variant_rows, dtype=d, mode=m)
+        if impls:
+            named = set(impls) | {r["base"] for r in variants if r["implementation"] in impls}
+            found = {**found, "entries": [e for e in found["entries"] if e["base"] in named]}
+        bases = {e["base"] for e in found["entries"]}
+        here = [
+            r
+            for r in [found["baseline"], *(e["default"] for e in found["entries"]), *variants]
+            if r is not None and (r.get("base") is None or r["base"] in bases)
+            if all(r.get(k) == v for k, v in point.items())
+        ]
+        suffix = f"{m}-{d}" if len(dtypes) > 1 else m
+        path = out / f"equal-peak-{suffix}.png"
+        factors = ", ".join(f"{f:g}×" for f in analysis.EQUAL_PEAK_BUDGETS)
+        footer = [
+            left_out(here, ["median_ms"], notes, axes),
+            f"Budgets (dotted): {factors} {baseline}'s peak above baseline; each line is "
+            f"one entry's default and variants, at {analysis.point_text(point)}.",
+            provenance(here),
+        ]
+        written.append(
+            _figure(
+                path,
+                [(None, here, None)],
+                ["median_ms"],
+                ["peak_above_baseline"],
+                point,
+                baseline,
+                f"{title}: {m}, {d}: time at equal peak",
+                footer,
+                palette=palette,
+                panel=equal_peak_panel(found, baseline, palette, path.stem, point),
+                panel_width=2 * PANEL_WIDTH,
+            )
+        )
+    return written
+
+
 # --- the command -----------------------------------------------------------------------------
 
 
@@ -1204,10 +1411,16 @@ def plot(
     With ``strict`` (a strict run's results), the reduction figures too."""
     recs = _load(results_dir, op, device_slug)
     recs_strict = [] if strict is None else _load(strict, recs[0]["op"], recs[0]["device_slug"])
-    rows = analysis.to_rows(recs)
+    recs_strict = analysis.split_variants(recs_strict)[0]
+    # The variants are drawn in the equal-peak figures, and in the others only when
+    # --impl names them.
+    base_recs, variant_recs = analysis.split_variants(recs)
+    variant_rows = analysis.to_rows(variant_recs)
+    named = [r for r in variant_recs if r["implementation"] in (impls or ())]
+    rows = analysis.to_rows(base_recs + named)
     axes_all = analysis.axes_of(recs)
     notes = analysis.parity_notes(recs)
-    point = analysis.default_point(recs, point=point)["params"]
+    point = analysis.default_point(base_recs or recs, point=point)["params"]
     rows_b: list[Row] = []
     if overlay is not None:
         recs_b = _load(overlay, op or recs[0]["op"], device_slug)
@@ -1220,10 +1433,10 @@ def plot(
     # The controls' markers likewise, from every environment in the records: with
     # --impl, a control keeps the marker its environment has without it (R1-13 F3).
     markers = control_markers(rows + rows_b)
+    base_rows = [r for r in rows if r.get("base") is None]
     if impls:
-        _check(
-            impls, list(dict.fromkeys(r["implementation"] for r in rows + rows_b)), "implementation"
-        )
+        known = rows + rows_b + variant_rows
+        _check(impls, list(dict.fromkeys(r["implementation"] for r in known)), "implementation")
         keep = set(impls) | {baseline}
         rows = [r for r in rows if r["implementation"] in keep]
         rows_b = [r for r in rows_b if r["implementation"] in keep]
@@ -1333,9 +1546,23 @@ def plot(
                         markers=markers,
                     )
                 )
+    written += plot_equal_peak(
+        base_rows,
+        variant_rows,
+        out,
+        point,
+        baseline,
+        palette,
+        title=f"{recs[0]['op']} on {recs[0]['device_slug']}",
+        notes=notes,
+        axes=axes_all,
+        dtypes=dtypes,
+        modes=modes,
+        impls=impls,
+    )
     if strict is not None:
         written += plot_reduction(
-            recs,
+            base_recs,
             recs_strict,
             out,
             point,

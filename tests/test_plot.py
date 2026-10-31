@@ -411,7 +411,9 @@ def test_stable_order():
     from torch_op_bench.ops import lce
 
     order = plot.stable_order([{"op_ref": "lce"}])
-    assert order == [i.name for i in lce.LCE.implementations if i.info.get("role") != "control"]
+    # Controls and variants left out: a variant takes no colour of its own, so the
+    # base entries' colours are as without variants.
+    assert order == [i.name for i in lce.IMPLEMENTATIONS if i.info.get("role") != "control"]
     assert "torch_eager_liger" not in order and order[0] == "torch_eager"
     assert plot.stable_order([{"op_ref": "no_such_module_xyz:SPEC"}]) is None
     assert plot.stable_order([]) is None
@@ -779,13 +781,18 @@ def panel_gaps(gaps):
     return [name for name in gaps if re.fullmatch(r"panels-\d+-\d+", name)]
 
 
-def with_strict(kwargs, synth_strict):
+def with_strict(kwargs, synth_strict, synth=None):
     """``kwargs`` for ``draw`` with ``strict`` the strict set when asked, and the kinds
-    of figure written: the reduction figure (R1-26 F2) is under the same rules."""
+    of figure written: the reduction figure (R1-26 F2) is under the same rules; so is
+    the equal-peak figure, with ``variants`` (written into ``synth``)."""
     kwargs = dict(kwargs)
+    kinds = {"grid", "ratio", "overlay"}
+    if kwargs.pop("variants", False):
+        S.write_variants(synth)
+        kinds.add("equal")
     if not kwargs.pop("strict", False):
-        return kwargs, {"grid", "ratio", "overlay"}
-    return {**kwargs, "strict": synth_strict}, {"grid", "ratio", "overlay", "reduction"}
+        return kwargs, kinds
+    return {**kwargs, "strict": synth_strict}, kinds | {"reduction"}
 
 
 def FontPropertiesSize(size):
@@ -802,8 +809,18 @@ def FontPropertiesSize(size):
         {"sweep": ["M", "K"], "impls": ["base"]},  # two columns, the baseline alone
         {"strict": True},  # and the reduction figures
         {"strict": True, "impls": ["base"], "mode": "fwd_bwd"},  # one pair of bars
+        {"variants": True, "sweep": ["M"]},  # and the equal-peak figures
+        {"variants": True, "impls": ["chunked"], "mode": "fwd_bwd"},  # one entry
     ],
-    ids=["one-column", "four-columns", "two-columns", "reduction", "reduction-one-entry"],
+    ids=[
+        "one-column",
+        "four-columns",
+        "two-columns",
+        "reduction",
+        "reduction-one-entry",
+        "equal-peak",
+        "equal-peak-one-entry",
+    ],
 )
 def test_gaps_between_bands(synth, synth_strict, tmp_path, monkeypatch, kwargs):
     # The user (inbox 21): the white space between title, legend and first panel,
@@ -815,7 +832,7 @@ def test_gaps_between_bands(synth, synth_strict, tmp_path, monkeypatch, kwargs):
     monkeypatch.setattr(plt, "close", closed.append)
     other = tmp_path / "second"
     S.write(other)
-    kwargs, kinds = with_strict(kwargs, synth_strict)
+    kwargs, kinds = with_strict(kwargs, synth_strict, synth)
     written = draw(synth, tmp_path / "out", dtype="float32", overlay=other, **kwargs)
     assert {p.name.split("-")[0] for p in written} == kinds
     assert len(closed) == len(written)
@@ -826,7 +843,9 @@ def test_gaps_between_bands(synth, synth_strict, tmp_path, monkeypatch, kwargs):
             assert -0.5 <= gap <= bound, (path.name, name, gap, bound)
         if panel_gaps(gaps):
             stacked.add(path.name.split("-")[0])
-    assert stacked == kinds  # no kind is measured on one row only
+    # No kind is measured on one row only, but the equal-peak figure, one panel by
+    # design.
+    assert stacked == kinds - {"equal"}
     if kwargs.get("sweep") == ["M"]:  # the ratio and overlay titles wrap at 3.8 in
         assert any("\n" in title_artist(fig).get_text() for fig in closed)
     monkeypatch.undo()
@@ -976,6 +995,8 @@ def nightly_like_ratios(synth):
         {"sweep": ["layout"], "metrics": ["parity_grad_rel", "tflops"], "mode": "fwd_bwd"},
         {"strict": True},  # and the reduction figures
         {"strict": True, "impls": ["chunked"], "mode": "fwd_bwd"},
+        {"variants": True, "sweep": ["M"]},
+        {"variants": True, "impls": ["compiled[mode=a]"], "mode": "fwd"},
     ],
     ids=[
         "one-column",
@@ -985,6 +1006,8 @@ def nightly_like_ratios(synth):
         "str-axis",
         "reduction",
         "reduction-two-entries",
+        "equal-peak",
+        "equal-peak-named-variant",
     ],
 )
 def test_nothing_clipped(synth, synth_strict, tmp_path, monkeypatch, kwargs):
@@ -996,7 +1019,7 @@ def test_nothing_clipped(synth, synth_strict, tmp_path, monkeypatch, kwargs):
     monkeypatch.setattr(plt, "close", closed.append)
     other = tmp_path / "second"
     S.write(other)
-    kwargs, kinds = with_strict({"dtype": "float32", **kwargs}, synth_strict)
+    kwargs, kinds = with_strict({"dtype": "float32", **kwargs}, synth_strict, synth)
     written = draw(synth, tmp_path / "out", overlay=other, **kwargs)
     assert {p.name.split("-")[0] for p in written} == kinds
     monkeypatch.undo()
@@ -1324,3 +1347,143 @@ def test_metric_only_away_from_the_sweeps(synth, tmp_path):
     assert f"fwd, {planted['case']['dtype']}: no values of parity_away_err: left out" in messages
     grid = read_csv(out / "grid-fwd.csv")
     assert {r["metric"] for r in grid} == {"median_ms"}
+
+
+# --- time at equal peak (Task I1-7) ------------------------------------------------------
+
+
+def test_equal_peak_figure(synth, tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+
+    S.write_variants(synth)
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    written = draw(synth, tmp_path, dtype="bfloat16")
+    monkeypatch.undo()
+    names = [p.name for p in written]
+    assert names[-2:] == ["equal-peak-fwd.png", "equal-peak-fwd_bwd.png"]
+    rows = read_csv(tmp_path / "equal-peak-fwd_bwd.csv")
+    point = "M=128, K=32, N=16, layout=a"
+    assert {(r["metric"], r["axis"], r["dtype"], r["mode"], r["point"]) for r in rows} == {
+        ("budget", "peak_above_baseline", "bfloat16", "fwd_bwd", point),
+        ("median_ms", "peak_above_baseline", "bfloat16", "fwd_bwd", point),
+    }
+    drawn = [
+        (r["implementation"], r["role"], float(r["x"]), r["y"] and float(r["y"]), r["parity_fail"])
+        for r in rows
+    ]
+    # The budgets (64 MiB the baseline's peak), the baseline, then each entry's points
+    # by peak: the planted numbers of synth_results.VARIANTS.
+    assert drawn == [
+        ("1× base", "budget", 64.0, "", ""),
+        ("0.75× base", "budget", 48.0, "", ""),
+        ("0.5× base", "budget", 32.0, "", ""),
+        ("base", "baseline", 64.0, 64.0, "False"),
+        ("compiled[mode=a]", "counterpart", 56.0, 38.4, "False"),
+        ("compiled", "counterpart", 64.0, 32.0, "False"),
+        ("chunked[num_chunks=8]", "counterpart", 8.0, 192.0, "False"),
+        ("chunked", "counterpart", 16.0, 128.0, "False"),
+        ("chunked[num_chunks=2]", "counterpart", 40.0, 102.4, "True"),
+    ]
+    fig = closed[names.index("equal-peak-fwd_bwd.png")]
+    (ax,) = fig.axes
+    # The entries' colours are those of every other figure: the variants take none.
+    recs = load_quiet(synth)
+    bases = analysis.split_variants(recs)[0]
+    palette = plot.colors(analysis.to_rows(bases), "base", plot.stable_order(recs))
+    texts = [t.get_text() for t in fig.legends[0].get_texts()]
+    assert texts == [
+        "base (baseline)",
+        "compiled",
+        "chunked",
+        "budgets: 1×, 0.75×, 0.5× base's peak",
+    ]
+    # One line per entry through its points; the failing point hollow.
+    lines = [
+        line for line in ax.get_lines() if len(line.get_xdata()) > 1 and line.get_linestyle() == "-"
+    ]
+    assert [list(line.get_xdata()) for line in lines] == [[56.0, 64.0], [8.0, 16.0, 40.0]]
+    assert [line.get_color() for line in lines] == [palette["compiled"], palette["chunked"]]
+    hollow = [m for m in ax.get_lines() if m.get_markerfacecolor() == "none"]
+    assert [(list(m.get_xdata()), list(m.get_ydata())) for m in hollow] == [([40.0], [102.4])]
+    footer = [t for t in fig.texts if t.get_gid() == "footer"][0].get_text().replace("\n", " ")
+    assert "Left out: 1 unavailable" in footer
+    assert "Parity failures: 1 (1 explained), drawn hollow." in footer
+    assert "Budgets (dotted): 1×, 0.75×, 0.5× base's peak above baseline" in footer
+    assert ax.get_xlabel() == "peak above baseline (MiB)" and ax.get_ylabel() == "median\n(ms)"
+    for fig in closed:
+        plt.close(fig)
+
+
+def test_variants_only_where_named(synth, tmp_path):
+    # Without --impl the grid and ratio figures are as without the variants; naming a
+    # variant draws it there (at the default point) and narrows the equal-peak figure
+    # to its base.
+    draw(synth, tmp_path / "before", dtype="float32", mode="fwd_bwd")
+    S.write_variants(synth)
+    draw(synth, tmp_path / "after", dtype="float32", mode="fwd_bwd")
+    for name in ("grid-fwd_bwd.csv", "ratio-fwd_bwd.csv"):
+        assert (tmp_path / "after" / name).read_text() == (tmp_path / "before" / name).read_text()
+    written = draw(
+        synth, tmp_path / "named", dtype="float32", mode="fwd_bwd", impls=["chunked[num_chunks=2]"]
+    )
+    assert [p.name for p in written] == [
+        "grid-fwd_bwd.png",
+        "ratio-fwd_bwd.png",
+        "equal-peak-fwd_bwd.png",
+    ]
+    grid = read_csv(tmp_path / "named" / "grid-fwd_bwd.csv")
+    assert {r["implementation"] for r in grid} == {"base", "chunked[num_chunks=2]"}
+    assert {r["x"] for r in grid if r["axis"] == "M" and r["implementation"] != "base"} == {"128"}
+    equal = read_csv(tmp_path / "named" / "equal-peak-fwd_bwd.csv")
+    assert [r["implementation"] for r in equal if r["role"] == "counterpart"] == [
+        "chunked[num_chunks=8]",
+        "chunked",
+        "chunked[num_chunks=2]",
+    ]
+
+
+def test_equal_peak_coincident_entries_stacked(synth, tmp_path, monkeypatch):
+    # Two entries whose points coincide one by one (torch_lce and its no-override
+    # twin in fwd on ey) are stacked and named in the footer, as in every figure.
+    import matplotlib.pyplot as plt
+
+    S.write_variants(synth)
+    recs = load_quiet(synth)
+    bases, variants = analysis.split_variants(recs)
+    rows = analysis.at(analysis.to_rows(bases), dtype="bfloat16", mode="fwd_bwd")
+    variant_rows = analysis.at(analysis.to_rows(variants), dtype="bfloat16", mode="fwd_bwd")
+    twins = [
+        {**r, "implementation": r["implementation"].replace("chunked", "twin"), "base": "twin"}
+        for r in variant_rows
+        if r["base"] == "chunked"
+    ]
+    rows += [{**r, "implementation": "twin"} for r in rows if r["implementation"] == "chunked"]
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    palette = plot.colors(rows, "base")
+    plot.plot_equal_peak(
+        rows,
+        variant_rows + twins,
+        tmp_path,
+        S.DEFAULT,
+        "base",
+        palette,
+        title="synth",
+        notes=[],
+        axes=list(S.DEFAULT),
+        dtypes=["bfloat16"],
+        modes=["fwd_bwd"],
+    )
+    monkeypatch.undo()
+    (fig,) = closed
+    footer = [t for t in fig.texts if t.get_gid() == "footer"][0].get_text().replace("\n", " ")
+    assert (
+        "Coincident, the first drawn dashed on the second: twin on chunked (fwd_bwd: median)."
+        in footer
+    )
+    (ax,) = fig.axes
+    dashed = [line for line in ax.get_lines() if line.get_linestyle() == "--"]
+    assert [line.get_color() for line in dashed] == [palette["twin"]]
+    assert "compiled on" not in footer and "on compiled" not in footer
+    plt.close(fig)

@@ -190,6 +190,38 @@ class Implementation:
             info={**self.info, "role": "control", "control_of": self.name},
         )
 
+    def with_params(self, **params: Any) -> Implementation:
+        """This implementation with ``params`` passed to its ``setup``, as a variant.
+
+        The copy is named ``<name>[k=v,...]`` (keys sorted, values as given), its
+        ``info`` gains ``base: <name>`` and ``params``, and its ``setup`` becomes
+        ``setup(case, **params)``: the op's setup takes the parameters as keyword
+        arguments and keeps them where its ``run`` reads them; an implementation without
+        ``setup`` has no variants (``ValueError``). A variant exists for
+        the time-at-equal-peak comparison (Statement §6 step 6f): ``run`` leaves it
+        out unless ``--impl`` names it.
+        """
+        if not params:
+            raise ValueError(f"implementation {self.name!r}: a variant needs parameters")
+        if self.setup is None:
+            # Its parameters would reach nothing: the base under another name (R1-39 R1).
+            raise ValueError(
+                f"implementation {self.name!r} has no setup to take the parameters {params}"
+            )
+        name = f"{self.name}[{','.join(f'{k}={params[k]}' for k in sorted(params))}]"
+        base_setup = self.setup
+        return dataclasses.replace(
+            self,
+            name=name,
+            info={**self.info, "base": self.name, "params": dict(params)},
+            setup=lambda case: base_setup(case, **params),
+        )
+
+    @property
+    def variant_of(self) -> str | None:
+        """The implementation this one is a variant of (``with_params``), or ``None``."""
+        return self.info.get("base") if "params" in self.info else None
+
 
 @dataclass
 class OpSpec:

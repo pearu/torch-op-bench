@@ -58,6 +58,8 @@ RESULTS = [
 TAIL = [
     "role",
     "control_of",
+    "base",
+    "params",
     "compiled",
     "override_ran",
     "override_kernel_ran",
@@ -69,8 +71,9 @@ TAIL = [
     "packages",
     "tob_hash",
 ]
-# info keys that are columns of their own, so never repeated as varying info.
-INFO_COLUMNS = ("role", "control_of", "compiled")
+# info keys that are columns of their own, so never repeated as varying info (nor the
+# keys under them: ``params.<name>``).
+INFO_COLUMNS = ("role", "control_of", "compiled", "base", "params")
 INFO_PREFIX = "info."
 PARITY_PREFIX = "parity_"
 
@@ -253,6 +256,8 @@ def flatten(
         {
             "role": info.get("role"),
             "control_of": info.get("control_of"),
+            "base": variant_of(record),
+            "params": params_text(info.get("params")) if variant_of(record) else None,
             "compiled": info.get("compiled"),
             "override_ran": verify.get("override_ran"),
             "override_kernel_ran": verify.get("override_kernel_ran"),
@@ -271,6 +276,125 @@ def flatten(
     return row
 
 
+# --- variants (Implementation.with_params) -------------------------------------------------
+
+
+def variant_of(record: Mapping[str, Any]) -> str | None:
+    """The implementation a record's entry is a variant of (``info.base``, beside
+    ``info.params``), or ``None``."""
+    info = record.get("info") or {}
+    return info.get("base") if isinstance(info.get("params"), Mapping) else None
+
+
+def params_text(params: Mapping[str, Any] | None) -> str | None:
+    """A variant's parameters as ``k=v, ...``, keys sorted."""
+    if not params:
+        return None
+    return ", ".join(f"{name}={params[name]}" for name in sorted(params))
+
+
+def split_variants(
+    recs: Sequence[Mapping[str, Any]],
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    """The records of the base entries, and those of the variants: every table and
+    figure but "Time at equal peak" reads the first (Statement §6 step 6f)."""
+    bases = [r for r in recs if variant_of(r) is None]
+    return bases, [r for r in recs if variant_of(r) is not None]
+
+
+def default_params(
+    recs: Sequence[Mapping[str, Any]], variants: Sequence[Mapping[str, Any]]
+) -> dict[str, str]:
+    """Per base entry with variants, the value its own record holds of each parameter
+    the variants set, as ``params_text`` writes it: the ``info`` field of that name,
+    or a dotted one ending in it (``options.batch_chunk_size``), from the base's
+    first ``ok`` record that has it. A base without such a field is left out."""
+    names: dict[str, set[str]] = {}
+    for record in variants:
+        names.setdefault(variant_of(record), set()).update((record["info"] or {})["params"])
+    found = {}
+    for base, wanted in names.items():
+        values = {}
+        for record in recs:
+            if record.get("implementation") != base or record.get("status") != "ok":
+                continue
+            flat = flat_info(record.get("info"))
+            for name in wanted - set(values):
+                hits = [k for k in sorted(flat) if k == name or k.endswith("." + name)]
+                if hits:
+                    values[name] = flat[hits[0]]
+        if values:
+            found[base] = params_text(values)
+    return found
+
+
+# The peak budgets of "Time at equal peak": fractions of the baseline's peak above
+# baseline at the point, so that the comparison reads the same on any GPU.
+EQUAL_PEAK_BUDGETS = (1.0, 0.75, 0.5)
+
+
+def peak_point(row: Row | None) -> bool:
+    """Whether a row is ``ok`` with a median and a peak above baseline: a point of
+    the time-at-equal-peak comparison."""
+    return (
+        row is not None
+        and row.get("status") == "ok"
+        and row.get("peak_above_baseline") is not None
+        and row.get("median_ms") is not None
+    )
+
+
+def within(points: Sequence[Row], budget: float) -> Row | None:
+    """Of ``points``, the one whose peak above baseline is the largest not above
+    ``budget`` (of two at that peak, the faster); ``None`` when none is."""
+    fit = [r for r in points if r["peak_above_baseline"] <= budget]
+    return max(fit, key=lambda r: (r["peak_above_baseline"], -r["median_ms"]), default=None)
+
+
+def equal_peak(
+    rows: Sequence[Row],
+    variant_rows: Sequence[Row],
+    point: Mapping[str, Any],
+    baseline: str,
+) -> list[dict[str, Any]]:
+    """The time-at-equal-peak comparison at ``point`` (Statement §6 step 6f), per
+    dtype and mode with a variant there: ``baseline``, the baseline's row (``None``:
+    none); ``budgets``, the baseline's peak above baseline times each of
+    ``EQUAL_PEAK_BUDGETS``, in bytes (``None`` without an ``ok`` baseline); and per
+    base entry with variants, in display order, its ``default`` row, its ``points``
+    (the default and its variants that are ``ok`` with a peak, by peak) and per
+    budget the point within it (``within``), or ``None``."""
+    here = [r for r in variant_rows if all(r.get(k) == v for k, v in point.items())]
+    bases = [r for r in rows if all(r.get(k) == v for k, v in point.items())]
+    found = []
+    for dtype in dict.fromkeys(r["dtype"] for r in here):
+        for mode in [m for m in MODES if at(here, dtype=dtype, mode=m)]:
+            variants = at(here, dtype=dtype, mode=mode)
+            by_name = {r["implementation"]: r for r in at(bases, dtype=dtype, mode=mode)}
+            base = by_name.get(baseline)
+            peak = base.get("peak_above_baseline") if peak_point(base) else None
+            budgets = None if not peak else [f * peak for f in EQUAL_PEAK_BUDGETS]
+            names = list(dict.fromkeys(r["base"] for r in variants))
+            order = [n for n in implementations(list(by_name.values()), baseline) if n in names]
+            entries = []
+            for name in order + [n for n in names if n not in order]:
+                default = by_name.get(name)
+                points = [r for r in [default, *at(variants, base=name)] if peak_point(r)]
+                points.sort(key=lambda r: (r["peak_above_baseline"], r["median_ms"]))
+                cells = None if budgets is None else [within(points, b) for b in budgets]
+                entries.append({"base": name, "default": default, "points": points, "cells": cells})
+            found.append(
+                {
+                    "dtype": dtype,
+                    "mode": mode,
+                    "baseline": base,
+                    "budgets": budgets,
+                    "entries": entries,
+                }
+            )
+    return found
+
+
 # --- parity notes (R1-30 F1) ----------------------------------------------------------
 
 
@@ -287,12 +411,14 @@ def failed_metrics(row: Row) -> list[str]:
 
 def explained(row: Row, notes: Sequence[Any], axes: Sequence[str]) -> dict[str, Any]:
     """For each metric a ``fail`` row failed on, the first note that explains it
-    there (its implementation and metric, and ``applies`` true for the row), or
-    ``None``; empty for a row that did not fail."""
+    there (its implementation, or the one the row's entry is a variant of, and
+    metric, and ``applies`` true for the row), or ``None``; empty for a row that did
+    not fail."""
     if row.get("parity_status") != "fail":
         return {}
     failed = failed_metrics(row)
-    mine = [n for n in notes if n.implementation == row["implementation"]]
+    entries = {row["implementation"], row.get("base")} - {None}
+    mine = [n for n in notes if n.implementation in entries]
     if not mine:
         return dict.fromkeys(failed)
     case = Case({name: row.get(name) for name in axes}, row["dtype"], row["device"])
@@ -335,10 +461,10 @@ def varying_info(recs: Iterable[Mapping[str, Any]]) -> list[str]:
     within one implementation or across implementations. A key that some records
     lack differs too. Keys that are columns of their own are left out."""
     ok = [flat_info(r.get("info")) for r in recs if r.get("status") == "ok"]
-    keys = {name for info in ok for name in info}
+    keys = {name for info in ok for name in info if name.split(".")[0] not in INFO_COLUMNS}
     missing = object()
     varying = []
-    for name in sorted(keys - set(INFO_COLUMNS)):
+    for name in sorted(keys):
         values = {json.dumps(info.get(name, missing), sort_keys=True, default=id) for info in ok}
         if len(values) > 1:
             varying.append(name)
