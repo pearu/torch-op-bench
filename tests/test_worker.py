@@ -92,6 +92,63 @@ def test_setup_raises_unavailable(tests_dir, monkeypatch):
     assert record["env_from"] == "worker" and record["env"]["packages"]["pytest"]
 
 
+def test_prime_device_before_make_inputs(tests_dir, monkeypatch):
+    # Task I1-21: cuBLAS is primed before the inputs exist; on CPU the step is a no-op.
+    import toy_op
+
+    calls = []
+    make_inputs = toy_op.TOY.make_inputs
+    prime_device = worker.prime_device
+
+    def primed(device, dtype):
+        calls.append(("prime_device", device.type, dtype))
+        prime_device(device, dtype)
+
+    def inputs(case, device, generator):
+        calls.append(("make_inputs",))
+        return make_inputs(case, device, generator)
+
+    monkeypatch.setattr(worker, "prime_device", primed)
+    monkeypatch.setattr(toy_op.TOY, "make_inputs", inputs)
+    record = worker.run_payload(payload(tests_dir, dtype="float64"))
+    assert record["status"] == "ok", record["traceback"]
+    assert calls == [("prime_device", "cpu", "float64"), ("make_inputs",)]
+
+
+PRIME_PROBE = """
+import torch
+from torch_op_bench import worker
+
+device = torch.device("cuda")
+worker.prime_device(device, {dtype!r})
+primed = torch.cuda.memory_allocated(device), torch.cuda.memory_reserved(device)
+a = torch.ones(256, 256, device=device, requires_grad=True)
+(a @ a).sum().backward()
+del a
+torch.cuda.synchronize(device)
+print(*primed, torch.cuda.memory_allocated(device), torch.cuda.memory_reserved(device))
+"""
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", ["bfloat16", "int64"])
+def test_prime_device_cuda(dtype):
+    # In a fresh process: the prime leaves at most the two workspaces allocated (2.14.1
+    # counts them, the nightly reserves them uncounted), and a later matmul with a
+    # backward (both handles) neither allocates nor reserves a workspace of its own.
+    proc = subprocess.run(
+        [sys.executable, "-c", PRIME_PROBE.format(dtype=dtype)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    allocated, reserved, *after = map(int, proc.stdout.split())
+    assert allocated in (0, 32 << 20, 64 << 20)
+    assert reserved >= 32 << 20
+    assert after == [allocated, reserved]
+
+
 def test_run_payload_error(tests_dir):
     record = worker.run_payload(payload(tests_dir, "broken"))
     assert record["status"] == "error"
