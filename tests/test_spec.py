@@ -104,8 +104,9 @@ def test_with_params():
     assert variant.setup("case") == {"seen": {"split": 2, "mode": "b"}}
     assert calls == [("case", {"split": 2, "mode": "b"})]
     assert impl.with_params(split=8).name == "chunked[split=8]"
-    # Without a setup there is nothing to pass the parameters to.
-    assert Implementation("plain", toy_op.run_plain).with_params(split=2).setup is None
+    # Without a setup the parameters would reach nothing: the base under another name.
+    with pytest.raises(ValueError, match="'plain' has no setup to take the parameters"):
+        Implementation("plain", toy_op.run_plain).with_params(split=2)
     with pytest.raises(ValueError, match="a variant needs parameters"):
         impl.with_params()
     with pytest.raises(ValueError, match="duplicate"):

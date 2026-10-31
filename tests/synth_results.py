@@ -27,10 +27,11 @@ memory ``peak_above``. Planted, for the tests to find:
 ``write_variants`` adds the variants of ``chunked`` and ``compiled`` at the default
 point (``VARIANTS``: their peaks planted, their times a factor of their base's), in
 a file of its own. Planted: the baseline's peak there is 64 MiB, so the budgets are
-64, 32 and 16 MiB; ``chunked`` (16 MiB) has a variant at 40 MiB that fails parity in
+64, 48 and 32 MiB; ``chunked`` (16 MiB) has a variant at 40 MiB that fails parity in
 ``bfloat16`` (``VARIANT_PARITY_FAIL``, which ``synth_op.NOTE`` explains through the
-base) and one at 8 MiB; ``compiled`` (64 MiB) one at 48 MiB and one at 80 MiB, above
-every budget and ``unavailable`` in ``fwd_bwd`` ``bfloat16`` (``VARIANT_UNAVAILABLE``).
+base) and one at 8 MiB; ``compiled`` (64 MiB) one at 56 MiB, its lowest, which misses
+the 0.75x and 0.5x budgets, and one at 80 MiB, above every budget and ``unavailable``
+in ``fwd_bwd`` ``bfloat16`` (``VARIANT_UNAVAILABLE``).
 
 ``write_strict`` writes the strict counterpart at the default point (the records
 of ``run --matmul-reduction strict``), every implementation but ``compiled``
@@ -317,7 +318,7 @@ def write_strict(results_dir: str | Path) -> Path:
 VARIANTS = {
     "chunked[num_chunks=2]": ("chunked", {"num_chunks": 2}, 0.8, 40),
     "chunked[num_chunks=8]": ("chunked", {"num_chunks": 8}, 1.5, 8),
-    "compiled[mode=a]": ("compiled", {"mode": "a"}, 1.2, 48),
+    "compiled[mode=a]": ("compiled", {"mode": "a"}, 1.2, 56),
     "compiled[mode=b]": ("compiled", {"mode": "b"}, 0.9, 80),
 }
 VARIANT_PARITY_FAIL = ("chunked[num_chunks=2]", "fwd_bwd", "bfloat16")

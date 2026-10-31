@@ -1376,10 +1376,10 @@ def test_equal_peak_figure(synth, tmp_path, monkeypatch):
     # by peak: the planted numbers of synth_results.VARIANTS.
     assert drawn == [
         ("1× base", "budget", 64.0, "", ""),
+        ("0.75× base", "budget", 48.0, "", ""),
         ("0.5× base", "budget", 32.0, "", ""),
-        ("0.25× base", "budget", 16.0, "", ""),
         ("base", "baseline", 64.0, 64.0, "False"),
-        ("compiled[mode=a]", "counterpart", 48.0, 38.4, "False"),
+        ("compiled[mode=a]", "counterpart", 56.0, 38.4, "False"),
         ("compiled", "counterpart", 64.0, 32.0, "False"),
         ("chunked[num_chunks=8]", "counterpart", 8.0, 192.0, "False"),
         ("chunked", "counterpart", 16.0, 128.0, "False"),
@@ -1396,20 +1396,20 @@ def test_equal_peak_figure(synth, tmp_path, monkeypatch):
         "base (baseline)",
         "compiled",
         "chunked",
-        "budgets: 1×, 0.5×, 0.25× base's peak",
+        "budgets: 1×, 0.75×, 0.5× base's peak",
     ]
     # One line per entry through its points; the failing point hollow.
     lines = [
         line for line in ax.get_lines() if len(line.get_xdata()) > 1 and line.get_linestyle() == "-"
     ]
-    assert [list(line.get_xdata()) for line in lines] == [[48.0, 64.0], [8.0, 16.0, 40.0]]
+    assert [list(line.get_xdata()) for line in lines] == [[56.0, 64.0], [8.0, 16.0, 40.0]]
     assert [line.get_color() for line in lines] == [palette["compiled"], palette["chunked"]]
     hollow = [m for m in ax.get_lines() if m.get_markerfacecolor() == "none"]
     assert [(list(m.get_xdata()), list(m.get_ydata())) for m in hollow] == [([40.0], [102.4])]
     footer = [t for t in fig.texts if t.get_gid() == "footer"][0].get_text().replace("\n", " ")
     assert "Left out: 1 unavailable" in footer
     assert "Parity failures: 1 (1 explained), drawn hollow." in footer
-    assert "Budgets (dotted): 1×, 0.5×, 0.25× base's peak above baseline" in footer
+    assert "Budgets (dotted): 1×, 0.75×, 0.5× base's peak above baseline" in footer
     assert ax.get_xlabel() == "peak above baseline (MiB)" and ax.get_ylabel() == "median\n(ms)"
     for fig in closed:
         plt.close(fig)

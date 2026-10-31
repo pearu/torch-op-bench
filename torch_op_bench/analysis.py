@@ -330,7 +330,7 @@ def default_params(
 
 # The peak budgets of "Time at equal peak": fractions of the baseline's peak above
 # baseline at the point, so that the comparison reads the same on any GPU.
-EQUAL_PEAK_BUDGETS = (1.0, 0.5, 0.25)
+EQUAL_PEAK_BUDGETS = (1.0, 0.75, 0.5)
 
 
 def peak_point(row: Row | None) -> bool:

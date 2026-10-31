@@ -501,11 +501,15 @@ def _case_order(values: tuple) -> tuple:
 EQUAL_PEAK_TITLE = "## Time at equal peak"
 
 
-def _equal_peak_cell(row: Row | None, defaults: Mapping[str, str]) -> str:
+def _equal_peak_cell(
+    row: Row | None, defaults: Mapping[str, str], lowest: float | None = None
+) -> str:
     """The median of the point within a budget, and in small print what produced it:
-    the variant's parameter, or ``default`` (with its own value when recorded)."""
+    the variant's parameter, or ``default`` (with its own value when recorded). None
+    within it: ``—``, with the entry's ``lowest`` measured peak (bytes) when it has
+    one, so a cell shows how far the entry misses (R1-39 F1)."""
     if row is None:
-        return MISSING
+        return MISSING if lowest is None else f"{MISSING} <sub>lowest {mib(lowest)} MiB</sub>"
     if row.get("base") is not None:
         label = text(row.get("params"))
     else:
@@ -548,10 +552,12 @@ def render_equal_peak(
     body = []
     for entry in found["entries"]:
         cells = entry["cells"] or []
+        peaks = [r["peak_above_baseline"] for r in entry["points"]]
+        lowest = min(peaks, default=None)
         body.append(
             [
                 entry["base"],
-                *(_equal_peak_cell(row, defaults) for row in cells),
+                *(_equal_peak_cell(row, defaults, lowest) for row in cells),
                 _default_cell(entry["default"]),
             ]
         )
@@ -589,7 +595,8 @@ def render_equal_peak_section(
         f"{factors}, the same for every entry. A cell is the median time, in ms, of the "
         f"entry's default or of one of its variants (the entry with another value of its "
         f"own chunk parameter, in small print), the one whose peak above baseline is the "
-        f"largest within the budget; {MISSING} when none is. The variants exist for this "
+        f"largest within the budget; {MISSING} when none is, with the entry's lowest "
+        f"measured peak in small print. The variants exist for this "
         f"comparison only: no value of a parameter is ranked here.",
         "",
     ]

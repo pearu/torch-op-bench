@@ -895,32 +895,35 @@ def test_equal_peak_section(synth):
     S.write_variants(synth)
     text = section(make(synth), "## Time at equal peak")
     assert (
-        "The budgets are the baseline `base`'s peak above baseline there, at 1×, 0.5×, 0.25×"
+        "The budgets are the baseline `base`'s peak above baseline there, at 1×, 0.75×, 0.5×"
         in text
     )
     assert "no value of a parameter is ranked here" in text
     header = (
-        "| implementation | ≤ 1× (64.0 MiB) | ≤ 0.5× (32.0 MiB) | ≤ 0.25× (16.0 MiB) "
+        "| implementation | ≤ 1× (64.0 MiB) | ≤ 0.75× (48.0 MiB) | ≤ 0.5× (32.0 MiB) "
         "| default: median ms, peak MiB |"
     )
     part = section(text, "### fwd_bwd, bfloat16", "\n### ")
     assert tables(part)[0] == [
         header,
         "| :--- | ---: | ---: | ---: | ---: |",
-        # compiled: its 48 MiB variant is slower than its 64 MiB default, which fits
-        # 1x exactly; none fits below; its 80 MiB variant is unavailable here.
-        "| compiled | 32.0 <sub>default</sub> | — | — | 32.0 ms, 64.0 MiB |",
-        # chunked: the 40 MiB variant (failing parity) within 1x; its 16 MiB default
-        # within 0.5x and exactly at 0.25x; the 8 MiB variant is never the largest.
+        # compiled: its 64 MiB default fits 1x exactly; nothing fits below, and the
+        # cells show its lowest peak, a variant's (R1-39 F1); its 80 MiB variant is
+        # unavailable here.
+        "| compiled | 32.0 <sub>default</sub> | — <sub>lowest 56.0 MiB</sub> "
+        "| — <sub>lowest 56.0 MiB</sub> | 32.0 ms, 64.0 MiB |",
+        # chunked: the 40 MiB variant (failing parity) within 1x and 0.75x; its 16 MiB
+        # default within 0.5x; the 8 MiB variant is never the largest.
         "| chunked | 102 <sub>num_chunks=2, parity fail</sub> "
-        "| 128 <sub>default (num_chunks=4)</sub> | 128 <sub>default (num_chunks=4)</sub> "
+        "| 102 <sub>num_chunks=2, parity fail</sub> | 128 <sub>default (num_chunks=4)</sub> "
         "| 128 ms, 16.0 MiB |",
     ]
     assert "Not `ok` here, so in no cell: `compiled[mode=b]` (unavailable)." in part
     part = section(text, "### fwd_bwd, float32", "\n### ")
     assert tables(part)[0][2:] == [
-        "| compiled | 64.0 <sub>default</sub> | — | — | 64.0 ms, 64.0 MiB |",
-        "| chunked | 205 <sub>num_chunks=2</sub> | 256 <sub>default (num_chunks=4)</sub> "
+        "| compiled | 64.0 <sub>default</sub> | — <sub>lowest 56.0 MiB</sub> "
+        "| — <sub>lowest 56.0 MiB</sub> | 64.0 ms, 64.0 MiB |",
+        "| chunked | 205 <sub>num_chunks=2</sub> | 205 <sub>num_chunks=2</sub> "
         "| 256 <sub>default (num_chunks=4)</sub> | 256 ms, 16.0 MiB |",
     ]
     assert "Not `ok`" not in part

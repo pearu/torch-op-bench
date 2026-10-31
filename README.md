@@ -444,13 +444,15 @@ torch-op-bench commits). Its sections:
    table per case, as `plot` says when it draws nothing for that mode and dtype.
 4. **Time at equal peak**, only when the results hold variants: per mode and dtype,
    at the default point, one row per entry with variants and one column per peak
-   budget, the baseline's peak above baseline there at 1×, 0.5× and 0.25× (in MiB
+   budget, the baseline's peak above baseline there at 1×, 0.75× and 0.5× (in MiB
    in the header), the same budgets for every entry, so the table reads the same on
    any GPU. A cell is the median time of the entry's default or one of its variants,
    the one whose peak above baseline is the largest within the budget (of two at that
    peak, the faster), with what produced it in small print: the variant's parameter,
    or `default` with the entry's own value when its `info` records it; `—` when none
-   fits; ", parity fail" when that record fails parity. The last column is the
+   fits, with the entry's lowest measured peak over its default and variants in small
+   print (`— lowest 3104.0 MiB`), so the cell shows how far it misses; ", parity
+   fail" when that record fails parity. The last column is the
    default's own time and peak. A variant that is not `ok` is in no cell, and a
    sentence under the table names it. Variants are in no other table but "Parity
    failures" (a note of an entry covers its variants) and "Not measured".
