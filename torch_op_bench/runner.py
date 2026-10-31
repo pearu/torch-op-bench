@@ -237,6 +237,11 @@ def launch(payload: dict[str, Any], python: str, timeout: float) -> dict[str, An
     """
     child_env = dict(os.environ)
     child_env.update(payload["env_vars"])
+    if not payload["case"]["device"].startswith("cuda"):
+        # A case on the CPU sees no GPU: the worker guards its own CUDA calls, but
+        # torch.compile's tracing saves the CUDA RNG state whenever a GPU is
+        # visible (dynamo's ``preserve_global_state``), creating a context.
+        child_env["CUDA_VISIBLE_DEVICES"] = ""
     with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
         try:
             proc = subprocess.Popen(

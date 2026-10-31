@@ -128,7 +128,15 @@ def matmul_precision() -> dict[str, Any]:
     return info
 
 
-def torch_info() -> dict[str, Any]:
+def torch_info(device: str | None = None) -> dict[str, Any]:
+    """torch's build, its matmul settings and, unless ``device`` is a non-CUDA
+    device, the GPUs and cuDNN's version.
+
+    Asking for a GPU's properties initialises CUDA, and cuDNN's version asks for
+    them: for a case on the CPU (``device="cpu"``) neither is collected, so the
+    process creates no CUDA context (``cuda``, the build's CUDA version, needs
+    none). ``None``, no case: everything, as ``torch-op-bench env`` prints it.
+    """
     try:
         import torch
     except ImportError:
@@ -148,6 +156,8 @@ def torch_info() -> dict[str, Any]:
         "devices": [],
         "matmul": matmul_precision(),
     }
+    if device is not None and not device.startswith("cuda"):
+        return info
     if not torch.cuda.is_available():
         return info
     try:
@@ -168,11 +178,14 @@ def torch_info() -> dict[str, Any]:
     return info
 
 
-def collect(packages: Iterable[str] = (), *, include_torch: bool = True) -> dict[str, Any]:
+def collect(
+    packages: Iterable[str] = (), *, include_torch: bool = True, device: str | None = None
+) -> dict[str, Any]:
     """The provenance record of this Python process.
 
     With ``include_torch=False`` the ``torch`` field is ``None`` and torch is not
-    touched (no CUDA context is created).
+    touched (no CUDA context is created). ``device`` is the case's: see
+    ``torch_info``.
     """
     return {
         "hostname": socket.gethostname(),
@@ -180,7 +193,7 @@ def collect(packages: Iterable[str] = (), *, include_torch: bool = True) -> dict
         "python": platform.python_version(),
         "executable": sys.executable,
         "platform": platform.platform(),
-        "torch": torch_info() if include_torch else None,
+        "torch": torch_info(device) if include_torch else None,
         "driver": driver_version(),
         "torch_op_bench": {"version": torch_op_bench.__version__, **git_info()},
         "package_root": str(package_root()),

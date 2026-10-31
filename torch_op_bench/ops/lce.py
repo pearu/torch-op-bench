@@ -898,17 +898,22 @@ def setup_torchtitan_ce(case: Case) -> dict[str, Any]:
 
 
 def _profiled(fn: Any) -> list[Any]:
-    """Run ``fn`` once under the profiler (CUDA activity too when there is a GPU);
-    its events, as the profiler's ``FunctionEvent`` list."""
+    """Run ``fn`` once under the profiler (CUDA activity too when the process uses
+    CUDA); its events, as the profiler's ``FunctionEvent`` list.
+
+    A verify sees only the call, not the case: a CUDA case has initialised CUDA by
+    then (its inputs are on the device), a CPU case has not, and profiling CUDA
+    activity, or synchronizing, would create the context it does not use."""
     import torch
     from torch.profiler import ProfilerActivity, profile
 
+    on_cuda = torch.cuda.is_initialized()
     activities = [ProfilerActivity.CPU]
-    if torch.cuda.is_available():
+    if on_cuda:
         activities.append(ProfilerActivity.CUDA)
     with profile(activities=activities) as prof:
         fn()
-        if torch.cuda.is_available():
+        if on_cuda:
             torch.cuda.synchronize()
     return list(prof.events())
 

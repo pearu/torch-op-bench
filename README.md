@@ -189,7 +189,11 @@ forward's and autograd's cuBLAS workspaces each sit in a segment of their own, a
 a training process where earlier layers created them; left to the op's first call, a
 workspace can land in a freed multi-GiB temporary and pin it, and the later calls run
 out of memory where the first fit (`torchtitan_ce` fwd_bwd at V=262144 on a 16 GB
-card). A point that runs out of the device's memory in any of these phases becomes
+card). A case on the CPU never touches the GPU: its worker creates no CUDA context
+(the runner hides the GPUs from it, `CUDA_VISIBLE_DEVICES=""`, as torch.compile's
+tracing would otherwise create one), and its record's `env.torch` lists no GPUs and
+no cuDNN version, only the build's CUDA version (`env.torch.cuda`), so a CPU record
+does not depend on what else runs on the GPU. A point that runs out of the device's memory in any of these phases becomes
 an `unavailable` record (see `status` under "Results"); an exception, a crash or a
 timeout becomes an `error` record. Either way the sweep goes on.
 
