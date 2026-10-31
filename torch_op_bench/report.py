@@ -1033,8 +1033,8 @@ PARITY_FAILURES_TITLE = "## Parity failures"
 def render_parity_failures(
     rows: Sequence[Row], axes: Sequence[str], notes: Sequence[Any], *, unread: str | None = None
 ) -> str:
-    """Every ``fail`` of ``rows``, by entry and metric: explained by a note of the op,
-    or unexplained; and the count the "final" check reads. ``unread`` is the
+    """Every ``fail`` of ``rows``, by entry, note and metric: explained by a note of
+    the op, or unexplained; and the count the "final" check reads. ``unread`` is the
     ``op_ref`` of an op that does not import here, whose notes were not read: a
     sentence says so, so the count does not read as a real failure (R1-38 R1)."""
     # Per entry, per note (None: unexplained), per metric, the records.
@@ -1049,8 +1049,8 @@ def render_parity_failures(
         lines.append("No record fails parity.")
     else:
         lines += [
-            "Every record that fails parity, by entry and metric: explained when one of "
-            "the op's parity notes names the cause there, else unexplained. A record "
+            "Every record that fails parity, by entry, note and metric: explained when one "
+            "of the op's parity notes names the cause there, else unexplained. A record "
             "counts as explained when every metric it fails is.",
             "",
         ]

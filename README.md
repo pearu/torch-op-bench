@@ -420,8 +420,8 @@ command that made it, and any warning the merge raised (records from different
 torch-op-bench commits). Its sections:
 
 1. **Provenance**: device, hosts, the time span of the records and their number in
-   each directory read, named as given (`232 records in results, 18 in
-   results-strict`), and one row per
+   each directory read, named as given (232 records in `results`, 18
+   in `results-strict`), and one row per
    environment build: torch and CUDA, Python, the packages (a version, or the first
    12 characters of the commit of a git install), the torch-op-bench commit, and
    the matmul settings. It says so when the commits differ, or when one environment

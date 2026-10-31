@@ -471,12 +471,15 @@ def test_op_notes(synth, monkeypatch):
 
 
 def test_lce_notes():
-    # Each LCE note dated and sourced (R1-42), and the op's text, not computed.
+    # Each LCE note dated and sourced by a run a reader can repeat, no path, probe or
+    # review id a reader of the report cannot reach (R1-43 R1); the op's text.
     from torch_op_bench.ops import lce
 
     assert len(lce.LCE.notes) == 2
     for note in lce.LCE.notes:
-        assert re.match(r"\d{4}-\d{2}-\d{2}: ", note) and "Review R1-42" in note
+        assert re.match(r"\d{4}-\d{2}-\d{2}: ", note) and "reproduced by `run lce --case" in note
+        assert not re.search(r"\.asb|\.py\b|Review|R1-\d", note), note
+    assert "`--case N=8192 --impl torch_eager`" in lce.LCE.notes[0]
     assert "`ey`, torch 2.16.0.dev20261017" in lce.LCE.notes[0]
     assert "on one card" in lce.LCE.notes[1]
 
