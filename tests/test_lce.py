@@ -642,7 +642,30 @@ def test_availability(monkeypatch):
 
 
 def test_work():
-    assert SPEC.work(case()) == {"tokens": 64, "flops": 6 * 64 * 32 * 96}
+    # The GEMMs the mode runs (Task I1-23 Part C): the logits in fwd, and the two
+    # backward products too in fwd_bwd.
+    assert SPEC.work(case(), "fwd") == {"tokens": 64, "flops": 2 * 64 * 32 * 96}
+    assert SPEC.work(case(), "fwd_bwd") == {"tokens": 64, "flops": 6 * 64 * 32 * 96}
+    default = Case(SPEC.default_point, "bfloat16", "cuda")
+    assert SPEC.work(default, "fwd")["flops"] == 2 * 4096 * 4096 * 131072
+    assert SPEC.work(default, "fwd_bwd")["flops"] == 6 * 4096 * 4096 * 131072
+
+
+def test_declarations():
+    # What the report says of the op (Task I1-23): every entry, axis, unit and metric
+    # described; the units' keys are work's.
+    assert SPEC.description
+    assert all(impl.description for impl in SPEC.implementations)
+    assert all(axis.description for axis in SPEC.axes)
+    units = {u.key: u for u in SPEC.work_units}
+    assert set(units) == set(SPEC.work(case(), "fwd")) == {"tokens", "flops"}
+    assert (units["tokens"].rate_label, units["flops"].rate_label) == ("tokens/s", "TFLOP/s")
+    assert units["flops"].scale == 1e12 and "2·N·H·V in `fwd`" in units["flops"].definition
+    metrics = {"loss_abs_err", "loss_rel_err", "grad_hidden_rel_l2", "grad_weight_rel_l2"}
+    assert set(SPEC.metric_definitions) == metrics >= set(SPEC.tolerances)
+    assert "fp32 reference" in SPEC.tolerance_basis
+    control = SPEC.implementation("torch_eager_liger")
+    assert control.description.startswith("`torch_eager` run inside the `liger` environment")
 
 
 def test_reference_fits(monkeypatch):
@@ -719,7 +742,8 @@ def test_through_worker_and_runner(tmp_path):
         (impl, mode) for impl in IMPLS for mode in ("fwd", "fwd_bwd")
     ]
     for record in written:
-        assert record["work"] == {"tokens": 64, "flops": 6 * 64 * 32 * 96}
+        gemms = 1 if record["mode"] == "fwd" else 3
+        assert record["work"] == {"tokens": 64, "flops": 2 * gemms * 64 * 32 * 96}
         assert record["info"]["ignore_index"] == -100
         if record["implementation"] == "torch_lce" and not OVERRIDE:
             assert record["status"] == "unavailable"

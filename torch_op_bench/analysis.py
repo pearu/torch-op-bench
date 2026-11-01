@@ -54,6 +54,7 @@ RESULTS = [
     "tflops",
     "parity_status",
     "parity_failed",
+    "skip_reason",
 ]
 TAIL = [
     "role",
@@ -76,6 +77,8 @@ TAIL = [
 INFO_COLUMNS = ("role", "control_of", "compiled", "base", "params")
 INFO_PREFIX = "info."
 PARITY_PREFIX = "parity_"
+# A work unit's rate: ``<key>_per_s``, the record's ``work[key]`` per second of the median.
+RATE_SUFFIX = "_per_s"
 
 
 def load(
@@ -243,8 +246,16 @@ def flatten(
             "tflops": flops / median_s / 1e12 if flops is not None and median_s else None,
             "parity_status": parity.get("status"),
             "parity_failed": ",".join(parity.get("failed") or []) or None,
+            # Why the parity check was not run (``skipped``), for the report's caveats.
+            "skip_reason": parity.get("reason") if parity.get("status") == "skipped" else None,
         }
     )
+    # Every work unit's rate (Task I1-23): the report's throughput columns come from
+    # the op's declared units; tokens_per_s and tflops stay for the rows above.
+    for name, value in sorted(work.items()):
+        if f"{name}{RATE_SUFFIX}" not in row:
+            rate = value / median_s if isinstance(value, (int, float)) and median_s else None
+            row[f"{name}{RATE_SUFFIX}"] = rate
     for name, value in sorted((parity.get("metrics") or {}).items()):
         row[PARITY_PREFIX + name] = value
 
@@ -404,6 +415,12 @@ def parity_notes(recs: Sequence[Mapping[str, Any]]) -> list[Any]:
     return list(getattr(spec, "parity_notes", None) or [])
 
 
+def work_units(recs: Sequence[Mapping[str, Any]]) -> list[Any] | None:
+    """The op's ``work_units`` when its spec resolves here, else ``None``."""
+    spec = spec_of(recs[0]) if recs else None
+    return None if spec is None else list(spec.work_units)
+
+
 def op_notes(recs: Sequence[Mapping[str, Any]]) -> list[str]:
     """The op's ``notes`` when its spec resolves here, else none."""
     spec = spec_of(recs[0]) if recs else None
@@ -489,7 +506,18 @@ def to_rows(recs: Sequence[Mapping[str, Any]], spec: Any = None) -> list[Row]:
 
 def columns_of(rows: Sequence[Row], axes: Sequence[str], info_keys: Sequence[str]) -> list[str]:
     parity = sorted({k for row in rows for k in row if k.startswith(PARITY_PREFIX)} - set(RESULTS))
-    return [*HEAD, *axes, *RESULTS, *parity, *TAIL, *(INFO_PREFIX + k for k in info_keys)]
+    rates = sorted(
+        {k for row in rows for k in row if k.endswith(RATE_SUFFIX)} - set(RESULTS) - set(parity)
+    )
+    return [
+        *HEAD,
+        *axes,
+        *RESULTS,
+        *rates,
+        *parity,
+        *TAIL,
+        *(INFO_PREFIX + k for k in info_keys),
+    ]
 
 
 # --- the default point and the sweeps around it -----------------------------------------

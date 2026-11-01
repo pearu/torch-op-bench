@@ -165,6 +165,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         point=analysis.parse_point(args.point),
         command=["torch-op-bench", *args.argv],
         strict=args.strict,
+        findings=args.summary,
     )
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
@@ -295,6 +296,12 @@ def build_parser() -> argparse.ArgumentParser:
     report_cmd = sub.add_parser("report", help="write the markdown tables of a results directory")
     _selection(report_cmd)
     report_cmd.add_argument("--out", help="markdown file to write (default: stdout)")
+    report_cmd.add_argument(
+        "--summary",
+        metavar="FINDINGS.md",
+        help="the findings an author wrote for these records, printed in the summary in "
+        "place of the generated sentences",
+    )
     report_cmd.set_defaults(func=cmd_report)
 
     plot_cmd = sub.add_parser("plot", help="draw the figures of a results directory (PNG + CSV)")

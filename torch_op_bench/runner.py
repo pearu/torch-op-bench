@@ -193,7 +193,7 @@ def make_payload(
             "env_vars": dict(impl.env_vars),
             "packages": list(impl.packages),
             "device_slug": slug,
-            "work": spec.work(case),
+            "work": spec.work(case, mode),
             "info": impl.info,
         }
     )

@@ -20,7 +20,14 @@ FLAG_AT_IMPORT = os.environ.get("TOB_TOY_FLAG")
 
 import torch  # noqa: E402
 
-from torch_op_bench.spec import Axis, Case, Implementation, OpSpec, ParityNote  # noqa: E402
+from torch_op_bench.spec import (  # noqa: E402
+    Axis,
+    Case,
+    Implementation,
+    OpSpec,
+    ParityNote,
+    WorkUnit,
+)
 
 
 def make_inputs(case: Case, device, generator):
@@ -147,7 +154,15 @@ TOY = OpSpec(
     reference=Implementation("reference", run_reference),
     compare=compare,
     tolerances={"y_rel_err": 1e-4, "grad_a_rel_l2": 1e-4, "grad_b_rel_l2": 1e-4},
-    work=lambda case: {"flops": 2.0 * case.params["M"] * case.params["K"] * case.params["N"]},
+    # One count in both modes: the forward's product (Task I1-23 Part C).
+    work=lambda case, mode: {"flops": 2.0 * case.params["M"] * case.params["K"] * case.params["N"]},
+    work_units=[WorkUnit("flops", "toy FLOP", "2·M·K·N, the product", "toy MFLOP/s", 1e6)],
+    metric_definitions={
+        "y_abs_err": "|y − y_ref|",
+        "y_rel_err": "y_abs_err / |y_ref|",
+        "grad_a_rel_l2": "‖grad_a − grad_a_ref‖₂ / ‖grad_a_ref‖₂",
+        "grad_b_rel_l2": "‖grad_b − grad_b_ref‖₂ / ‖grad_b_ref‖₂",
+    },
     defaults={"M": 16},
     # A cause that holds in fwd_bwd only: a failure in fwd stays unexplained.
     parity_notes=[
