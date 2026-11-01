@@ -1275,6 +1275,8 @@ def test_definitions_cover_every_header(synth, synth_strict, tmp_path):
     S.write_variants(synth)
     text = make(synth, strict=synth_strict, command=["torch-op-bench", "report", str(synth)])
     assert report.header_term("a new column") is None
+    # The tool's text names no op's unit (R1-50 F1).
+    assert not re.search(r"tokens|FLOP", " ".join(d for _, d in report.DEFINITIONS))
     assert len(set(headers(text))) > 30
     assert_every_header_defined(text, synth)
     how = section(text, report.READ_TITLE)
@@ -1500,6 +1502,8 @@ def test_summary_without_the_op(synth, monkeypatch):
     summary = section(text, "## Summary")
     assert "The op `synth` (not described here: the op does not import)." in summary
     assert "- `base` (the baseline, in `torch`): not described." in summary
+    # Without the spec, an entry's modes are those its records hold (R1-50 F2).
+    assert "- `chunked` (in `other`, `fwd_bwd` only): not described." in summary
     assert (
         f"- The op `{S.OP_REF}` does not import here: its descriptions, definitions, parity "
         "notes and notes are not shown, and every parity failure counts as unexplained."
@@ -1615,6 +1619,21 @@ def test_generated_findings_on_the_lce_structure(tmp_path):
         assert named == expected, mode
         assert "- The controls (`torch_eager_liger` and `torch_eager_torchtitan`: " in part
     assert "- `liger` (Liger-Kernel's fused kernel, accumulating in fp32) takes " in findings
+    # The entries without fwd say so, from the spec's modes (R1-50 F2).
+    compared = section(summary, "### What was compared", "\n### ")
+    only = re.findall(r"^- `([^`]+)` \(in `\w+`, `fwd_bwd` only\)", compared, flags=re.M)
+    assert only == [
+        impl.name
+        for impl in lce.LCE.implementations
+        if impl.modes == {"fwd_bwd"} and impl.variant_of is None
+    ]
+    assert only == [
+        "liger",
+        "liger_native_accum",
+        "torchtitan_chunked",
+        "torchtitan_chunked_compiled",
+    ]
+    assert "`torch_eager` (the baseline, in `torch`): " in compared
     assert "**Time at equal peak (`fwd_bwd`).**" in findings and "**Over N (`fwd`).**" in findings
     assert not set(re.findall(r"[a-z]+", summary.lower())) & set(report.FORBIDDEN)
     assert "- GPU: GPU, 16.0 GiB" in summary

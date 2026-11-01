@@ -222,8 +222,8 @@ DEFINITIONS = [
     ),
     (
         "throughput",
-        "a column per unit of work the op declares (defined below), headed by its rate "
-        "(e.g. tokens/s): the work of one call, as the op counts it, over the median time.",
+        "a column per unit of work the op declares (defined below), headed by the unit's "
+        "rate: the work of one call, as the op counts it, over the median time.",
     ),
     (
         "peak above baseline, MiB",
@@ -558,7 +558,9 @@ def render_compared(
         what = _description(spec, name) or "not described"
         role = "the baseline, " if name == baseline else ""
         role += "a control, " if row.get("role") == "control" else ""
-        lines.append(f"- `{name}` ({role}in `{row.get('env_name')}`): {what}.")
+        runs = [m for m in modes if m in _modes_of(spec, name, rows)]
+        only = f", {' and '.join(f'`{m}`' for m in runs)} only" if runs != list(modes) else ""
+        lines.append(f"- `{name}` ({role}in `{row.get('env_name')}`{only}): {what}.")
     words = " and ".join(f"{MODE_WORDS.get(m, m)} (`{m}`)" for m in modes)
     lines += ["", f"Modes: {words}; dtype {', '.join(dtypes)}."]
     swept = {
@@ -598,6 +600,17 @@ def render_compared(
             f"chunked entry's time within a memory budget): {listed}."
         )
     return lines + [""]
+
+
+def _modes_of(spec: Any, name: str, rows: Sequence[Row]) -> set[str]:
+    """The modes an entry runs in: the spec's (``Implementation.modes``) when the op
+    imports and declares the entry, else those its records hold."""
+    if spec is not None:
+        try:
+            return set(spec.implementation(name).modes)
+        except KeyError:
+            pass
+    return {r["mode"] for r in rows if r["implementation"] == name}
 
 
 def render_on_what(
