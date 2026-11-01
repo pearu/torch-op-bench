@@ -14,22 +14,28 @@ files, and an ssh session.
 subcommands:
   push       copy the tracked files and .git to REMOTE_DIR/torch-op-bench, and
              nothing untracked or ignored; refuses unless the tracked files are
-             clean, so every record names one commit, and while a run is alive
+             clean, so every record names one commit, and while a run is alive;
+             with --wheelhouse, also a directory of wheels
   bootstrap  install Miniforge into REMOTE_DIR/miniforge3 unless mamba or conda is
              on PATH, and write REMOTE_DIR/env.sh (caches under REMOTE_DIR/cache)
   setup      create the torch environment and each of --envs under REMOTE_DIR/envs
-             with scripts/setup-env.sh; show their provenance, nvidia-smi and
-             `torch-op-bench list OP`
+             with scripts/setup-env.sh, and list --envs in REMOTE_DIR/envs.list;
+             show their provenance, hostname, nvidia-smi and `torch-op-bench list OP`
   run        start `torch-op-bench run OP --device cuda` detached (nohup, setsid),
-             RUN-ARGS after `--`, into REMOTE_DIR/results/ (results-strict/ with
-             --matmul-reduction strict); returns at once; rerun after a disconnect
-             to resume (recorded ok triples are skipped)
-  status     whether the run is alive, the end of its log, records per status
+             RUN-ARGS after `--`, into REMOTE_DIR/RESULTS/ (below); returns at
+             once; rerun after a disconnect to resume (recorded ok triples are
+             skipped); without --envs, the environments of envs.list
+  status     whether the run is alive and into which RESULTS/, the end of its log,
+             records per status in each RESULTS/ there
   wait       follow the log until the run ends; exit with its status
-  fetch      copy REMOTE_DIR/results/ and results-strict/ (when there) into this
-             checkout's results/ and results-strict/ (never deletes anything on
-             HOST) and show the first lines of each new slug's report
-  shell      an interactive shell on HOST in REMOTE_DIR with env.sh sourced
+  fetch      copy each RESULTS/ there into this checkout's (never deletes anything
+             on HOST), say how many records each slug gained, and show the first
+             lines of its report; warns while a run is alive
+  shell      an interactive bash on HOST in REMOTE_DIR with env.sh sourced
+
+RESULTS is results, or results-stable with --torch-env torch-stable, with -strict
+appended under --matmul-reduction strict: the resume key holds neither the build
+nor the setting, so neither may share a directory with the default.
 
 options:
   --dir REMOTE_DIR     scratch directory on HOST (default ~/torch_op_bench-scratch)
@@ -37,18 +43,22 @@ options:
                        torch environment, whose interpreter runs torch-op-bench
   --envs NAME,...      counterpart environments to create and pass to run
                        (e.g. liger,torchtitan)
-  --gpu N              CUDA_VISIBLE_DEVICES=N on HOST for run (default: all)
+  --gpu N              CUDA_VISIBLE_DEVICES=N on HOST for run (default: all; not
+                       on a host whose sandbox shows one card)
   --op OP              the op to run, list and report (default lce)
   --matmul-reduction default|strict
                        run under torch's matmul defaults (default), or strict: no
                        reduced-precision reduction in bf16/fp16 GEMMs, into
-                       results-strict/ (the resume key does not hold the setting)
+                       RESULTS-strict/
+  --wheelhouse DIR     push: copy the wheels in DIR to REMOTE_DIR/wheelhouse, which
+                       setup's pip searches (--find-links) before the indexes
   --allow-dirty        push uncommitted changes (development only: the records then
                        name a commit that is not what ran)
   --dry-run            print every local and remote command, run none
   -h, --help           this message
 
-Nothing is written on HOST outside REMOTE_DIR.
+Nothing is written on HOST outside REMOTE_DIR (and TMPDIR, which is REMOTE_DIR/tmp
+unless the session sets one).
 USAGE
 }
 
@@ -66,6 +76,7 @@ envs=()
 gpu=""
 op="lce"
 matmul_reduction="default"
+wheelhouse=""
 allow_dirty=0
 dry_run=0
 run_args=()
@@ -75,7 +86,7 @@ while (($#)); do
             usage
             exit 0
             ;;
-        --dir | --torch-env | --envs | --gpu | --op | --matmul-reduction)
+        --dir | --torch-env | --envs | --gpu | --op | --matmul-reduction | --wheelhouse)
             [[ $# -ge 2 ]] || die "$1 needs a value"
             case "$1" in
                 --matmul-reduction) matmul_reduction="$2" ;;
@@ -84,6 +95,7 @@ while (($#)); do
                 --envs) IFS=, read -r -a more <<<"$2" && envs+=("${more[@]}") ;;
                 --gpu) gpu="$2" ;;
                 --op) op="$2" ;;
+                --wheelhouse) wheelhouse="$2" ;;
             esac
             shift 2
             ;;
@@ -121,16 +133,26 @@ if [[ -z "$host" || -z "$subcommand" ]]; then
     usage >&2
     exit 2
 fi
+# The results directory: the resume and merge key holds neither the torch build nor
+# the matmul setting, so a release run or a strict run must not land in results/
+# (it would be skipped against the nightly's records, and duplicate their keys).
 case "$torch_env" in
-    torch-nightly | torch-stable) ;;
+    torch-nightly) results_name="results" ;;
+    torch-stable) results_name="results-stable" ;;
     *) die "--torch-env must be torch-nightly or torch-stable, not $torch_env" ;;
 esac
 [[ -z "$gpu" || "$gpu" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "--gpu takes GPU indices, not $gpu"
 case "$matmul_reduction" in
-    default) results_name="results" ;;
-    strict) results_name="results-strict" ;;
+    default) ;;
+    strict) results_name+="-strict" ;;
     *) die "--matmul-reduction must be default or strict, not $matmul_reduction" ;;
 esac
+# Every results directory a run can write, for status and fetch.
+all_results=(results results-strict results-stable results-stable-strict)
+if [[ -n "$wheelhouse" ]]; then
+    [[ "$subcommand" == push ]] || die "--wheelhouse is for push only"
+    [[ -d "$wheelhouse" ]] || die "--wheelhouse $wheelhouse is not a directory"
+fi
 # Both choose the results directory: a strict run must not land in results/.
 for arg in "${run_args[@]}"; do
     case "$arg" in
@@ -249,7 +271,11 @@ cmd_push() {
         local_cmd rsync -a --exclude=/info/ "$alt/" "$host:$dest/.git/objects/"
     done
     # A tracked file deleted but not committed (--allow-dirty) is listed and missing.
-    local tree_cmd=(rsync -a --checksum --from0 --files-from=- --ignore-missing-args
+    # --force: a tracked file that replaced a directory of the same name replaces it
+    # on HOST too, also when the directory holds something untracked (a
+    # __pycache__); only paths of the list are replaced. A directory that replaced a
+    # file needs nothing: rsync replaces a file with a directory by default.
+    local tree_cmd=(rsync -a --force --checksum --from0 --files-from=- --ignore-missing-args
         "$root/" "$host:$dest/")
     printf '+ git -C %q ls-files -z |' "$root"
     printf ' %q' "${tree_cmd[@]}"
@@ -257,15 +283,22 @@ cmd_push() {
     if ((!dry_run)); then
         git -C "$root" ls-files -z | "${tree_cmd[@]}"
     fi
+    if [[ -n "$wheelhouse" ]]; then
+        local_cmd rsync -a "$wheelhouse/" "$host:$rsync_dir/wheelhouse/"
+    fi
     remote 'cd torch-op-bench
 # What the previous push tracked and HEAD does not, ignored now or not: git clean
 # leaves a file that left the index and became ignored in one commit.
 if [ -s "$D"/push.old-head ]; then
     old="$(cat "$D"/push.old-head)"
     if git cat-file -e "$old^{commit}" 2>/dev/null; then
-        gone=(--name-only --no-renames --diff-filter=D "$old" HEAD)
-        git diff "${gone[@]}" | sed "s/^/no longer tracked, removing /"
-        git diff -z "${gone[@]}" | xargs -0 rm -f --
+        # A file that became a directory of tracked files is that directory now.
+        git diff -z --name-only --no-renames --diff-filter=D "$old" HEAD |
+            while IFS= read -r -d "" path; do
+                [ -d "$path" ] && continue
+                echo "no longer tracked, removing $path"
+                rm -f -- "$path"
+            done
     else
         echo "the previous push ($old) is not in this history: only git clean below" >&2
     fi
@@ -288,8 +321,10 @@ elif command -v mamba >/dev/null 2>&1 || command -v conda >/dev/null 2>&1; then
     echo "using $(command -v mamba || command -v conda) from PATH"
 else
     installer="$D/cache/Miniforge3-Linux-$(uname -m).sh"
-    curl -fsSL -o "$installer" \
-        "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-$(uname -m).sh"
+    url="https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-$(uname -m).sh"
+    # A proxy that refuses github.com or .githubusercontent.com answers 403 (above).
+    curl -fsSL -o "$installer" "$url" ||
+        { echo "bootstrap: could not download the Miniforge installer, $url" >&2; exit 1; }
     # The installer runs conda, which makes ~/.conda: give it a home in the scratch.
     mkdir -p "$D/cache/home"
     HOME="$D/cache/home" CONDA_REGISTER_ENVS=false bash "$installer" -b -p "$D/miniforge3"
@@ -307,8 +342,25 @@ fi
     echo "export PIP_CACHE_DIR=\"$D/cache/pip\""
     echo "export XDG_CACHE_HOME=\"$D/cache\""
     echo "export MPLCONFIGDIR=\"$D/cache/matplotlib\""
+    echo "# The TMPDIR of the session (a sandbox sets one), else one here."
+    echo "if [ -z \"\${TMPDIR:-}\" ]; then export TMPDIR=\"$D/tmp\"; fi"
+    echo "mkdir -p \"\$TMPDIR\""
+    echo "# The CA of a proxy, for mamba and conda: libmamba ignores SSL_CERT_FILE."
+    echo "if [ -n \"\${SSL_CERT_FILE:-}\" ]; then"
+    echo "    export MAMBA_SSL_VERIFY=\"\${MAMBA_SSL_VERIFY:-\$SSL_CERT_FILE}\""
+    echo "    export CONDA_SSL_VERIFY=\"\${CONDA_SSL_VERIFY:-\$SSL_CERT_FILE}\""
+    echo "fi"
 } > env.sh
-echo "wrote $D/env.sh"'
+echo "wrote $D/env.sh"
+# What shell starts bash with: the login shell (whatever it is) only runs
+# `bash --rcfile shell.rc -i`, and HOME may be read-only, so the history is here.
+{
+    echo "# Written by scripts/remote-run.sh bootstrap: the rc file of its shell."
+    echo "cd \"$D\""
+    echo ". \"$D/env.sh\""
+    echo "HISTFILE=\"$D/cache/bash_history\""
+} > shell.rc
+echo "wrote $D/shell.rc"'
 }
 
 cmd_setup() {
@@ -316,26 +368,67 @@ cmd_setup() {
     for name in "$torch_env" "${envs[@]}"; do
         names+=" $(printf '%q' "$name")"
     done
+    # The counterpart environments, for run without --envs; a setup without --envs
+    # (another torch environment) leaves the list as it was.
+    local list="" counterparts=""
+    if ((${#envs[@]})); then
+        for name in "${envs[@]}"; do
+            counterparts+=" $(printf '%q' "$name")"
+        done
+        list="printf '%s\\n'$counterparts > \"\$D\"/envs.list
+echo 'envs.list:$counterparts'"
+    fi
     remote "$source_env
 cd torch-op-bench
 # mamba 2 registers environments in ~/.conda/environments.txt whatever
 # CONDA_REGISTER_ENVS says: it gets a home in the scratch, as the installer does.
 mkdir -p \"\$D\"/cache/home
+# The wheels of push --wheelhouse, which pip (that of mamba's pip step too) searches
+# before the indexes: PIP_FIND_LINKS is its --find-links, and keeps the session's.
+if [ -d \"\$D\"/wheelhouse ]; then
+    export PIP_FIND_LINKS=\"\$D/wheelhouse\${PIP_FIND_LINKS:+ \$PIP_FIND_LINKS}\"
+    echo \"pip finds links in \$PIP_FIND_LINKS\"
+fi
 for name in$names; do
-    HOME=\"\$D\"/cache/home scripts/setup-env.sh \"\$name\" --prefix \"\$D\"/envs
+    HOME=\"\$D\"/cache/home scripts/setup-env.sh \"\$name\" --prefix \"\$D\"/envs || {
+        echo \"setup: the environment \$name failed: the step and its error are above\" \\
+            \"(a host the proxy refuses answers 403)\" >&2
+        exit 1
+    }
 done
+$list
+echo \"hostname: \$(hostname)\"
 nvidia-smi || echo 'nvidia-smi failed'
 $torch_python -m torch_op_bench.cli list $(printf '%q' "$op")"
 }
 
-# --env NAME=PYTHON for each counterpart environment: NAME is the definition's own
-# `name:` (envs/liger-git.yml defines the environment liger).
+# --env NAME=PYTHON for each counterpart environment, those of --envs or else those
+# setup listed in envs.list: NAME is the definition's own `name:` (envs/liger-git.yml
+# defines the environment liger). A missing environment stops the run before it
+# starts, rather than recording its entries unavailable.
 env_args_script() {
-    local name
-    echo 'env_args=()'
-    for name in "${envs[@]}"; do
-        echo "env_args+=(--env \"\$(awk '/^name:/ {print \$2; exit}' torch-op-bench/envs/$name.yml)=\$D/envs/$name/bin/python\")"
-    done
+    if ((${#envs[@]})); then
+        echo "env_names=(${envs[*]})"
+    else
+        cat <<'SCRIPT'
+env_names=()
+if [ -s envs.list ]; then
+    mapfile -t env_names < <(grep . envs.list)
+    echo "the environments of envs.list: ${env_names[*]}"
+else
+    echo "no --envs and no envs.list (setup --envs): no counterpart environments" >&2
+fi
+SCRIPT
+    fi
+    cat <<'SCRIPT'
+env_args=()
+for name in "${env_names[@]}"; do
+    [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "bad environment name '$name'" >&2; exit 1; }
+    [ -x "$D/envs/$name/bin/python" ] ||
+        { echo "no environment $name in $D/envs: setup --envs $name first" >&2; exit 1; }
+    env_args+=(--env "$(awk '/^name:/ {print $2; exit}' torch-op-bench/envs/$name.yml)=$D/envs/$name/bin/python")
+done
+SCRIPT
 }
 
 cmd_run() {
@@ -361,9 +454,16 @@ mkdir -p logs $results_name
 $(env_args_script)
 log=\"\$D/logs/\$(date -u +%Y%m%dT%H%M%SZ).log\"
 cmd=($torch_python -m torch_op_bench.cli run $(printf '%q' "$op") --device cuda --results \"\$D\"/$results_name$reduction_arg \"\${env_args[@]}\"$args)
-printf '%q ' \"\${cmd[@]}\" > \"\$log\"
-printf '\\n' >> \"\$log\"
+# The log's header: where the run is and which cards it sees, then the command.
+{
+    echo \"# host: \$(hostname)\"
+    echo \"# CUDA_VISIBLE_DEVICES: \${CUDA_VISIBLE_DEVICES-(not set)}\"
+    nvidia-smi -L 2>&1 | sed 's/^/# /' || echo '# nvidia-smi failed'
+    printf '%q ' \"\${cmd[@]}\"
+    printf '\\n'
+} > \"\$log\"
 rm -f run.status
+echo $results_name > run.results
 cd torch-op-bench
 D=\"\$D\" setsid nohup bash -c '\"\$@\"; echo \$? > \"\$D\"/run.status' run \"\${cmd[@]}\" >> \"\$log\" 2>&1 < /dev/null &
 echo \$! > \"\$D\"/run.pid
@@ -372,10 +472,11 @@ echo \"started pid \$(cat \"\$D\"/run.pid), log \$log\""
 
 cmd_status() {
     remote "$source_env
+into=\"\$(cat run.results 2>/dev/null || echo results)\"
 if [ -f run.pid ] && kill -0 \"\$(cat run.pid)\" 2>/dev/null; then
-    echo \"running: pid \$(cat run.pid)\"
+    echo \"running: pid \$(cat run.pid), into \$into/\"
 elif [ -f run.status ]; then
-    echo \"not running: the last run exited with status \$(cat run.status)\"
+    echo \"not running: the last run exited with status \$(cat run.status), into \$into/\"
 else
     echo 'not running'
 fi
@@ -384,46 +485,74 @@ if [ -n \"\$log\" ]; then
     echo \"== \$log\"
     tail -n 20 \"\$log\"
 fi
-echo '== records'
-$torch_python -m torch_op_bench.remote count \"\$D\"/results"
+found=0
+for name in ${all_results[*]}; do
+    [ -d \"\$name\" ] || continue
+    found=1
+    echo \"== records in \$name/\"
+    $torch_python -m torch_op_bench.remote count \"\$D\"/\"\$name\"
+done
+[ \$found = 1 ] || echo '== no records yet'"
 }
 
 cmd_wait() {
     remote "[ -f run.pid ] || { echo 'no run started here' >&2; exit 1; }
 pid=\"\$(cat run.pid)\"
 log=\"\$(ls -1t logs/*.log | head -1)\"
-echo \"following \$log until pid \$pid ends\"
+into=\"\$(cat run.results 2>/dev/null || echo results)\"
+echo \"following \$log until pid \$pid ends (records into \$D/\$into/)\"
 tail -n +1 -f --pid=\"\$pid\" \"\$log\"
 status=\"\$(cat run.status 2>/dev/null || echo 1)\"
 echo \"the run exited with status \$status\"
 exit \"\$status\""
 }
 
+# "SLUG RECORDS" for each slug of DIR/OP: the non-empty lines of its files.
+slug_counts() {
+    local dir
+    for dir in "$1/$op"/*/; do
+        [[ -d "$dir" ]] || continue
+        printf '%s %s\n' "$(basename "$dir")" "$(cat "$dir"*.jsonl 2>/dev/null | grep -c . || true)"
+    done
+}
+
 cmd_fetch() {
-    local changes slug name
-    # Each directory, not its contents, into this checkout: results-strict/ is there
-    # only after a strict run, and a missing source is skipped (--ignore-missing-args
-    # does not skip a missing DIR/, which rsync changes into).
-    for name in results results-strict; do
+    local slug name before gained
+    # A record still being written is a half line, on which report fails until the
+    # next fetch.
+    remote 'if [ -f run.pid ] && kill -0 "$(cat run.pid)" 2>/dev/null; then
+    echo "remote-run.sh: WARNING: a run is in progress (pid $(cat run.pid)): the last line" \
+        "of a file may be half-written; fetch again when the run has ended" >&2
+fi'
+    # Each directory, not its contents, into this checkout: each is there only after
+    # its kind of run, and a missing source is skipped (--ignore-missing-args does
+    # not skip a missing DIR/, which rsync changes into).
+    for name in "${all_results[@]}"; do
         printf '+ rsync -ai --ignore-missing-args %q %q\n' "$host:$rsync_dir/$name" "$root/"
         ((dry_run)) && continue
-        changes="$(rsync -ai --ignore-missing-args "$host:$rsync_dir/$name" "$root/")"
-        echo "$changes"
-        for slug in $(sed -n "s|^>f[^ ]* $name/$op/\([^/]*\)/.*\.jsonl$|\1|p" <<<"$changes" | sort -u); do
-            echo "== $name/$op/$slug"
+        before="$(slug_counts "$root/$name")"
+        rsync -ai --ignore-missing-args "$host:$rsync_dir/$name" "$root/"
+        # The files are append-only: what a slug gained is its new lines.
+        gained="$(awk 'NR == FNR { had[$1] = $2; next } $2 > had[$1] { print $1, $2 - had[$1] }' \
+            <(echo "$before") <(slug_counts "$root/$name"))"
+        [[ -n "$gained" ]] || continue
+        while read -r slug count; do
+            echo "== $name/$op/$slug: $count new records"
+            # head may close the pipe before a long report ends: not a failure.
             PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" "${PYTHON:-python3}" -m torch_op_bench.cli \
-                report "$root/$name" --op "$op" --device-slug "$slug" 2>&1 | head -n 25
-        done
+                report "$root/$name" --op "$op" --device-slug "$slug" 2>&1 | head -n 25 || true
+        done <<<"$gained"
     done
 }
 
 cmd_shell() {
-    # Run by bash, as every other remote script is, not by the login shell (sh or
-    # dash would not source env.sh). Not bash -s: stdin stays the terminal.
+    # bash with bootstrap's rc file (cd, env.sh), whatever the login shell is: it
+    # gets three plain words to run, and no syntax of its own. Not bash -s: stdin
+    # stays the terminal. The path is relative to the home for ~/..., where ssh
+    # starts.
     local script
-    script="cd $remote_d && { [ -f env.sh ] && source env.sh; }; exec bash -i"
-    script="bash -c $(printf '%q' "$script")"
-    printf '+ ssh -t %q %q\n' "$host" "$script"
+    script="bash --rcfile $(printf '%q' "$rsync_dir/shell.rc") -i"
+    printf '+ ssh -t %q %s\n' "$host" "$script"
     if ((!dry_run)); then
         ssh -t "$host" "$script"
     fi

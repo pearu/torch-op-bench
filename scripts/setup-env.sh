@@ -2,6 +2,9 @@
 # Create (or update) a benchmark environment from its definition envs/NAME.yml and
 # install this checkout into it. See "Environments" in README.md.
 set -euo pipefail
+# set -e alone ends the script without a word: say which step failed (a host a
+# proxy refuses shows above it, as pip's or mamba's 403).
+trap 'echo "setup-env.sh: ${name:-}: failed (status $?): $BASH_COMMAND" >&2' ERR
 
 usage() {
     cat <<USAGE
