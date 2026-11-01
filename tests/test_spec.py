@@ -3,11 +3,13 @@ import toy_op
 
 from torch_op_bench import ops
 from torch_op_bench.spec import (
+    MODES,
     Axis,
     Case,
     Implementation,
     OpSpec,
     ParityNote,
+    WorkUnit,
     resolve_op,
     to_json,
 )
@@ -132,7 +134,8 @@ def test_opspec_lookup_and_defaults():
     with pytest.raises(KeyError):
         spec.implementation("nope")
     assert spec.default_point == {"M": 16, "K": 4, "N": 4, "layout": "contiguous"}
-    assert spec.work(Case(spec.default_point, "float32", "cpu")) == {"flops": 512.0}
+    for mode in MODES:  # the toy op counts the same in both modes
+        assert spec.work(Case(spec.default_point, "float32", "cpu"), mode) == {"flops": 512.0}
     assert spec.reference_fits(Case(spec.default_point, "float32", "cpu")) is True
 
 
@@ -154,11 +157,72 @@ def test_opspec_validation():
         with pytest.raises(ValueError, match="default_dtypes must be a non-empty subset"):
             OpSpec(implementations=[impl], default_dtypes=bad, **kwargs)
     assert OpSpec(implementations=[impl], default_dtypes=["float32"], **kwargs).default_dtypes
-    assert OpSpec(implementations=[impl], **kwargs).work(None) == {}
+    assert OpSpec(implementations=[impl], **kwargs).work(None, "fwd") == {}
     note = ParityNote("y", None, lambda *args: True, "why")
     with pytest.raises(ValueError, match=r"parity notes for unknown implementations \['y'\]"):
         OpSpec(implementations=[impl], parity_notes=[note], **kwargs)
     assert OpSpec(implementations=[impl], **kwargs).parity_notes == []
+
+
+def _spec(**kwargs):
+    impl = Implementation("x", lambda inputs, mode: None)
+    fields = dict(
+        name="op",
+        axes=[Axis("M", [4])],
+        dtypes=["float32"],
+        make_inputs=None,
+        implementations=[impl],
+        reference=impl,
+        compare=None,
+    )
+    return OpSpec(**{**fields, **kwargs})
+
+
+def test_work_takes_the_mode():
+    # Task I1-23 Part C: work(case, mode); a one-argument work is refused, by name.
+    with pytest.raises(ValueError, match=r"work must be work\(case, mode\)"):
+        _spec(work=lambda case: {"flops": 1})
+
+    def old(case):
+        return {}
+
+    with pytest.raises(ValueError, match=r"it takes \(case\)"):
+        _spec(work=old)
+    spec = _spec(work=lambda case, mode: {"flops": 2 if mode == "fwd" else 6})
+    case = Case({"M": 4}, "float32", "cpu")
+    assert [spec.work(case, m) for m in MODES] == [{"flops": 2}, {"flops": 6}]
+    assert _spec(work=lambda *args: {}).work(case, "fwd") == {}
+
+
+def test_work_units_and_metric_definitions():
+    unit = WorkUnit("rows", "rows", "the rows, M", "rows/s")
+    assert unit.scale == 1
+    spec = _spec(work=lambda case, mode: {"rows": case.params["M"]}, work_units=[unit])
+    assert spec.work_units == [unit]
+    # A unit work does not return, in some mode, at the default point.
+    with pytest.raises(ValueError, match=r"work_units \['rows'\] not in work\(case, 'fwd'\)"):
+        _spec(work=lambda case, mode: {"rows": 1} if mode == "fwd_bwd" else {}, work_units=[unit])
+    # A tolerance without a definition.
+    with pytest.raises(ValueError, match=r"no metric_definitions for \['err'\]"):
+        _spec(tolerances={"err": 1e-3})
+    spec = _spec(tolerances={"err": 1e-3}, metric_definitions={"err": "|y - y_ref|", "x": "x"})
+    assert spec.metric_definitions["err"] == "|y - y_ref|"
+    assert toy_op.TOY.work_units[0].rate_label == "toy MFLOP/s"
+
+
+def test_descriptions():
+    assert Axis("M", [1], description="the rows").description == "the rows"
+    impl = Implementation("plain", lambda inputs, mode: None, description="the product")
+    control = impl.as_control("other")
+    assert control.description == (
+        "`plain` run inside the `other` environment, to check that the environment "
+        "itself changes nothing"
+    )
+    chunked = Implementation(
+        "chunked", lambda inputs, mode: None, setup=lambda case, split=4: None, description="d"
+    )
+    assert chunked.with_params(split=2).description == "`chunked` with split=2"
+    assert _spec(description="an op").description == "an op"
 
 
 def test_resolve_dotted_path():

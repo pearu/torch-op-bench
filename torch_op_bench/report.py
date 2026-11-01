@@ -181,6 +181,1033 @@ def impl_label(row_or_name: Row | str, rows: Sequence[Row]) -> str:
     return name
 
 
+# --- 0a. how to read this report (Task I1-23 Part A) -------------------------------------
+
+READ_TITLE = "## How to read this report"
+
+# The tool's definitions, the same for every op, written once: (term, definition). The
+# fields in braces are filled from the records and the bands (``tool_definitions``).
+DEFINITIONS = [
+    (
+        "implementation",
+        "an entry: one way of computing the op, as the op declares it (the Summary "
+        "describes each). `<name> (control of <original>)` is a control: the original's "
+        "code run in another environment, so that what the environment does can be told "
+        "from what the counterpart does. `<name>[<parameter>=<value>]` is a variant: the "
+        "entry with another value of one of its own parameters, measured at the default "
+        'point for "Time at equal peak" only.',
+    ),
+    (
+        "env",
+        "the environment (interpreter, torch build, packages) the entry's worker ran in; "
+        '"Provenance" lists each.',
+    ),
+    (
+        "mode, dtype, case",
+        "`fwd`: one call of the forward; `fwd_bwd`: one call of the forward and the "
+        "backward, the gradients of the inputs included. The dtype of the inputs. A case "
+        "is a value of each of the op's axes (defined below), written `axis=value, ...`.",
+    ),
+    (
+        "median ms (IQR)",
+        "the median and, in parentheses, the interquartile range of {repeat} timed calls, "
+        "in milliseconds, after {warmup} untimed calls ({settings}): one call at a time, "
+        "each timed on the device by a pair of CUDA events (on the CPU, by the wall "
+        "clock), the gradients of the inputs cleared before each call, outside the timed "
+        "region. The status instead when the record is not `ok`.",
+    ),
+    (
+        "time / baseline",
+        "the entry's median over the baseline `{baseline}`'s, at the same point, mode and dtype.",
+    ),
+    (
+        "throughput",
+        "a column per unit of work the op declares (defined below), headed by the unit's "
+        "rate: the work of one call, as the op counts it, over the median time.",
+    ),
+    (
+        "peak above baseline, MiB",
+        "the peak memory allocated during one call minus what was allocated when the call "
+        "started (the inputs, and the cuBLAS workspaces where the build counts them), from "
+        "the device allocator's statistics; `—` on the CPU. \"/ baseline's\": its ratio to "
+        "the baseline's.",
+    ),
+    (
+        "time × peak, ms·MiB",
+        "the median times the peak above baseline: one number that trades time against "
+        "memory, so that an entry faster by holding more memory, or smaller by taking "
+        "longer, shows it. \"/ baseline's\": its ratio to the baseline's.",
+    ),
+    (
+        "parity",
+        "the entry's outputs against the op's reference on the same inputs: `ok` when "
+        "every metric with a tolerance is within it; `fail: a, b` with the metrics that "
+        "are not, a numbered superscript on a metric one of the op's parity notes explains (the "
+        "note under the table); `skipped` when the reference was not run, with the "
+        "reason. A metric's column holds the record's value; the metrics and their "
+        "tolerances are the op's (below).",
+    ),
+    (
+        "override",
+        "whether a registered override of the op ran: `kernel` (it dispatched and its own "
+        "kernel ran), `dispatch only` (it dispatched and ran no kernel of its own), `no`; "
+        "`—` for an entry that records neither.",
+    ),
+    (
+        "info",
+        "Entry details: the `info` fields whose values differ between records, one per "
+        "line, so that a difference cannot hide there.",
+    ),
+    (
+        "sweeps",
+        "for each axis varied around the default point, the other axes at the default "
+        "point: a row per value of the axis, a column per entry; the cell is the median "
+        "ms, the peak above baseline, time × peak with its ratio to the baseline's in "
+        "parentheses, or parity; `—` without a record.",
+    ),
+    (
+        "time at equal peak",
+        "memory budgets: the baseline's peak above baseline at the default point times "
+        "{budgets}, the same for every entry (headed `≤ 1× (… MiB)`). A cell is the "
+        "median of the entry's default or of one of its variants, the one with the "
+        "largest peak above baseline within the budget, what produced it in small print; "
+        "`—` when none fits, with the entry's lowest measured peak (`— lowest … MiB`). "
+        '"default: median ms, peak MiB": the entry\'s own default.',
+    ),
+    (
+        "reduction setting",
+        "the default run against a strict one (`run --matmul-reduction strict`: no "
+        "reduced-precision reduction in bf16 and fp16 GEMMs) at the default point: the "
+        "median of each and their ratio (strict / default); each parity metric's values "
+        '(default, strict) and their ratio (default / strict); "parity moves" when that '
+        "ratio is outside [{parity_low}, {parity_high}]; `op_decisions` the decisions "
+        "the torch LCE path records.",
+    ),
+    (
+        "environment check",
+        "each control against its original at the same point: the time ratio (control / "
+        "original), the peak difference (control − original, MiB) and each parity "
+        "metric's ratio (`<metric> ratio`). The bands: a time ratio within [{time_low}, "
+        "{time_high}], a peak difference within {peak_limit} MiB, a parity ratio within "
+        "[{parity_low}, {parity_high}]; outside one, the `flag` column names it: there "
+        "the environment, not the counterpart, makes a difference.",
+    ),
+    (
+        "not measured",
+        "`unavailable`: the entry could not run the point here, with the reason (a "
+        "package or an API missing, a device the op does not support, or the point did "
+        "not fit in the device's memory); `error`: a failure nobody foresaw, with its "
+        "message.",
+    ),
+    (
+        "provenance",
+        "per environment build: torch, CUDA, Python, the packages measured (a version, or "
+        "the first 12 characters of a git install's commit), the torch-op-bench commit, "
+        "and the matmul settings (`tf32`, `bf16_reduced`: reduced-precision reductions "
+        "allowed in bf16 GEMMs, ...).",
+    ),
+]
+# Every header a table of the report has, to the term that defines it (fullmatch, in
+# order); the op's own headers (its rates, metrics and axes, and the entries' names)
+# are matched in ``header_term``.
+HEADER_TERMS = [
+    (r"implementation", "implementation"),
+    (r"env", "env"),
+    (r"mode|dtype|case", "mode, dtype, case"),
+    (r"median ms \(IQR\)", "median ms (IQR)"),
+    (r"time / baseline", "time / baseline"),
+    (r"peak above baseline, MiB|peak above baseline / baseline's", "peak above baseline, MiB"),
+    (r"time × peak, ms·MiB|time × peak / baseline's", "time × peak, ms·MiB"),
+    (r"parity", "parity"),
+    (r"override", "override"),
+    (r"info", "info"),
+    (
+        r"≤ [\d.]+× \([\d.]+ MiB\)|default: median ms, peak MiB|≤ 1× budget: median ms",
+        "time at equal peak",
+    ),
+    (
+        r"median ms default|median ms strict|time strict / default|parity moves"
+        r"|op_decisions|.+ default, strict|.+ default / strict",
+        "reduction setting",
+    ),
+    (r"control|original|time ratio|peak diff MiB|flag|.+ ratio", "environment check"),
+    (r"torch|CUDA|Python|packages|torch-op-bench|matmul", "provenance"),
+]
+
+
+def header_term(
+    header: str,
+    *,
+    rates: Sequence[str] = (),
+    metrics: Sequence[str] = (),
+    axes: Sequence[str] = (),
+    entries: Sequence[str] = (),
+) -> str | None:
+    """The term of ``DEFINITIONS`` that defines a table header, or, for a header the
+    op declares, ``throughput`` (its ``rates``), ``parity`` (its ``metrics``),
+    ``axis`` (its ``axes``) or ``implementation`` (an entry's label, a column of the
+    sweeps); ``None`` when nothing defines it."""
+    if header in rates:
+        return "throughput"
+    if header in metrics:
+        return "parity"
+    if header in axes:
+        return "axis"
+    if header in entries:
+        return "implementation"
+    for pattern, term in HEADER_TERMS:
+        if re.fullmatch(pattern, header):
+            return term
+    return None
+
+
+def _values_text(recs: Sequence[Mapping[str, Any]], name: str) -> str:
+    """The recorded values of setting ``name``, ``" or "``-joined when they vary."""
+    found = sorted(
+        {str((r.get("settings") or {}).get(name)) for r in recs if r.get("status") == "ok"}
+    )
+    return " or ".join(found) or MISSING
+
+
+def tool_definitions(recs: Sequence[Mapping[str, Any]], baseline: str) -> list[tuple[str, str]]:
+    """``DEFINITIONS`` with the settings as recorded and the bands filled in."""
+    flush = {(r.get("settings") or {}).get("flush_l2") for r in recs if r.get("status") == "ok"}
+    if flush == {False}:
+        cache = "the L2 cache not flushed between calls"
+    elif flush == {True}:
+        cache = "the L2 cache flushed before each call"
+    else:
+        cache = "the L2 cache flushed in some records (`settings.flush_l2`)"
+    repeat, warmup = _values_text(recs, "repeat"), _values_text(recs, "warmup")
+    fields = {
+        "repeat": repeat,
+        "warmup": warmup,
+        "settings": f"`settings.repeat` {repeat} and `settings.warmup` {warmup} as recorded; "
+        + cache,
+        "baseline": baseline,
+        "budgets": ", ".join(f"{f:g}×" for f in analysis.EQUAL_PEAK_BUDGETS),
+        "parity_low": PARITY_RATIO_RANGE[0],
+        "parity_high": PARITY_RATIO_RANGE[1],
+        "time_low": TIME_RATIO_RANGE[0],
+        "time_high": TIME_RATIO_RANGE[1],
+        "peak_limit": PEAK_DIFF_LIMIT // MIB,
+    }
+    return [(term, definition.format(**fields)) for term, definition in DEFINITIONS]
+
+
+def render_definitions(
+    recs: Sequence[Mapping[str, Any]],
+    baseline: str,
+    spec: Any,
+    op_ref: str,
+    work_keys: Sequence[str] = (),
+) -> str:
+    """The section "How to read this report": the tool's definitions, then the op's
+    (its units of work, parity metrics and axes), read through its spec;
+    ``work_keys`` are the work keys of the records, named when the op does not
+    import here."""
+    lines = [
+        READ_TITLE,
+        "",
+        "What each column and section of this report measures. The tool's definitions, "
+        "the same for every op:",
+        "",
+    ]
+    lines += [f"- **{term}**: {text_}" for term, text_ in tool_definitions(recs, baseline)]
+    lines.append("")
+    if spec is None:
+        lines.append(
+            f"The op `{op_ref}` does not import here: its definitions are not shown"
+            + (
+                f"; the throughput columns ({', '.join(f'{k}/s' for k in work_keys)}) are "
+                "the records' work over the median, in units the op defines."
+                if work_keys
+                else "."
+            )
+        )
+        return "\n".join(lines) + "\n"
+    lines += [f"The op `{spec.name}`'s definitions, as its author declares them:", ""]
+    if spec.work_units:
+        lines.append("- **Units of work** (the throughput columns):")
+        for unit in spec.work_units:
+            scale = "" if unit.scale == 1 else f", in units of {unit.scale:g}"
+            lines.append(
+                f"  - **{unit.rate_label}**: {unit.label} per second{scale}; {unit.label}: "
+                f"{unit.definition}."
+            )
+    else:
+        lines.append("- **Units of work**: none declared, so no throughput column.")
+    lines.append("- **Parity metrics** (the parity columns), each with its tolerance:")
+    for name, definition in spec.metric_definitions.items():
+        tolerance = spec.tolerances.get(name)
+        check = "recorded, not checked" if tolerance is None else f"tolerance {tolerance:g}"
+        lines.append(f"  - **{name}**: {definition}; {check}.")
+    if spec.tolerance_basis:
+        lines.append(f"  {spec.tolerance_basis}")
+    lines.append("- **Axes** (the case):")
+    default = spec.default_point
+    for axis in spec.axes:
+        values = ", ".join(str(v) for v in axis.values)
+        lines.append(
+            f"  - **{axis.name}**: {axis.description or 'not described'}; values {values}; "
+            f"default {default[axis.name]}."
+        )
+    return "\n".join(lines) + "\n"
+
+
+def axes_line(spec: Any, point: Mapping[str, Any]) -> list[str]:
+    """Under the default point: each axis' value with its description."""
+    if spec is None:
+        return []
+    described = {axis.name: axis.description for axis in spec.axes if axis.description}
+    parts = [
+        f"{name}={value}" + (f" ({described[name]})" if name in described else "")
+        for name, value in point.items()
+    ]
+    return [f"There: {'; '.join(parts)}.", ""]
+
+
+# --- 0b. the summary (Task I1-23 Part B) ----------------------------------------------------
+
+SUMMARY_TITLE = "## Summary"
+MODE_WORDS = {"fwd": "forward only", "fwd_bwd": "forward and backward"}
+# A ratio over a sweep "stays" when within this of its value at the default point.
+SWEEP_BAND = 0.10
+# Words no generated sentence may hold: the tool states numbers, the author judges
+# (inbox 14, 15, 17). Tested.
+FORBIDDEN = ("fastest", "slowest", "best", "worst", "wins", "optimum", "beats")
+FINDINGS_AUTHOR = (
+    "### Findings (written by the author of this result set; every statement names a "
+    "number in the sections below)"
+)
+FINDINGS_GENERATED = (
+    "Generated from the records by fixed templates, not written by an author (`report "
+    "--summary FILE` prints an author's findings here instead): each sentence is a value, "
+    "or a ratio to the baseline or to a memory budget, the entries in the op's order."
+)
+
+
+def _x(value: float | None) -> str:
+    return f"{sig3(value)}×"
+
+
+def _names(names: Sequence[str]) -> str:
+    quoted = [f"`{n}`" for n in names]
+    if len(quoted) < 3:
+        return " and ".join(quoted)
+    return ", ".join(quoted[:-1]) + " and " + quoted[-1]
+
+
+def where_text(row: Row, point: Mapping[str, Any]) -> str:
+    """Where a row is, as the axes in which it differs from ``point``."""
+    differ = [f"{k}={row.get(k)}" for k, v in point.items() if row.get(k) != v]
+    return "the default point" if not differ else ", ".join(differ)
+
+
+def _description(spec: Any, name: str) -> str:
+    if spec is None:
+        return ""
+    try:
+        return spec.implementation(name).description
+    except KeyError:
+        return ""
+
+
+def _gib(value: int) -> str:
+    return f"{value / 1024**3:.1f} GiB"
+
+
+def gpus(recs: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Each GPU the records ran on, with its memory, from ``env.torch.devices``."""
+    found = []
+    for record in recs:
+        device = str((record.get("case") or {}).get("device") or "")
+        if not device.startswith("cuda"):
+            continue
+        index = int(device.partition(":")[2] or 0)
+        for gpu in analysis._get(record, "env", "torch", "devices") or []:
+            if gpu.get("index") == index:
+                name = f"{gpu.get('name')}, {_gib(gpu.get('total_memory') or 0)}"
+                if name not in found:
+                    found.append(name)
+    return found
+
+
+def render_compared(
+    recs: Sequence[Mapping[str, Any]],
+    rows: Sequence[Row],
+    variant_rows: Sequence[Row],
+    point: Mapping[str, Any],
+    baseline: str,
+    spec: Any,
+    *,
+    dtypes: Sequence[str],
+    modes: Sequence[str],
+    strict: tuple[str, int] | None,
+) -> list[str]:
+    """What was compared: the op, the entries, the modes, the sweep and the variants."""
+    op = recs[0].get("op")
+    lines = ["### What was compared", ""]
+    if spec is not None and spec.description:
+        lines.append(f"The op `{op}`: {spec.description}.")
+    else:
+        lines.append(f"The op `{op}` (not described here: the op does not import).")
+    lines += ["", f"The entries, in the op's order, against the baseline `{baseline}`:", ""]
+    for name in analysis.implementations(rows, baseline):
+        row = next(r for r in rows if r["implementation"] == name)
+        what = _description(spec, name) or "not described"
+        role = "the baseline, " if name == baseline else ""
+        role += "a control, " if row.get("role") == "control" else ""
+        runs = [m for m in modes if m in _modes_of(spec, name, rows)]
+        only = f", {' and '.join(f'`{m}`' for m in runs)} only" if runs != list(modes) else ""
+        lines.append(f"- `{name}` ({role}in `{row.get('env_name')}`{only}): {what}.")
+    words = " and ".join(f"{MODE_WORDS.get(m, m)} (`{m}`)" for m in modes)
+    lines += ["", f"Modes: {words}; dtype {', '.join(dtypes)}."]
+    swept = {
+        axis: analysis.axis_values(found, axis)
+        for axis, found in analysis.sweeps(rows, point).items()
+    }
+    axes = []
+    for name, value in point.items():
+        described = ""
+        if spec is not None:
+            described = next((a.description for a in spec.axes if a.name == name), "")
+        values = ", ".join(str(v) for v in swept.get(name) or [value])
+        axes.append(f"{name}" + (f" ({described})" if described else "") + f": {values}")
+    points = {tuple(r.get(name) for name in point) for r in rows}
+    lines += [
+        "",
+        f"The sweep varies one axis at a time around the default point "
+        f"{analysis.point_text(point)}: {'; '.join(axes)}. That is {len(points)} "
+        f"point{'' if len(points) == 1 else 's'} and {len(recs)} records"
+        + (f", {len(variant_rows)} of them of variants" if variant_rows else "")
+        + ".",
+    ]
+    if strict is not None:
+        lines.append(
+            f"The reduction setting is compared at the default point, with the strict "
+            f"run's {strict[1]} records in `{strict[0]}`."
+        )
+    if variant_rows:
+        by_base: dict[str, list[str]] = {}
+        for row in variant_rows:
+            texts = by_base.setdefault(row["base"], [])
+            if row.get("params") and row["params"] not in texts:
+                texts.append(row["params"])
+        listed = "; ".join(f"`{base}` with {', '.join(p)}" for base, p in by_base.items())
+        lines.append(
+            f'The variants, at the default point for "Time at equal peak" only (each '
+            f"chunked entry's time within a memory budget): {listed}."
+        )
+    return lines + [""]
+
+
+def _modes_of(spec: Any, name: str, rows: Sequence[Row]) -> set[str]:
+    """The modes an entry runs in: the spec's (``Implementation.modes``) when the op
+    imports and declares the entry, else those its records hold."""
+    if spec is not None:
+        try:
+            return set(spec.implementation(name).modes)
+        except KeyError:
+            pass
+    return {r["mode"] for r in rows if r["implementation"] == name}
+
+
+def render_on_what(
+    recs: Sequence[Mapping[str, Any]], sets: Mapping[str, Sequence[Mapping[str, Any]]]
+) -> list[str]:
+    """On what: the GPU, the hosts, the torch builds and counterparts per environment,
+    the dates."""
+    every = [r for found in sets.values() for r in found] or list(recs)
+    lines = ["### On what", ""]
+    on_gpu = any(str(r["case"].get("device", "")).startswith("cuda") for r in every)
+    found = "; ".join(gpus(every)) or ("not recorded" if on_gpu else "none (the CPU)")
+    lines.append(f"- GPU: {found}")
+    hosts = sorted({h for h in (analysis.host_of(r) for r in every) if h})
+    lines.append(f"- host: {', '.join(hosts) or MISSING}")
+    torches: dict[str, list[str]] = defaultdict(list)
+    packages: dict[str, set[str]] = defaultdict(set)
+    for record in every:
+        env = record.get("env") or {}
+        version = (env.get("torch") or {}).get("version")
+        if version and record["env_name"] not in torches[version]:
+            torches[version].append(record["env_name"])
+        text_ = analysis.packages_text(env.get("packages"))
+        if text_:
+            packages[record["env_name"]].update(text_.split(";"))
+    lines.append(
+        "- torch: "
+        + "; ".join(
+            f"{version} in {_names(sorted(envs))}" for version, envs in sorted(torches.items())
+        )
+    )
+    if packages:
+        lines.append(
+            "- packages: "
+            + "; ".join(
+                f"{', '.join(sorted(found))} in `{env}`" for env, found in sorted(packages.items())
+            )
+        )
+    stamps = sorted(r["timestamp"] for r in every if r.get("timestamp"))
+    if stamps:
+        first, last = stamps[0], stamps[-1]
+        same = first[:10] == last[:10]
+        lines.append(
+            f"- date: {first[:10]}, {first[11:16]} to {last[11:16]} UTC"
+            if same
+            else f"- date: {first[:10]} {first[11:16]} to {last[:10]} {last[11:16]} UTC"
+        )
+    return lines + [""]
+
+
+def parity_words(row: Row, notes: Sequence[Any], axes: Sequence[str]) -> str:
+    """A row's parity in words: ok, fails (explained or not), not checked and why."""
+    status = row.get("parity_status")
+    if status == "ok":
+        return "parity ok"
+    if status == "skipped":
+        return f"parity not checked ({cause('error', row.get('skip_reason'))[0]})"
+    if status == "fail":
+        found = analysis.explained(row, notes, axes)
+        metrics = ", ".join(found)
+        if all(found.values()):
+            verdict = "explained"
+        elif not any(found.values()):
+            verdict = "unexplained"
+        else:
+            verdict = "; ".join(
+                f"{m} {'explained' if n is not None else 'unexplained'}" for m, n in found.items()
+            )
+        return f"parity fails on {metrics}, {verdict} (see Parity failures)"
+    return "parity not recorded"
+
+
+def _ok(row: Row | None) -> bool:
+    return row is not None and row.get("status") == "ok"
+
+
+def _not_measured(row: Row) -> str:
+    return f"{row.get('status')} ({cause(row.get('status') or '', row.get('reason'))[0]})"
+
+
+def default_sentences(
+    rows: Sequence[Row],
+    point: Mapping[str, Any],
+    baseline: str,
+    notes: Sequence[Any],
+    axes: Sequence[str],
+    spec: Any,
+    mentioned: set[str],
+    *,
+    dtype: str,
+    mode: str,
+    several_dtypes: bool,
+) -> list[str]:
+    """Findings 1: per entry at the default point, against the baseline; the
+    controls in one sentence."""
+    here = [r for r in analysis.at(rows, dtype=dtype, mode=mode) if _at_point(r, point)]
+    if not here:
+        return []
+    by_name = {r["implementation"]: r for r in here}
+    base = by_name.get(baseline)
+    dtype_text = f", {dtype}" if several_dtypes else ""
+    words = MODE_WORDS.get(mode, mode).capitalize()
+    head = f"**{words} (`{mode}`){dtype_text}, at the default point.**"
+    if _ok(base):
+        head += (
+            f" The baseline `{baseline}` takes {sig3(base.get('median_ms'))} ms and holds "
+            f"{mib(base.get('peak_above_baseline'))} MiB above baseline; "
+            f"{parity_words(base, notes, axes)}."
+        )
+    else:
+        head += f" The baseline `{baseline}` has no `ok` record here: no ratios."
+    lines = [head, ""]
+    controls = []
+    for name in analysis.implementations(here, baseline):
+        row = by_name[name]
+        if name == baseline:
+            continue
+        if row.get("role") == "control":
+            controls.append(row)
+            continue
+        label = f"`{name}`"
+        if name not in mentioned and _description(spec, name):
+            label += f" ({_description(spec, name)})"
+        mentioned.add(name)
+        if not _ok(row):
+            lines.append(f"- {label} was not measured here: {_not_measured(row)}.")
+            continue
+        if not _ok(base):
+            lines.append(
+                f"- {label} takes {sig3(row.get('median_ms'))} ms and holds "
+                f"{mib(row.get('peak_above_baseline'))} MiB above baseline; "
+                f"{parity_words(row, notes, axes)}."
+            )
+            continue
+        time = ratio(row.get("median_ms"), base.get("median_ms"))
+        peak = ratio(row.get("peak_above_baseline"), base.get("peak_above_baseline"))
+        product = ratio(row.get("time_x_peak"), base.get("time_x_peak"))
+        lines.append(
+            f"- {label} takes {_x(time)} the baseline's time and {_x(peak)} its memory above "
+            f"baseline; time × peak {_x(product)} the baseline's; "
+            f"{parity_words(row, notes, axes)}."
+        )
+    if controls:
+        checks = [
+            c
+            for c in environment_check(here, axes)
+            if c["control"] in {r["implementation"] for r in controls}
+        ]
+        flagged = [c for c in checks if c["flags"]]
+        what = (
+            f"The controls ({_names([r['implementation'] for r in controls])}: "
+            f"`{baseline}` run inside the {_names([r.get('env_name') for r in controls])} "
+            f"environment{'s' if len(controls) > 1 else ''})"
+        )
+        if not flagged:
+            lines.append(f"- {what} are within the environment check's bands here.")
+        else:
+            named = "; ".join(f"`{c['control']}`: {', '.join(c['flags'])}" for c in flagged)
+            lines.append(f"- {what}: outside the environment check's bands here, {named}.")
+    return lines + [""]
+
+
+def _at_point(row: Row, point: Mapping[str, Any]) -> bool:
+    return all(row.get(k) == v for k, v in point.items())
+
+
+BUDGET_WORDS = {1.0: "1×", 0.75: "0.75×", 0.5: "0.5×"}
+
+
+def equal_peak_sentences(
+    rows: Sequence[Row],
+    variant_rows: Sequence[Row],
+    point: Mapping[str, Any],
+    baseline: str,
+    defaults: Mapping[str, str],
+    *,
+    dtypes: Sequence[str],
+    modes: Sequence[str],
+    several_dtypes: bool,
+) -> list[str]:
+    """Findings 2: per chunked entry, the point within each budget."""
+    lines = []
+    for found in analysis.equal_peak(rows, variant_rows, point, baseline):
+        if found["dtype"] not in dtypes or found["mode"] not in modes:
+            continue
+        dtype_text = f", {found['dtype']}" if several_dtypes else ""
+        budgets = found["budgets"]
+        if budgets is None:
+            lines += [
+                f"**Time at equal peak (`{found['mode']}`{dtype_text}).** The baseline has "
+                "no `ok` record with a peak at the default point: no budgets.",
+                "",
+            ]
+            continue
+        lines += [
+            f"**Time at equal peak (`{found['mode']}`{dtype_text}).** The budgets are the "
+            f"baseline's peak above baseline, {mib(budgets[0])} MiB, at "
+            f"{', '.join(f'{f:g}×' for f in analysis.EQUAL_PEAK_BUDGETS)}.",
+            "",
+        ]
+        for entry in found["entries"]:
+            peaks = [r["peak_above_baseline"] for r in entry["points"]]
+            lowest = f"lowest {mib(min(peaks))} MiB" if peaks else "none measured"
+            cells = entry["cells"] or []
+            if not any(cells):
+                lines.append(f"- `{entry['base']}` has no point within any budget ({lowest}).")
+                continue
+            parts = []
+            for factor, budget, row in zip(
+                analysis.EQUAL_PEAK_BUDGETS, budgets, cells, strict=False
+            ):
+                within = f"within {factor:g}× ({mib(budget)} MiB)"
+                if row is None:
+                    parts.append(f"no point {within} ({lowest})")
+                    continue
+                if row.get("base") is not None:
+                    what = f"with {row.get('params')}"
+                else:
+                    own = defaults.get(row["implementation"])
+                    what = "with its default" + (f" ({own})" if own else "")
+                fail = ", which fails parity" if row.get("parity_status") == "fail" else ""
+                parts.append(f"{within}, {sig3(row.get('median_ms'))} ms {what}{fail}")
+            lines.append(f"- `{entry['base']}`: {'; '.join(parts)}.")
+        lines.append("")
+    return lines
+
+
+def _range_text(values: Sequence[tuple[Any, float]], axis: str, default: float | None) -> str:
+    """A ratio over an axis: "within ±10 % of its default-point value" or its range."""
+    low = min(values, key=lambda v: v[1])
+    high = max(values, key=lambda v: v[1])
+    if default is not None and all(
+        abs(v / default - 1) <= SWEEP_BAND for _, v in values if default
+    ):
+        return f"within ±{SWEEP_BAND:.0%} of its {_x(default)} at the default point".replace(
+            "%", " %"
+        )
+    return f"between {_x(low[1])} at {axis}={low[0]} and {_x(high[1])} at {axis}={high[0]}"
+
+
+def sweep_sentences(
+    rows: Sequence[Row],
+    point: Mapping[str, Any],
+    baseline: str,
+    *,
+    dtype: str,
+    mode: str,
+    several_dtypes: bool,
+) -> list[str]:
+    """Findings 3: per axis varied around the point, the baseline's median over it,
+    and each entry's time / baseline and peak / baseline's: within the band of its
+    default-point value, or the range."""
+    selected = analysis.at(rows, dtype=dtype, mode=mode)
+    lines = []
+    dtype_text = f", {dtype}" if several_dtypes else ""
+    for axis, swept in analysis.sweeps(selected, point).items():
+        values = analysis.axis_values(swept, axis)
+        if len(values) < 2:
+            continue
+        by_key = {(row[axis], row["implementation"]): row for row in swept}
+        base = {v: by_key.get((v, baseline)) for v in values}
+        first, last = values[0], values[-1]
+        medians = [
+            f"{sig3(base[v].get('median_ms'))} ms at {axis}={v}"
+            for v in (first, last)
+            if _ok(base[v])
+        ]
+        head = f"**Over {axis} (`{mode}`{dtype_text}).**"
+        if len(medians) == 2:
+            head += f" The baseline's median goes from {medians[0]} to {medians[1]}."
+        lines += [head, ""]
+        for name in analysis.implementations(swept, baseline):
+            if name == baseline:
+                continue
+            if any(r.get("role") == "control" for r in swept if r["implementation"] == name):
+                continue
+            parts = []
+            missing = []
+            for label, key in (
+                ("time / baseline", "median_ms"),
+                ("peak above baseline / baseline's", "peak_above_baseline"),
+            ):
+                found = []
+                for v in values:
+                    row = by_key.get((v, name))
+                    if _ok(row) and _ok(base[v]):
+                        q = ratio(row.get(key), base[v].get(key))
+                        if q is not None:
+                            found.append((v, q))
+                    elif key == "median_ms":
+                        if row is None:
+                            missing.append(f"{axis}={v}: no record")
+                        elif not _ok(row):
+                            missing.append(f"{axis}={v}: {row.get('status')}")
+                        else:
+                            missing.append(f"{axis}={v}: the baseline is not `ok`")
+                if not found:
+                    continue
+                default = dict(found).get(point[axis])
+                parts.append(f"{label} {_range_text(found, axis, default)}")
+            if not parts and not missing:
+                continue
+            sentence = f"- `{name}`: {'; '.join(parts) or 'no ratio'}"
+            if missing:
+                sentence += f" (no ratio at {', '.join(missing)})"
+            lines.append(sentence + ".")
+        lines.append("")
+    return lines
+
+
+def repeat_sentences(rows: Sequence[Row], axes: Sequence[str], has_notes: bool) -> list[str]:
+    """Findings 4: how closely the same code repeats across environments."""
+    pairs = [c for c in environment_check(rows, axes) if c["measured"] == "both"]
+    times = [c["time_ratio"] for c in pairs if c["time_ratio"] is not None]
+    peaks = [c["peak_diff"] for c in pairs if c["peak_diff"] is not None]
+    if not times:
+        return []
+    spread = max(abs(t - 1) for t in times)
+    line = (
+        f"**Repeatability.** The same code in different environments (the environment "
+        f"check, {len(pairs)} pairs) repeats to within {spread:.1%} in time (ratios from "
+        f"{sig3(min(times))} to {sig3(max(times))})".replace("%", " %")
+    )
+    if peaks:
+        line += f" and to within {mib(max(abs(p) for p in peaks))} MiB in peak"
+    line += "."
+    if has_notes:
+        line += " The op's notes on run-to-run variation are not restated here: see Notes."
+    return [line, ""]
+
+
+def headline_table(
+    rows: Sequence[Row],
+    variant_rows: Sequence[Row],
+    point: Mapping[str, Any],
+    baseline: str,
+    defaults: Mapping[str, str],
+    *,
+    dtypes: Sequence[str],
+    modes: Sequence[str],
+) -> list[str]:
+    """At the default point, every entry and mode, in the op's order: the ratios of
+    the default-point tables and the equal-peak cell at the 1× budget."""
+    cells_1x = {}
+    for found in analysis.equal_peak(rows, variant_rows, point, baseline):
+        for entry in found["entries"]:
+            cells = entry["cells"]
+            lowest = min((r["peak_above_baseline"] for r in entry["points"]), default=None)
+            cell = MISSING if cells is None else _equal_peak_cell(cells[0], defaults, lowest)
+            cells_1x[(found["dtype"], found["mode"], entry["base"])] = cell
+    several = len(dtypes) > 1
+    header = ["implementation", "mode", *(["dtype"] if several else [])]
+    header += [
+        "time / baseline",
+        "peak above baseline / baseline's",
+        "time × peak / baseline's",
+        "≤ 1× budget: median ms",
+    ]
+    body = []
+    for d in dtypes:
+        for m in modes:
+            here = [r for r in analysis.at(rows, dtype=d, mode=m) if _at_point(r, point)]
+            by_name = {r["implementation"]: r for r in here}
+            base = by_name.get(baseline)
+            base = base if _ok(base) else None
+            for name in analysis.implementations(here, baseline):
+                row = by_name[name]
+                cells = [impl_label(row, here), m, *([d] if several else [])]
+                if not _ok(row):
+                    cells += [text(row.get("status")), MISSING, MISSING]
+                else:
+                    cells += [
+                        sig3(ratio(row.get(k), base and base.get(k)))
+                        for k in ("median_ms", "peak_above_baseline", "time_x_peak")
+                    ]
+                cells.append(cells_1x.get((d, m, name), MISSING))
+                body.append(cells)
+    if not body:
+        return []
+    numeric = [False, False, *([False] if several else []), True, True, True, True]
+    return [
+        "#### Headline table",
+        "",
+        'The default point\'s numbers (the tables of "At the default point" and "Time at '
+        "equal peak\"), every entry in the op's order.",
+        "",
+        table(header, body, numeric),
+        "",
+    ]
+
+
+def caveats(
+    rows_all: Sequence[Row],
+    point: Mapping[str, Any],
+    axes: Sequence[str],
+    notes: Sequence[Any],
+    *,
+    unread: str | None,
+    has_notes: bool,
+) -> list[str]:
+    """Caveats: what was not measured, where parity was not checked or failed, and
+    the run-to-run band."""
+    lines = ["### Caveats", ""]
+    missing = [r for r in rows_all if r.get("status") in ("error", "unavailable")]
+    groups: dict[tuple[str, str], list[Row]] = defaultdict(list)
+    for row in missing:
+        groups[(row["status"], cause(row["status"], row.get("reason"))[0])].append(row)
+    for (status, key), group in sorted(groups.items()):
+        if status == "unavailable" and key.startswith("out of memory"):
+            plain = "did not fit in the device's memory"
+        elif status == "unavailable":
+            plain = "could not run here"
+        else:
+            plain = "failed with an error nobody foresaw"
+        lines.append(
+            f"- {len(group)} record{'' if len(group) == 1 else 's'} {plain} "
+            f"({status}: {key}): {_where_list(group, point)}."
+        )
+    skipped = [
+        r for r in rows_all if r.get("status") == "ok" and r.get("parity_status") == "skipped"
+    ]
+    by_reason: dict[str, list[Row]] = defaultdict(list)
+    for row in skipped:
+        by_reason[cause("error", row.get("skip_reason"))[0]].append(row)
+    for reason, group in sorted(by_reason.items()):
+        counts = _counts(where_text(r, point) for r in group)
+        where = ", ".join(f"{w} ({n})" for w, n in counts.items())
+        lines.append(
+            f"- Parity (the check against the op's reference) was not run in {len(group)} "
+            f"record{'' if len(group) == 1 else 's'}, as the {reason}: at {where}."
+        )
+    total, explained_count = analysis.parity_failures(rows_all, notes, axes)
+    if total:
+        by_note: dict[Any, dict[str, int]] = {}
+        entries: dict[Any, set[str]] = defaultdict(set)
+        for row in rows_all:
+            for metric, note in analysis.explained(row, notes, axes).items():
+                counts_ = by_note.setdefault(note, {})
+                counts_[metric] = counts_.get(metric, 0) + 1
+                entries[note].add(row.get("base") or row["implementation"])
+        lines.append(
+            f"- {total} parity failure{'' if total == 1 else 's'}, {explained_count} explained:"
+        )
+        order = {id(note): i for i, note in enumerate(notes)}
+        for note, counts_ in sorted(
+            by_note.items(), key=lambda kv: order.get(id(kv[0]), len(order))
+        ):
+            metrics = ", ".join(f"{m} ({n})" for m, n in sorted(counts_.items()))
+            who = _names(sorted(entries[note]))
+            verdict = f"explained: {note.text}" if note is not None else "**unexplained**"
+            lines.append(f"  - {who} on {metrics}, {verdict}")
+    low, high = TIME_RATIO_RANGE
+    lines.append(
+        f"- A time ratio within the environment check's band [{low}, {high}] can be "
+        "run-to-run variation, not a difference" + (" (see Notes)." if has_notes else ".")
+    )
+    if unread is not None:
+        lines.append(
+            f"- The op `{unread}` does not import here: its descriptions, definitions, "
+            "parity notes and notes are not shown, and every parity failure counts as "
+            "unexplained."
+        )
+    return lines + [""]
+
+
+def _counts(items: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item] = counts.get(item, 0) + 1
+    return counts
+
+
+def _where_list(group: Sequence[Row], point: Mapping[str, Any]) -> str:
+    """``impl`` (modes) at where, for the records of one cause."""
+    found: dict[tuple[str, str], list[str]] = {}
+    for row in group:
+        modes_ = found.setdefault((row["implementation"], where_text(row, point)), [])
+        if row["mode"] not in modes_:
+            modes_.append(row["mode"])
+    return "; ".join(
+        f"`{name}` ({', '.join(modes_)}) at {where}" for (name, where), modes_ in found.items()
+    )
+
+
+def render_summary(
+    recs: Sequence[Mapping[str, Any]],
+    rows: Sequence[Row],
+    variant_rows: Sequence[Row],
+    point: Mapping[str, Any],
+    baseline: str,
+    spec: Any,
+    *,
+    dtypes: Sequence[str],
+    modes: Sequence[str],
+    sets: Mapping[str, Sequence[Mapping[str, Any]]],
+    strict: tuple[str, int] | None,
+    defaults: Mapping[str, str],
+    notes: Sequence[Any],
+    has_notes: bool,
+    unread: str | None,
+    findings: tuple[str, str] | None,
+) -> str:
+    """The section "Summary": what was compared, on what, the findings (generated,
+    or the author's ``findings``, ``(file name, text)``) with the headline table, and
+    the caveats."""
+    axes = list(point)
+    scope = [r for r in rows if r["dtype"] in dtypes and r["mode"] in modes]
+    scope_all = scope + [r for r in variant_rows if r["dtype"] in dtypes and r["mode"] in modes]
+    lines = [SUMMARY_TITLE, ""]
+    lines += render_compared(
+        recs, scope, variant_rows, point, baseline, spec, dtypes=dtypes, modes=modes, strict=strict
+    )
+    lines += render_on_what(recs, sets)
+    if findings is not None:
+        name, body = findings
+        commits = sorted({r.get("tob_hash") for r in rows if r.get("tob_hash")})
+        lines += [
+            FINDINGS_AUTHOR,
+            "",
+            f"From `{name}`, for the records of torch-op-bench "
+            f"{', '.join(c[:12] for c in commits) or MISSING}.",
+            "",
+            body.strip(),
+            "",
+        ]
+    else:
+        lines += ["### Findings", "", FINDINGS_GENERATED, ""]
+        lines += generated_findings(
+            scope,
+            variant_rows,
+            point,
+            baseline,
+            spec,
+            notes,
+            defaults,
+            dtypes=dtypes,
+            modes=modes,
+            has_notes=has_notes,
+        )
+    lines += headline_table(
+        scope, variant_rows, point, baseline, defaults, dtypes=dtypes, modes=modes
+    )
+    lines += caveats(scope_all, point, axes, notes, unread=unread, has_notes=has_notes)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def generated_findings(
+    rows: Sequence[Row],
+    variant_rows: Sequence[Row],
+    point: Mapping[str, Any],
+    baseline: str,
+    spec: Any,
+    notes: Sequence[Any],
+    defaults: Mapping[str, str],
+    *,
+    dtypes: Sequence[str],
+    modes: Sequence[str],
+    has_notes: bool,
+) -> list[str]:
+    """The mechanical findings: the default point, time at equal peak, the sweeps,
+    repeatability; fixed templates, every sentence a number against the baseline or
+    a budget, in the op's order of entries."""
+    axes = list(point)
+    several = len(dtypes) > 1
+    lines: list[str] = []
+    mentioned: set[str] = set()
+    for d in dtypes:
+        for m in modes:
+            lines += default_sentences(
+                rows,
+                point,
+                baseline,
+                notes,
+                axes,
+                spec,
+                mentioned,
+                dtype=d,
+                mode=m,
+                several_dtypes=several,
+            )
+    if variant_rows:
+        lines += equal_peak_sentences(
+            rows,
+            variant_rows,
+            point,
+            baseline,
+            defaults,
+            dtypes=dtypes,
+            modes=modes,
+            several_dtypes=several,
+        )
+    for d in dtypes:
+        for m in modes:
+            lines += sweep_sentences(rows, point, baseline, dtype=d, mode=m, several_dtypes=several)
+    lines += repeat_sentences(rows, axes, has_notes)
+    return lines
+
+
 # --- 1. provenance ----------------------------------------------------------------------
 
 MATMUL_SHORT = {
@@ -300,6 +1327,31 @@ def _parity_columns(rows: Sequence[Row]) -> list[str]:
     return sorted(n for n in names if any(row.get(n) is not None for row in rows))
 
 
+def throughput_columns(
+    units: Sequence[Any] | None, rows: Sequence[Row]
+) -> list[tuple[str, str, float]]:
+    """The throughput columns, ``(header, row key, scale)``: one per work unit the op
+    declares (``OpSpec.work_units``), headed by its ``rate_label``; ``units`` ``None``
+    (the op does not import here): one per work key the records hold, ``<key>/s``,
+    unscaled, which "How to read this report" says it cannot define."""
+    if units is not None:
+        return [(u.rate_label, u.key + analysis.RATE_SUFFIX, u.scale) for u in units]
+    keys = sorted(
+        {
+            k.removesuffix(analysis.RATE_SUFFIX)
+            for row in rows
+            for k in row
+            if k.endswith(analysis.RATE_SUFFIX) and row[k] is not None
+        }
+    )
+    return [(f"{key}/s", key + analysis.RATE_SUFFIX, 1) for key in keys]
+
+
+def _rate(row: Row, key: str, scale: float) -> float | None:
+    value = row.get(key)
+    return None if value is None else value / scale
+
+
 def render_default(
     rows: Sequence[Row],
     point: Mapping[str, Any],
@@ -307,10 +1359,12 @@ def render_default(
     *,
     title: str,
     notes: Sequence[Any] = (),
+    units: Sequence[Any] | None = None,
 ) -> str:
     """One row per implementation at the default point, the baseline first and each
     control right after its original; a parity failure that one of ``notes`` (the
-    op's ``parity_notes``) explains is marked, with the note under the table."""
+    op's ``parity_notes``) explains is marked, with the note under the table. The
+    throughput columns are the op's ``units`` (``throughput_columns``)."""
     here = [row for row in rows if all(row.get(k) == v for k, v in point.items())]
     if not here:
         return f"### {title}\n\nNo records at the default point.\n"
@@ -318,13 +1372,13 @@ def render_default(
     base = by_impl.get(baseline)
     base_ok = base if base is not None and base.get("status") == "ok" else None
     parity = _parity_columns(here)
+    rates = throughput_columns(units, here)
     header = [
         "implementation",
         "env",
         "median ms (IQR)",
         "time / baseline",
-        "tokens/s",
-        "TFLOP/s",
+        *(label for label, _, _ in rates),
         "peak above baseline, MiB",
         "peak above baseline / baseline's",
         "time × peak, ms·MiB",
@@ -333,7 +1387,7 @@ def render_default(
         *(p.removeprefix(analysis.PARITY_PREFIX) for p in parity),
         "override",
     ]
-    numeric = [False, False, *[True] * 8, False, *[True] * len(parity), False]
+    numeric = [False, False, *[True] * (6 + len(rates)), False, *[True] * len(parity), False]
     body = []
     footnotes = Footnotes(notes, list(point))
     names = analysis.implementations(here, baseline)
@@ -345,8 +1399,7 @@ def render_default(
                 text(row.get("env_name")),
                 _median_cell(row),
                 sig3(ratio(row.get("median_ms"), base_ok and base_ok.get("median_ms"))),
-                sig3(row.get("tokens_per_s")),
-                sig3(row.get("tflops")),
+                *(sig3(_rate(row, key, scale)) for _, key, scale in rates),
                 mib(row.get("peak_above_baseline")),
                 sig3(
                     ratio(
@@ -496,6 +1549,7 @@ def render_per_case(
     dtype: str,
     mode: str,
     notes: Sequence[Any] = (),
+    units: Sequence[Any] | None = None,
 ) -> str:
     """The default-point table at every case present, for records whose cases do not
     form a sweep (one case, or cases that differ in more than one axis)."""
@@ -504,7 +1558,7 @@ def render_per_case(
     for values in cases:
         here = dict(zip(axes, values, strict=True))
         title = f"{mode}, {dtype}: {analysis.point_text(here)}"
-        parts.append(render_default(rows, here, baseline, title=title, notes=notes))
+        parts.append(render_default(rows, here, baseline, title=title, notes=notes, units=units))
     return "\n".join(parts)
 
 
@@ -1186,9 +2240,15 @@ def report(
     point: Mapping[str, str] | None = None,
     command: Sequence[str] | None = None,
     strict: str | Path | None = None,
+    findings: str | Path | None = None,
 ) -> str:
     """The markdown report of a results directory; with ``strict``, a strict run's
-    results directory, the "Reduction setting" section too."""
+    results directory, the "Reduction setting" section too; with ``findings``, a
+    markdown file an author wrote for these records, its text as the summary's
+    findings in place of the generated sentences."""
+    written = None
+    if findings is not None:
+        written = (Path(findings).name, Path(findings).read_text(encoding="utf-8"))
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         recs = analysis.load(results_dir, op=op, device_slug=device_slug)
@@ -1209,6 +2269,8 @@ def report(
     variant_rows = analysis.to_rows(variant_recs)
     axes = analysis.axes_of(recs)
     notes = analysis.parity_notes(recs)
+    spec = analysis.spec_of(recs[0])
+    units = None if spec is None else list(spec.work_units)
     point = analysis.default_point(base_recs or recs, point=point)
     dtypes = [dtype] if dtype else list(dict.fromkeys(row["dtype"] for row in rows))
     modes = [mode] if mode else [m for m in MODES if any(row["mode"] == m for row in rows)]
@@ -1226,14 +2288,41 @@ def report(
     sets = {str(results_dir): recs}
     if strict is not None:
         sets[str(strict)] = all_strict
+    unread = None if spec else recs[0].get("op_ref") or recs[0]["op"]
+    defaults = analysis.default_params(base_recs, variant_recs)
+    op_notes = analysis.op_notes(recs)
+    lines.append(
+        render_summary(
+            recs,
+            rows,
+            variant_rows,
+            point["params"],
+            baseline,
+            spec,
+            dtypes=dtypes,
+            modes=modes,
+            sets=sets,
+            strict=None if strict is None else (str(strict), len(all_strict)),
+            defaults=defaults,
+            notes=notes,
+            has_notes=bool(op_notes),
+            unread=unread,
+            findings=written,
+        )
+    )
+    work_keys = sorted({k for r in recs for k in (r.get("work") or {})})
+    lines.append(render_definitions(recs, baseline, spec, unread or op_name, work_keys))
     lines.append(render_provenance(recs, rows, sets))
     source = SOURCES.get(point["source"], point["source"])
     lines += ["## At the default point", "", f"The default point is {source}.", ""]
+    lines += axes_line(spec, point["params"])
     for d in dtypes:
         for m in modes:
             selected = analysis.at(rows, dtype=d, mode=m)
             lines.append(
-                render_default(selected, point["params"], baseline, title=f"{m}, {d}", notes=notes)
+                render_default(
+                    selected, point["params"], baseline, title=f"{m}, {d}", notes=notes, units=units
+                )
             )
     lines += ["## Sweeps", ""]
     # Per (dtype, mode), as plot decides: the sweeps around the point, or, when no
@@ -1250,14 +2339,16 @@ def report(
     if not any(swept for *_, swept in pairs):
         # No pair has a sweep: one line for all of them.
         lines += [f"{NO_SWEEP} in these records: one table per case instead.", ""]
-        lines += [render_per_case(sel, axes, baseline, d, m, notes) for d, m, sel, _ in pairs]
+        lines += [
+            render_per_case(sel, axes, baseline, d, m, notes, units) for d, m, sel, _ in pairs
+        ]
     else:
         for d, m, selected, swept in pairs:
             if swept:
                 lines.append(swept)
                 continue
             lines += [f"**{m}, {d}:** {NO_SWEEP.lower()}: one table per case instead.", ""]
-            lines.append(render_per_case(selected, axes, baseline, d, m, notes))
+            lines.append(render_per_case(selected, axes, baseline, d, m, notes, units))
     if variant_rows:
         lines.append(
             render_equal_peak_section(
@@ -1265,7 +2356,7 @@ def report(
                 variant_rows,
                 point["params"],
                 baseline,
-                analysis.default_params(base_recs, variant_recs),
+                defaults,
                 dtypes=dtypes,
                 modes=modes,
             )
@@ -1284,9 +2375,8 @@ def report(
         )
     scope = [row for row in rows if row["dtype"] in dtypes and row["mode"] in modes]
     scope_all = scope + [r for r in variant_rows if r["dtype"] in dtypes and r["mode"] in modes]
-    unread = None if analysis.spec_of(recs[0]) else recs[0].get("op_ref") or recs[0]["op"]
     lines.append(render_parity_failures(scope_all, axes, notes, unread=unread))
     lines.append(render_environment_check(scope, axes))
     lines.append(render_not_measured(scope_all, axes))
-    lines.append(render_notes(op_name, analysis.op_notes(recs)))
+    lines.append(render_notes(op_name, op_notes))
     return "\n".join(lines).rstrip() + "\n"

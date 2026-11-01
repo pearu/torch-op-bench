@@ -1,5 +1,6 @@
 import json
 import re
+import warnings
 
 import pytest
 import synth_op
@@ -1220,3 +1221,428 @@ def test_within_and_default_params(synth):
     assert (row["base"], row["params"]) == ("chunked", "num_chunks=2")
     assert analysis.flatten(bases[0])["base"] is None
     assert not any(k.startswith("params.") or k == "base" for k in analysis.varying_info(recs))
+
+
+# --- the summary and the definitions (Task I1-23) ------------------------------------------
+
+
+def headers(text):
+    """The header cells of every table of ``text``."""
+    return [h for lines in tables(text) for h in cells(lines[0])]
+
+
+def entry_labels(text):
+    """The entries' labels as the report's tables write them."""
+    names = set()
+    for lines in tables(text):
+        if cells(lines[0])[0] == "implementation":
+            names.update(cells(line)[0] for line in lines[2:])
+    return names
+
+
+def assert_every_header_defined(text, results_dir):
+    """Every header of every table maps to a definition the report shows."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        recs = analysis.load(results_dir)
+    spec = analysis.spec_of(recs[0])
+    rows = analysis.to_rows(recs)
+    rates = [label for label, _, _ in report.throughput_columns(spec and spec.work_units, rows)]
+    metrics = {
+        k.removeprefix(analysis.PARITY_PREFIX)
+        for k in rows[0]
+        if k.startswith(analysis.PARITY_PREFIX) and k not in analysis.RESULTS
+    }
+    axes = analysis.axes_of(recs)
+    how = section(text, report.READ_TITLE)
+    for header in set(headers(text)):
+        term = report.header_term(
+            header, rates=rates, metrics=metrics, axes=axes, entries=entry_labels(text)
+        )
+        assert term is not None, header
+        if term == "implementation" or (term == "axis" and spec is None):
+            continue  # an entry is described in the Summary; an axis by the op only
+        if header in [*rates, *metrics, *axes]:
+            if spec is not None:
+                assert f"**{header}**" in how, header  # the op's term, under its name
+            continue
+        assert f"- **{term}**: " in how, (header, term)
+
+
+def test_definitions_cover_every_header(synth, synth_strict, tmp_path):
+    # Part A: every header the report emits has a definition (so a new column cannot
+    # appear undefined), on the synthetic set with its strict run and variants.
+    S.write_variants(synth)
+    text = make(synth, strict=synth_strict, command=["torch-op-bench", "report", str(synth)])
+    assert report.header_term("a new column") is None
+    # The tool's text names no op's unit (R1-50 F1).
+    assert not re.search(r"tokens|FLOP", " ".join(d for _, d in report.DEFINITIONS))
+    assert len(set(headers(text))) > 30
+    assert_every_header_defined(text, synth)
+    how = section(text, report.READ_TITLE)
+    terms = [term for term, _ in report.DEFINITIONS]
+    assert [line.split("**")[1] for line in how.splitlines() if line.startswith("- **")][
+        : len(terms)
+    ] == terms
+    # The settings as recorded, the baseline named, the bands.
+    assert "of 3 timed calls, in milliseconds, after 1 untimed calls" in how
+    assert "the baseline `base`'s" in how and "[0.95, 1.05]" in how and "64 MiB" in how
+    # The op's words: its units, metrics with tolerances, axes with descriptions.
+    assert "  - **TFLOP/s**: FLOP per second, in units of 1e+12; FLOP: 2·M·K·N." in how
+    assert "  - **grad_rel**: the planted gradient error; tolerance 0.01." in how
+    assert "  The tolerances are planted." in how
+    assert "  - **layout**: the layout; values a, b; default a." in how
+    # Order: summary, definitions, provenance; the axes under the default point.
+    assert text.index("## Summary") < text.index(report.READ_TITLE) < text.index("## Provenance")
+    assert (
+        "There: M=128 (the rows); K=32 (the inner size); N=16 (the columns); layout=a (the layout)."
+        in text
+    )
+
+
+def test_throughput_columns_from_work_units(synth, monkeypatch):
+    # Part A: the throughput columns are the op's declared units, never the report's.
+    def default_header(text):
+        return cells(tables(section(text, "### fwd_bwd, float32", "\n### "))[0][0])
+
+    assert default_header(make(synth))[4:6] == ["tokens/s", "TFLOP/s"]
+    spec = analysis.spec_of({"op_ref": S.OP_REF})
+    monkeypatch.setattr(spec, "work_units", [])
+    header = default_header(make(synth))
+    assert "tokens/s" not in header and "TFLOP/s" not in header
+    assert header[3:5] == ["time / baseline", "peak above baseline, MiB"]
+    assert "- **Units of work**: none declared, so no throughput column." in make(synth)
+    # The toy op's one unit, with its own label and scale.
+    monkeypatch.setattr(spec, "work_units", toy_op.TOY.work_units)
+    text = make(synth)
+    header = default_header(text)
+    assert header[4] == "toy MFLOP/s" and "tokens/s" not in header
+    part = section(text, "### fwd_bwd, float32", "\n### ")
+    row = next(cells(r) for r in tables(part)[0][2:] if cells(r)[0] == "chunked")
+    t = S.median_ms("chunked", "fwd_bwd", "float32", S.DEFAULT) / 1e3
+    assert row[4] == report.sig3(2 * 128 * 32 * 16 / t / 1e6)
+    assert report.throughput_columns(toy_op.TOY.work_units, []) == [
+        ("toy MFLOP/s", "flops_per_s", 1e6)
+    ]
+
+
+def plant_skipped(synth):
+    """``compiled`` fwd_bwd float32 at the default point, its parity skipped (a later
+    record of the key, which merge keeps)."""
+    from torch_op_bench import records
+
+    with pytest.warns(UserWarning, match=MERGE_WARNING):
+        recs = analysis.load(synth)
+    (record,) = [
+        r
+        for r in recs
+        if (r["implementation"], r["mode"], r["case"]["dtype"])
+        == ("compiled", "fwd_bwd", "float32")
+        and r["case"]["params"] == S.DEFAULT
+    ]
+    record = {k: v for k, v in record.items() if k != analysis.SOURCE}
+    record["timestamp"] = "2026-10-18T12:00:00+00:00"
+    reason = "reference does not fit: 13.8 GiB needed, 11.3 GiB free (80 % usable)"
+    record["parity"] = {"status": "skipped", "reason": reason, "metrics": {}, "failed": []}
+    records.append(synth / "synth" / S.SLUG / "20261018T120000Z-host-a.jsonl", record)
+
+
+def test_summary_generated(synth):
+    # Part B: what was compared, on what, the generated findings and the caveats, on
+    # the synthetic set with a planted skip, error, unavailable and parity failures.
+    plant_skipped(synth)
+    text = make(synth)
+    summary = section(text, "## Summary")
+    lines = summary.splitlines()
+    assert "The op `synth`: a synthetic product, never run." in lines
+    assert [line for line in lines if line.startswith("- `")][:4] == [
+        "- `base` (the baseline, in `torch`): the plain product.",
+        "- `base_other` (a control, in `other`): not described.",
+        "- `compiled` (in `torch`): not described.",
+        "- `chunked` (in `other`): the product in chunks.",
+    ]
+    assert (
+        "Modes: forward only (`fwd`) and forward and backward (`fwd_bwd`); dtype float32, bfloat16."
+        in lines
+    )
+    assert (
+        "The sweep varies one axis at a time around the default point M=128, K=32, N=16, "
+        "layout=a: M (the rows): 64, 128, 256; K (the inner size): 16, 32; N (the columns): "
+        "8, 16; layout (the layout): a, b. That is 6 points and "
+    ) in summary
+    on_what = section(summary, "### On what", "\n### ")
+    assert "- GPU: not recorded" in on_what and "- host: host-a, host-b" in on_what
+    assert "- torch: 2.14.1+cu130 in `other`; 2.16.0a0+gitabc in `torch`" in on_what
+    assert "- packages: counterpart=0123456789ab, helper=1.0 in `other`" in on_what
+    assert "- date: 2026-10-17 12:00 to 2026-10-18 12:00 UTC" in on_what
+    findings = section(summary, "### Findings", "\n### ")
+    assert report.FINDINGS_GENERATED in findings
+    # Exact sentences for planted numbers: compiled at half the baseline's time.
+    assert (
+        "**Forward and backward (`fwd_bwd`), float32, at the default point.** The baseline "
+        f"`base` takes {report.sig3(S.median_ms('base', 'fwd_bwd', 'float32', S.DEFAULT))} ms "
+        f"and holds {report.mib(S.peak_above('base', S.DEFAULT))} MiB above baseline; parity ok."
+    ) in findings
+    assert (
+        "- `compiled` takes 0.500× the baseline's time and 1.00× its memory above baseline; "
+        "time × peak 0.500× the baseline's; parity not checked (reference does not fit)."
+    ) in findings
+    assert (
+        "- `chunked` (the product in chunks) takes 2.00× the baseline's time and 0.250× its "
+        "memory above baseline; time × peak 0.500× the baseline's; parity ok."
+    ) in findings
+    # The planted control: 10 % slower at the default point, outside the time band.
+    assert (
+        "- The controls (`base_other`: `base` run inside the `other` environment): outside "
+        "the environment check's bands here, `base_other`: time."
+    ) in findings
+    assert "**Over M (`fwd_bwd`, float32).** The baseline's median goes from " in findings
+    assert (
+        "- `compiled`: time / baseline within ±10 % of its 0.500× at the default point" in findings
+    )
+    caveats = section(summary, "### Caveats", "\n### ")
+    assert (
+        "- 1 record failed with an error nobody foresaw (error: RuntimeError: boom): "
+        "`compiled` (fwd) at M=64."
+    ) in caveats
+    assert (
+        "- 1 record could not run here (unavailable: needs a GPU): `chunked` (fwd_bwd) at K=16."
+    ) in caveats
+    assert (
+        "- Parity (the check against the op's reference) was not run in 1 record, as the "
+        "reference does not fit: at the default point (1)."
+    ) in caveats
+    found = caveats.splitlines()
+    at = found.index("- 2 parity failures, 1 explained:")
+    assert found[at + 1 : at + 3] == [
+        f"  - `chunked` on grad_rel (1), explained: {synth_op.NOTE.text}",
+        "  - `chunked` on grad_rel (1), **unexplained**",
+    ]
+    assert "### Findings (written" not in text
+
+
+def test_summary_failure_sentences(synth):
+    # At M=256 chunked fails parity: explained in bfloat16, not in float32.
+    text = make(synth, point={"M": "256"}, mode="fwd_bwd")
+    findings = section(text, "### Findings", "\n### ")
+    assert (
+        "- `chunked` (the product in chunks) takes 2.00× the baseline's time and 0.250× its "
+        "memory above baseline; time × peak 0.500× the baseline's; parity fails on "
+        "grad_rel, unexplained (see Parity failures)."
+    ) in findings
+    assert "parity fails on grad_rel, explained (see Parity failures)." in findings
+    # The planted control's 100 MiB at M=256.
+    assert "outside the environment check's bands here, `base_other`: peak." in findings
+
+
+def test_summary_forbidden_words(synth, synth_strict):
+    S.write_variants(synth)
+    text = make(synth, strict=synth_strict)
+    words = set(re.findall(r"[a-z]+", section(text, "## Summary").lower()))
+    assert not words & set(report.FORBIDDEN)
+    assert report.FORBIDDEN == ("fastest", "slowest", "best", "worst", "wins", "optimum", "beats")
+
+
+def test_summary_equal_peak_sentences(synth):
+    # Planted: budgets 64, 48, 32 MiB; chunked's variant at 40 MiB fails parity in
+    # bfloat16; compiled's lowest point 56 MiB misses the 0.75x and 0.5x budgets.
+    S.write_variants(synth)
+    text = make(synth, mode="fwd_bwd", dtype="float32")
+    findings = section(text, "### Findings", "\n### ")
+    t = S.median_ms("chunked", "fwd_bwd", "float32", S.DEFAULT)
+    c = S.median_ms("compiled", "fwd_bwd", "float32", S.DEFAULT)
+    assert (
+        "**Time at equal peak (`fwd_bwd`).** The budgets are the baseline's peak above "
+        "baseline, 64.0 MiB, at 1×, 0.75×, 0.5×."
+    ) in findings
+    assert (
+        f"- `compiled`: within 1× (64.0 MiB), {report.sig3(c)} ms with its default; no point "
+        "within 0.75× (48.0 MiB) (lowest 56.0 MiB); no point within 0.5× (32.0 MiB) (lowest "
+        "56.0 MiB)."
+    ) in findings
+    assert (
+        f"- `chunked`: within 1× (64.0 MiB), {report.sig3(0.8 * t)} ms with num_chunks=2; "
+        f"within 0.75× (48.0 MiB), {report.sig3(0.8 * t)} ms with num_chunks=2; within 0.5× "
+        f"(32.0 MiB), {report.sig3(t)} ms with its default (num_chunks=4)."
+    ) in findings
+    text = make(synth, mode="fwd_bwd", dtype="bfloat16")
+    assert "ms with num_chunks=2, which fails parity" in text
+
+
+def test_summary_findings_file(synth, tmp_path, capsys):
+    # With --summary, the author's paragraphs in place of the generated sentences;
+    # the headline table stays.
+    findings = tmp_path / "findings-x.md"
+    findings.write_text("PLACEHOLDER: one.\n\nPLACEHOLDER: two, with `code`.\n")
+    text = make(synth, findings=findings)
+    part = section(text, "### Findings (written", "\n### Caveats")
+    assert part.splitlines()[:7] == [
+        report.FINDINGS_AUTHOR,
+        "",
+        "From `findings-x.md`, for the records of torch-op-bench aaaaaaaaaaaa, bbbbbbbbbbbb.",
+        "",
+        "PLACEHOLDER: one.",
+        "",
+        "PLACEHOLDER: two, with `code`.",
+    ]
+    assert report.FINDINGS_GENERATED not in text and "takes 0.500×" not in text
+    assert "#### Headline table" in part
+    assert cli.main(["report", str(synth), "--baseline", "base", "--summary", str(findings)]) == 0
+    assert "PLACEHOLDER: two" in capsys.readouterr().out
+
+
+def test_summary_without_the_op(synth, monkeypatch):
+    # The op does not import: the summary from the records alone, and what it cannot show.
+    def unresolvable(ref):
+        raise ModuleNotFoundError(ref)
+
+    monkeypatch.setattr(analysis, "_SPECS", {})
+    monkeypatch.setattr("torch_op_bench.spec.resolve_op", unresolvable)
+    text = make(synth)
+    summary = section(text, "## Summary")
+    assert "The op `synth` (not described here: the op does not import)." in summary
+    assert "- `base` (the baseline, in `torch`): not described." in summary
+    # Without the spec, an entry's modes are those its records hold (R1-50 F2).
+    assert "- `chunked` (in `other`, `fwd_bwd` only): not described." in summary
+    assert (
+        f"- The op `{S.OP_REF}` does not import here: its descriptions, definitions, parity "
+        "notes and notes are not shown, and every parity failure counts as unexplained."
+    ) in summary
+    how = section(text, report.READ_TITLE)
+    assert (
+        f"The op `{S.OP_REF}` does not import here: its definitions are not shown; the "
+        "throughput columns (flops/s, tokens/s) are the records' work over the median, in "
+        "units the op defines."
+    ) in how
+    header = cells(tables(section(text, "### fwd_bwd, float32", "\n### "))[0][0])
+    assert header[4:6] == ["flops/s", "tokens/s"]
+    assert "There: " not in text
+    assert_every_header_defined(text, synth)
+
+
+def test_headline_table_equals_the_default_point(synth):
+    S.write_variants(synth)
+    text = make(synth)
+    head = tables(section(text, "#### Headline table", "\n### "))[0]
+    assert cells(head[0]) == [
+        "implementation",
+        "mode",
+        "dtype",
+        "time / baseline",
+        "peak above baseline / baseline's",
+        "time × peak / baseline's",
+        "≤ 1× budget: median ms",
+    ]
+    rows = [cells(r) for r in head[2:]]
+    assert len(rows) == 2 * (3 + 4)  # fwd: base, control, compiled; fwd_bwd: + chunked
+    for name, mode, dtype, *ratios, cell in rows:
+        part = section(text, f"### {mode}, {dtype}\n\nAt M=128", "\n### ")
+        default = {cells(r)[0]: cells(r) for r in tables(part)[0][2:]}[name]
+        assert ratios == [default[3], default[7], default[9]], (name, mode, dtype)
+        peak = section(section(text, report.EQUAL_PEAK_TITLE), f"### {mode}, {dtype}", "\n### ")
+        equal = {cells(r)[0]: cells(r) for r in tables(peak)[0][2:]}
+        assert cell == (equal[name][1] if name in equal else "—"), (name, mode, dtype)
+        assert (name in equal) == (name in ("chunked", "compiled"))
+
+
+def lce_set(root):
+    """Records in the structure of the `ey` set (I1-19): the real `lce` op, every base
+    entry in each of its modes at the default point and at N=1024, bfloat16, and the
+    variants of the chunked entries at the default point; numbers planted."""
+    from torch_op_bench import records, worker
+    from torch_op_bench.ops import lce
+    from torch_op_bench.spec import Case, to_json
+
+    spec = lce.LCE
+    path = root / "lce" / "gpu" / "20261101T000000Z-ey.jsonl"
+    points = [dict(spec.default_point), {**spec.default_point, "N": 1024}]
+    for i, impl in enumerate(spec.implementations):
+        for mode in [m for m in ("fwd", "fwd_bwd") if m in impl.modes]:
+            for params in points[:1] if impl.variant_of else points:
+                case = Case(params, "bfloat16", "cuda:0")
+                payload = {
+                    "op": "lce",
+                    "op_name": "lce",
+                    "case": case.to_dict(),
+                    "implementation": impl.name,
+                    "mode": mode,
+                    "settings": {"warmup": 10, "repeat": 50, "flush_l2": False},
+                    "env_name": impl.env_name,
+                    "device_slug": "gpu",
+                    "work": spec.work(case, mode),
+                    "info": to_json(impl.info),
+                }
+                record = worker.base_record(payload, "/envs/x/bin/python")
+                t = (100 + 7 * i) * (3 if mode == "fwd_bwd" else 1) * params["N"] / 4096
+                metrics = {"loss_abs_err": 1e-2, "loss_rel_err": 2e-3}
+                if mode == "fwd_bwd":
+                    metrics.update(grad_hidden_rel_l2=2e-3, grad_weight_rel_l2=1e-3)
+                record.update(
+                    timestamp="2026-11-01T00:00:00+00:00",
+                    status="ok",
+                    times_ms=[t, t, t],
+                    memory={"baseline_bytes": 2**30, "peak_bytes": 2**30 + (64 + 32 * i) * 2**20},
+                    parity={"status": "ok", "failed": [], "metrics": metrics, "reason": None},
+                    env={
+                        "hostname": "ey",
+                        "torch": {
+                            "version": "2.16.0",
+                            "devices": [{"index": 0, "name": "GPU", "total_memory": 16 * 2**30}],
+                        },
+                        "torch_op_bench": {"hash": "c" * 40},
+                    },
+                )
+                records.append(path, record)
+    return root
+
+
+def test_generated_findings_on_the_lce_structure(tmp_path):
+    # Part B on the structure of the `ey` set: every entry and mode gets its sentence,
+    # the controls theirs, no forbidden word; every header defined (Part A).
+    from torch_op_bench.ops import lce
+
+    root = lce_set(tmp_path / "results")
+    text = report.report(root)
+    summary = section(text, "## Summary")
+    findings = section(summary, "### Findings", "\n### ")
+    for mode in ("fwd", "fwd_bwd"):
+        part = section(findings, f"(`{mode}`), at the default point.**", "\n**")
+        named = re.findall(r"^- `([^`]+)`", part, flags=re.M)
+        expected = [
+            impl.name
+            for impl in lce.LCE.implementations
+            if mode in impl.modes
+            and impl.variant_of is None
+            and impl.name != "torch_eager"
+            and impl.info.get("role") != "control"
+        ]
+        assert named == expected, mode
+        assert "- The controls (`torch_eager_liger` and `torch_eager_torchtitan`: " in part
+    assert "- `liger` (Liger-Kernel's fused kernel, accumulating in fp32) takes " in findings
+    # The entries without fwd say so, from the spec's modes (R1-50 F2).
+    compared = section(summary, "### What was compared", "\n### ")
+    only = re.findall(r"^- `([^`]+)` \(in `\w+`, `fwd_bwd` only\)", compared, flags=re.M)
+    assert only == [
+        impl.name
+        for impl in lce.LCE.implementations
+        if impl.modes == {"fwd_bwd"} and impl.variant_of is None
+    ]
+    assert only == [
+        "liger",
+        "liger_native_accum",
+        "torchtitan_chunked",
+        "torchtitan_chunked_compiled",
+    ]
+    assert "`torch_eager` (the baseline, in `torch`): " in compared
+    assert "**Time at equal peak (`fwd_bwd`).**" in findings and "**Over N (`fwd`).**" in findings
+    assert not set(re.findall(r"[a-z]+", summary.lower())) & set(report.FORBIDDEN)
+    assert "- GPU: GPU, 16.0 GiB" in summary
+    assert_every_header_defined(text, root)
+    how = section(text, report.READ_TITLE)
+    assert "2·N·H·V in `fwd` (the logits), 6·N·H·V in `fwd_bwd`" in how
+    assert "  - **N**: rows of hidden, the tokens of a batch; values " in how
+    # The throughput as before: TFLOP/s is the row's tflops, now a third in fwd.
+    part = section(text, "### fwd, bfloat16", "\n### ")
+    row = next(cells(r) for r in tables(part)[0][2:] if cells(r)[0] == "torch_eager")
+    flops = 2 * 4096 * 4096 * 131072
+    assert row[4:6] == [report.sig3(4096 / 0.1), report.sig3(flops / 0.1 / 1e12)]

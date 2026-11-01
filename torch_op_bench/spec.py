@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import inspect
 import json
 import re
 from collections.abc import Callable, Mapping
@@ -37,11 +38,13 @@ def normalize_device(device: str) -> str:
 
 @dataclass(frozen=True)
 class Axis:
-    """A named shape parameter of an op and the values a sweep takes."""
+    """A named shape parameter of an op and the values a sweep takes; ``description``
+    says in one line what it is, for the report's definitions."""
 
     name: str
     values: list
     kind: str = "int"
+    description: str = ""
 
     def __post_init__(self) -> None:
         if self.kind not in AXIS_KINDS:
@@ -119,6 +122,23 @@ def _always_fits(case: Case) -> bool | str:
 
 
 @dataclass(frozen=True)
+class WorkUnit:
+    """A unit of an op's work (``OpSpec.work_units``), for the report's throughput.
+
+    ``key`` is a key of what ``OpSpec.work`` returns; ``label`` names the unit and
+    ``definition`` says what one counts, for the report's definitions; the report's
+    throughput column is headed ``rate_label`` and holds ``work[key]`` per second of
+    the median, divided by ``scale`` (``1e12`` for TFLOP/s).
+    """
+
+    key: str
+    label: str
+    definition: str
+    rate_label: str
+    scale: float = 1
+
+
+@dataclass(frozen=True)
 class ParityNote:
     """A known cause of an implementation's parity failure (R1-30 F1).
 
@@ -156,7 +176,8 @@ class Implementation:
     zero-argument callable, may run it (e.g. under a profiler) and returns a
     JSON-serialisable dict for the record or ``None``; it raises if the intended
     code path did not run. ``packages`` are the distributions whose versions the
-    record carries; ``info`` is free-form, recorded as is.
+    record carries; ``info`` is free-form, recorded as is. ``description`` says
+    in one line what the implementation is, for the report's summary.
     """
 
     name: str
@@ -169,6 +190,7 @@ class Implementation:
     available: Callable[[], bool | str] = _always_available
     packages: tuple[str, ...] = ()
     info: dict[str, Any] = field(default_factory=dict)
+    description: str = ""
 
     def __post_init__(self) -> None:
         unknown = set(self.modes) - set(MODES)
@@ -179,15 +201,20 @@ class Implementation:
         """This implementation run in environment ``env_name``, as a control.
 
         The copy is named ``<name>_<env_name>`` and shares everything but its name,
-        environment and ``info`` (``role: "control"``, ``control_of: <name>``). It
-        is how a baseline enters a counterpart's environment, so that a comparison
-        across environments can tell the counterpart from the torch build.
+        environment, ``info`` (``role: "control"``, ``control_of: <name>``) and
+        ``description``. It is how a baseline enters a counterpart's environment, so
+        that a comparison across environments can tell the counterpart from the torch
+        build.
         """
         return dataclasses.replace(
             self,
             name=f"{self.name}_{env_name}",
             env_name=env_name,
             info={**self.info, "role": "control", "control_of": self.name},
+            description=(
+                f"`{self.name}` run inside the `{env_name}` environment, to check that "
+                "the environment itself changes nothing"
+            ),
         )
 
     def with_params(self, **params: Any) -> Implementation:
@@ -208,13 +235,15 @@ class Implementation:
             raise ValueError(
                 f"implementation {self.name!r} has no setup to take the parameters {params}"
             )
-        name = f"{self.name}[{','.join(f'{k}={params[k]}' for k in sorted(params))}]"
+        pairs = [f"{k}={params[k]}" for k in sorted(params)]
+        name = f"{self.name}[{','.join(pairs)}]"
         base_setup = self.setup
         return dataclasses.replace(
             self,
             name=name,
             info={**self.info, "base": self.name, "params": dict(params)},
             setup=lambda case: base_setup(case, **params),
+            description=f"`{self.name}` with {', '.join(pairs)}",
         )
 
     @property
@@ -230,8 +259,13 @@ class OpSpec:
     ``make_inputs(case, device, generator)`` builds the inputs, seeded by the
     ``torch.Generator``. ``compare(outputs, ref_outputs, case)`` returns named error
     metrics, checked against ``tolerances`` (a metric without a tolerance is
-    recorded, not checked). ``work(case)`` returns the work units of a case (e.g.
-    ``{"flops": ...}``) for throughput. ``defaults`` is the point a sweep varies one
+    recorded, not checked); ``metric_definitions`` says what each metric is (every
+    ``tolerances`` key has one), and ``tolerance_basis`` how the tolerances were set,
+    for the report's definitions. ``work(case, mode)`` returns the work of a case in
+    ``mode`` (e.g. ``{"flops": ...}``) for throughput, and ``work_units`` declares
+    the units the report shows (``WorkUnit``; each key one ``work`` returns).
+    ``description`` says in a sentence what the op computes, for the report's
+    summary. ``defaults`` is the point a sweep varies one
     axis around (an axis missing from it defaults to its first value).
     ``reference_fits(case)`` is the memory guard of the parity check: ``True``, or a
     string saying why the reference is skipped. ``default_dtypes`` are the dtypes a
@@ -249,12 +283,16 @@ class OpSpec:
     reference: Implementation
     compare: Callable[[Any, Any, Case], dict[str, float]]
     tolerances: dict[str, float] = field(default_factory=dict)
-    work: Callable[[Case], dict[str, float]] = lambda case: {}
+    work: Callable[[Case, str], dict[str, float]] = lambda case, mode: {}
     defaults: dict[str, Any] = field(default_factory=dict)
     reference_fits: Callable[[Case], bool | str] = _always_fits
     default_dtypes: list[str] | None = None
     parity_notes: list[ParityNote] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    description: str = ""
+    work_units: list[WorkUnit] = field(default_factory=list)
+    metric_definitions: dict[str, str] = field(default_factory=dict)
+    tolerance_basis: str = ""
 
     def __post_init__(self) -> None:
         names = [impl.name for impl in self.implementations]
@@ -275,6 +313,34 @@ class OpSpec:
                 raise ValueError(
                     f"op {self.name!r}: default_dtypes must be a non-empty subset of "
                     f"dtypes, got {self.default_dtypes}"
+                )
+        undefined = sorted(set(self.tolerances) - set(self.metric_definitions))
+        if undefined:
+            raise ValueError(f"op {self.name!r}: no metric_definitions for {undefined}")
+        self._check_work()
+
+    def _check_work(self) -> None:
+        """``work`` takes the mode (Task I1-23 Part C), and returns every key of
+        ``work_units`` at the default point, in every mode."""
+        try:
+            inspect.signature(self.work).bind(None, MODES[0])
+        except TypeError:
+            raise ValueError(
+                f"op {self.name!r}: work must be work(case, mode) -> dict[str, float]; "
+                f"it takes {inspect.signature(self.work)}"
+            ) from None
+        except ValueError:  # no signature to read (a builtin): taken as given
+            pass
+        if not self.work_units:
+            return
+        dtype = (self.default_dtypes or self.dtypes or ["float32"])[0]
+        case = Case(self.default_point, dtype, "cpu")
+        for mode in MODES:
+            missing = sorted({u.key for u in self.work_units} - set(self.work(case, mode)))
+            if missing:
+                raise ValueError(
+                    f"op {self.name!r}: work_units {missing} not in work(case, {mode!r}) "
+                    "at the default point"
                 )
 
     def axis(self, name: str) -> Axis:

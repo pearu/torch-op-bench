@@ -51,6 +51,7 @@ def test_flatten_columns(synth):
         "N",
         "layout",  # the op's axis order, not sorted
         *analysis.RESULTS,
+        "flops_per_s",  # every work unit's rate; tokens_per_s is in RESULTS
         "parity_grad_rel",
         "parity_loss_rel_err",
         *analysis.TAIL,
@@ -90,8 +91,10 @@ def test_flatten_values(synth):
         "flops": 2 * 256 * 32 * 16,
         "tokens_per_s": 256 / (t / 1e3),
         "tflops": 2 * 256 * 32 * 16 / (t / 1e3) / 1e12,
+        "flops_per_s": 2 * 256 * 32 * 16 / (t / 1e3),
         "parity_status": "fail",
         "parity_failed": "grad_rel",
+        "skip_reason": None,
         "parity_grad_rel": 0.5,
         "parity_loss_rel_err": 1e-3,
         "role": None,
@@ -138,6 +141,24 @@ def test_flatten_error_record(synth):
     assert row["reason"] == "needs a GPU" and row["median_ms"] is None
 
 
+def test_work_unit_rates():
+    # Task I1-23: <key>_per_s for every key of the record's work, whatever the op names.
+    record = {
+        "case": {"params": {"M": 1}, "dtype": "float32", "device": "cpu"},
+        "times_ms": [2.0],
+        "work": {"rows": 10, "flops": 4e12, "label": "x"},
+        "parity": {"status": "skipped", "reason": "reference does not fit: 2 GiB"},
+    }
+    row = analysis.flatten(record)
+    assert row["rows_per_s"] == 10 / 2e-3 and row["flops_per_s"] == 4e12 / 2e-3
+    assert row["tflops"] == 4e12 / 2e-3 / 1e12 and row["tokens_per_s"] is None
+    assert row["label_per_s"] is None  # not a number
+    assert row["skip_reason"] == "reference does not fit: 2 GiB"
+    rows = analysis.to_rows([record, {**record, "work": {"tokens": 3}}])
+    assert all(list(r) == list(rows[0]) for r in rows)
+    assert rows[1]["rows_per_s"] is None and rows[1]["tokens_per_s"] == 3 / 2e-3
+
+
 def test_flatten_missing_fields():
     row = analysis.flatten({})
     assert row["op"] is None and row["median_ms"] is None and row["host"] is None
@@ -154,6 +175,7 @@ def test_flatten_missing_fields():
     assert row["M"] == 1 and row["median_ms"] == 2.0 and row["iqr_ms"] == 0.0
     assert row["peak_above_baseline"] is None  # on CPU
     assert row["tokens_per_s"] is None  # no work unit
+    assert not [k for k in row if k.endswith(analysis.RATE_SUFFIX) and k != "tokens_per_s"]
     assert row["matmul_bf16_reduced"] is None  # a record made before it was recorded
     assert row["packages"] == "x=not installed"
     assert row["info.a.b"] == json.dumps([1, 2]) and row["info.absent"] is None

@@ -133,10 +133,12 @@ module should import torch and any counterpart lazily, inside its callables: the
 parent needs neither, and each worker imports torch only after its environment
 variables are set.
 
-- `axes`: a list of `Axis(name, values, kind="int"|"str")` (names and `str` values
-  must not contain `,`, `=` or `|`, which structure case keys); `defaults` gives the
-  point a sweep varies one axis around (an axis missing from it defaults to its
-  first value).
+- `description`: what the op computes, in a sentence, for the report's summary.
+- `axes`: a list of `Axis(name, values, kind="int"|"str", description="")` (names and
+  `str` values must not contain `,`, `=` or `|`, which structure case keys; the
+  description says in one line what the axis is, for the report's definitions);
+  `defaults` gives the point a sweep varies one axis around (an axis missing from
+  it defaults to its first value).
 - `dtypes`: dtype names (`"float32"`, `"bfloat16"`, ...); `default_dtypes`: those a
   `run` uses without `--dtype` (default: all of `dtypes`).
 - `make_inputs(case, device, generator)`: the inputs of a `Case` (`case.params`,
@@ -158,15 +160,26 @@ variables are set.
   - `verify(fn)`: given the timed callable, check (e.g. with a profiler) that the
     intended code path runs; raise if not; return a JSON-serialisable dict or `None`;
   - `packages`: distributions whose versions the record carries; `info`: free-form
-    facts recorded as is (e.g. chunk size, accumulation dtype).
+    facts recorded as is (e.g. chunk size, accumulation dtype);
+  - `description`: what it is, in one line, for the report's summary (a control's
+    and a variant's are made from their original's name).
 - `reference`: an `Implementation` at higher precision, run once per case on the same
   inputs; `compare(outputs, ref_outputs, case)` returns named error metrics, checked
-  against `tolerances`; `reference_fits(case)` returns `True` or a reason to skip the
+  against `tolerances`; `metric_definitions` says what each metric is (every
+  `tolerances` key needs one, else the spec is refused) and `tolerance_basis` how
+  the tolerances were set, both for the report's definitions;
+  `reference_fits(case)` returns `True` or a reason to skip the
   parity check (a memory guard). The worker runs the implementation first and keeps
   its outputs in host memory while the reference runs, so the reference has the
   device's free memory to itself.
-- `work(case)`: work units of a case (e.g. `{"tokens": N, "flops": ...}`) from which
-  reports derive throughput.
+- `work(case, mode)`: the work of a case in a mode (e.g. `{"tokens": N, "flops":
+  ...}`), recorded with each record (a `work` that takes the case only is refused);
+  `work_units`: the units the report shows as throughput, each a `WorkUnit(key,
+  label, definition, rate_label, scale)`: `key` one that `work` returns at the
+  default point in every mode (else the spec is refused), the column headed
+  `rate_label` and holding `work[key]` per second of the median over `scale` (LCE:
+  tokens/s, and TFLOP/s with `scale` 1e12). An op that declares no unit gets no
+  throughput column.
 - `parity_notes`: a list of `ParityNote(implementation, metrics, applies, text)`, each
   a known cause of a parity failure outside the tool: `metrics` the metrics it
   explains (`None`: any), `applies(case, mode, metrics, torch_version)` whether it
@@ -211,7 +224,9 @@ counterpart:
 - `fwd`: forward under `no_grad`, returns `(loss,)`;
 - parity against an fp32 eager reference, computed in chunks of 1024 rows (the same
   quantities: only the order of the sums differs), so it needs one chunk's logits,
-  not N rows'; work units `tokens = N`, `flops = 6 N H V`.
+  not N rows'; work units `tokens = N`, and `flops` the GEMMs the mode runs:
+  `2 N H V` in `fwd` (the logits), `6 N H V` in `fwd_bwd` (and the two backward
+  products), an implementation's recomputation not counted.
 
 | implementation | what |
 |---|---|
@@ -401,7 +416,7 @@ concatenation; `torch_op_bench.records.read(directory)` reads a tree and
 | `times_ms` | all timing samples, in milliseconds (statistics are derived, `records.stats`) |
 | `memory` | `peak_bytes`, `baseline_bytes` (what is allocated when the call starts: the inputs, and the cuBLAS workspaces where the build counts them); `null` on CPU |
 | `parity` | `status` (`ok`, `fail`, `skipped`), `reason`, `metrics`, `tolerances`, `failed`; `skipped` when the reference does not fit (`reference_fits`) or, against that estimate, runs out of memory ("reference out of memory: …", the record staying `ok`) |
-| `verify`, `work`, `info` | what `verify` returned; work units; the implementation's info |
+| `verify`, `work`, `info` | what `verify` returned; the work of the case in the record's mode, in the op's units (`work(case, mode)`; LCE counts 2·N·H·V FLOP in `fwd` and 6·N·H·V in `fwd_bwd`); the implementation's info |
 | `env`, `env_from`, `env_error` | provenance of the worker's interpreter (`worker`), or of the parent's when the worker produced no record (`runner`, without torch); why `env` is `null` if collecting it failed; `env.packages` maps each of the implementation's `packages` to its version (`null` if not installed), or, for a package installed from a VCS URL, to `{version, url, commit, requested}` from its `direct_url.json`; `env.package_root` the directory the worker imported torch-op-bench from; `env.torch.matmul` the process-wide settings that choose how matmuls round (`allow_tf32`, `allow_bf16_reduced_precision_reduction`, `allow_fp16_reduced_precision_reduction`, and, on builds whose reduced-precision flags are pairs `(reduced_precision, split_k)`, `allow_bf16_reduced_precision_reduction_split_k` and `allow_fp16_reduced_precision_reduction_split_k` (`null` otherwise), `fp32_precision`, `float32_matmul_precision`), as the worker had them after the run (`run --matmul-reduction strict` sets the reduced-precision ones; its `_split_k` fields stay `true`, since the second element of a pair only qualifies an allowed reduced-precision reduction: torch refuses `(True, False)` with "allow_splitk=False is not supported when reduced precision reductions are enabled", and `(False, True)` is no reduced-precision reduction at all): they change parity (bf16 reduced-precision reduction, on by default, doubles the `grad_hidden` error of chunked LCE at 128-row chunks) |
 
 The resume and merge key is (op, device slug, case key, implementation, mode).
@@ -433,17 +448,55 @@ torch-op-bench plot results --out figures \
 command that made it, and any warning the merge raised (records from different
 torch-op-bench commits). Its sections:
 
-1. **Provenance**: device, hosts, the time span of the records and their number in
+1. **Summary**, for a reader who is not an engineer: *What was compared* (the op's
+   `description`, each entry in the op's order with its `description`, the
+   baseline, the modes in words, the sweep's axes with their descriptions and
+   values, the number of points and records, the strict run and the variants);
+   *On what* (the GPU and its memory, the hosts, the torch build of each
+   environment, the counterparts' versions, the dates); *Findings*; a *Headline
+   table* (at the default point, every entry and mode in the op's order: time,
+   peak and time × peak against the baseline's, and the equal-peak cell at the 1×
+   budget, the same numbers as sections 4 and 6); and *Caveats* (what was not
+   measured, by cause, in plain words; where parity was not checked, by reason;
+   the parity failures and their notes, "N parity failures, M explained"; the
+   run-to-run band). The findings are generated by default, from fixed templates
+   in one place (`report.py`): per entry and mode at the default point, its time,
+   memory and time × peak against the baseline's and its parity; the controls
+   against the environment check's bands; per chunked entry, the point within
+   each memory budget; per axis, the baseline's median over it and each entry's
+   ratios, within ±10 % of their default-point value or their range; and the
+   repeatability across environments. Every sentence is a value, or a ratio to
+   the baseline or to a budget, the entries in the op's order; no sentence ranks
+   entries or compares two counterparts, and the words fastest, slowest, best,
+   worst, wins, optimum and beats never appear (`report.FORBIDDEN`, tested).
+   `--summary FINDINGS.md` prints an author's findings in their place, the file's
+   paragraphs verbatim under "Findings (written by the author of this result
+   set; …)" and a line naming the file and the records' torch-op-bench commit;
+   the judgement there is the author's. When the op does not import, the summary
+   comes from the records alone and says what it cannot show.
+2. **How to read this report**: every column and section defined, in two layers.
+   The tool's definitions, the same for every op (`report.DEFINITIONS`, filled in
+   with the timing settings as recorded, the baseline and the bands; a test checks
+   that every header the report emits has one); then the op's own, read through
+   its spec: its units of work (`work_units`), its parity metrics with their
+   tolerances and how those were set (`metric_definitions`, `tolerances`,
+   `tolerance_basis`), and its axes with their values and default
+   (`Axis.description`). When the op does not import, the section says its
+   definitions are not shown.
+3. **Provenance**: device, hosts, the time span of the records and their number in
    each directory read, named as given (232 records in `results`, 18
    in `results-strict`), and one row per
    environment build: torch and CUDA, Python, the packages (a version, or the first
    12 characters of the commit of a git install), the torch-op-bench commit, and
    the matmul settings. It says so when the commits differ, or when one environment
    holds several builds.
-2. **At the default point** (see above), per mode and dtype, two tables. The first has
+4. **At the default point** (see above; under it, each axis' value with its
+   description), per mode and dtype, two tables. The first has
    one row per implementation, the baseline first and each control right after its
    original, with its environment, median and IQR (in one cell, "median (IQR)"; the
-   status instead when it is not `ok`), time against the baseline, tokens/s, TFLOP/s,
+   status instead when it is not `ok`), time against the baseline, the throughput
+   in each of the op's units (`work_units`: LCE's tokens/s and TFLOP/s; when the op
+   does not import, `<key>/s` for each key of the records' `work`, unscaled),
    peak memory above baseline and against the baseline's, **time × peak** (median ms ×
    peak above baseline in MiB, in ms·MiB) and against the baseline's, parity and its
    metrics (`fail: a¹, b`: each failed metric with the mark of the parity note of
@@ -459,14 +512,14 @@ torch-op-bench commits). Its sections:
    between records (e.g. `torchtitan_api`, `compile`, `op_decisions.is_cuda`), one
    per line, keys sorted, those the entry lacks left out, so a difference cannot hide in `info`. No
    table of the report is wider than 16 columns.
-3. **Sweeps**: for each axis varied around the default point, four tables (median,
+5. **Sweeps**: for each axis varied around the default point, four tables (median,
    peak, time × peak with its ratio to the baseline's in parentheses, parity with
    the failing metrics) with one column per implementation. A cell is `—` when there
    is no record, or the status when it is not `ok`. For a mode and dtype in which no
    axis varies around the point (one case, or cases that differ in two axes at
    once), the default-point table is repeated at every case present instead, one
    table per case, as `plot` says when it draws nothing for that mode and dtype.
-4. **Time at equal peak**, only when the results hold variants: per mode and dtype,
+6. **Time at equal peak**, only when the results hold variants: per mode and dtype,
    at the default point, one row per entry with variants and one column per peak
    budget, the baseline's peak above baseline there at 1×, 0.75× and 0.5× (in MiB
    in the header), the same budgets for every entry, so the table reads the same on
@@ -483,7 +536,7 @@ torch-op-bench commits). Its sections:
    the same point"): none of the entry's points lies between the smallest budget and
    the largest, so the budgets do not separate them there. Variants are in no other table but "Parity
    failures" (a note of an entry covers its variants) and "Not measured".
-5. **Reduction setting**, only with `--strict RESULTS_STRICT` (the results of a
+7. **Reduction setting**, only with `--strict RESULTS_STRICT` (the results of a
    `run --matmul-reduction strict`): first a check that every record of `RESULTS`
    has the default setting and every record of `RESULTS_STRICT` the strict one
    (read from `env.torch.matmul`; a record the runner wrote has none and is not
@@ -499,14 +552,14 @@ torch-op-bench commits). Its sections:
    and, for each torch LCE entry, whether its default parity equals its strict
    parity: the check that, once PR pytorch#195707 lands as reviewed, torch LCE
    accumulates in fp32 under the defaults while Liger and torchtitan do not.
-6. **Parity failures**: every record whose parity is `fail`, grouped by entry, then
+8. **Parity failures**: every record whose parity is `fail`, grouped by entry, then
    by "explained: <note>" (the note's text once per entry) when one of the op's
    `parity_notes` applies there, else "**unexplained**", then by metric, with the
    records under each; then "N parity failures, M explained", a record counting
    as explained when every metric it fails is. When the op cannot be imported,
    there are no notes and every failure is unexplained, and a last sentence says so
    ("The op `<op_ref>` does not import here: …").
-7. **Environment check**: each control (`torch_eager_<env>`) against its original at
+9. **Environment check**: each control (`torch_eager_<env>`) against its original at
    every point both have, as the time ratio (control / original), the peak
    difference, and the ratio of each parity metric. A time ratio outside [0.95,
    1.05], a difference beyond 64 MiB or a parity ratio outside [0.9, 1.1] is named
@@ -522,7 +575,7 @@ torch-op-bench commits). Its sections:
    table counts the pairs compared, those with one side and those with neither side
    measured, and "Every control is within the limits" is said only when no row is
    flagged.
-8. **Not measured**: every `error` and `unavailable` record, grouped by cause, with
+10. **Not measured**: every `error` and `unavailable` record, grouped by cause, with
    the number of records: for an `error`, the message up to its first number (a
    token of its own, such as `4.00`, `cuda:0` or `4096x1024`; digits inside a word,
    as in `mat1`, `sm_80` or `2D`, are part of the cause), less the unfinished
@@ -532,7 +585,7 @@ torch-op-bench commits). Its sections:
    whose reasons are written to be stable, the first line of the reason, and the
    second line in each row (for a point out of memory, one group per device, each
    row with its figures and phase).
-9. **Notes**, only when the op has `notes` and imports here: each note verbatim,
+11. **Notes**, only when the op has `notes` and imports here: each note verbatim,
    under a sentence saying they are the op author's, not computed by the report.
 
 Numbers have 3 significant digits and memory is in MiB with one decimal.
@@ -540,7 +593,7 @@ Numbers have 3 significant digits and memory is in MiB with one decimal.
 Time × peak is there because the comparison that matters for a fused kernel is
 elapsed time *and* memory together: a counterpart that is faster by holding more,
 or smaller by taking longer, does not win on it unless the product drops (the
-user's comparison; the other one is the time at equal peak memory, section 4). The
+user's comparison; the other one is the time at equal peak memory, section 6). The
 environment check still compares time and peak separately.
 
 `plot` (`pip install -e .[plot]`; matplotlib, with the Agg backend, so no display

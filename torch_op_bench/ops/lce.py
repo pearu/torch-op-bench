@@ -21,7 +21,7 @@ import inspect
 from pathlib import Path
 from typing import Any
 
-from ..spec import Axis, Case, Implementation, OpSpec, ParityNote, Unavailable
+from ..spec import Axis, Case, Implementation, OpSpec, ParityNote, Unavailable, WorkUnit
 
 IGNORE_INDEX = -100
 
@@ -357,11 +357,57 @@ def reference_bytes(case: Case) -> int:
     return 4 * (3 * chunk * v + 2 * (n * h + v * h) + v * h)
 
 
-def work(case: Case) -> dict[str, float]:
+def work(case: Case, mode: str) -> dict[str, float]:
+    """The GEMMs the mode runs: the logits (2 N H V) in ``fwd``, and the two
+    backward products too (6 N H V) in ``fwd_bwd``; the softmax and the loss are
+    O(N V), not counted. An implementation's recomputation (the chunked paths
+    recompute the forward in the backward) is its own cost, not counted."""
     n, h, v = _shape(case)
-    # Forward GEMM plus the two backward GEMMs; recomputation is an
-    # implementation's own cost.
-    return {"tokens": n, "flops": 6 * n * h * v}
+    gemms = 1 if mode == "fwd" else 3
+    return {"tokens": n, "flops": 2 * gemms * n * h * v}
+
+
+# What the report says of the op (Task I1-23): its units of work, its parity
+# metrics and how their tolerances were set.
+DESCRIPTION = (
+    "the loss of a language model's output layer: the hidden states of N tokens times "
+    "the vocabulary matrix, then cross-entropy against the labels, without keeping the "
+    "full logits where an implementation can avoid it"
+)
+
+WORK_UNITS = [
+    WorkUnit(
+        "tokens",
+        "tokens",
+        "the rows of `hidden`, N: one token's logits and loss each",
+        "tokens/s",
+        1,
+    ),
+    WorkUnit(
+        "flops",
+        "FLOP",
+        "the GEMMs the mode runs: 2·N·H·V in `fwd` (the logits), 6·N·H·V in `fwd_bwd` "
+        "(the logits and the two backward products); an implementation's recomputation "
+        "is its own cost and is not counted",
+        "TFLOP/s",
+        1e12,
+    ),
+]
+
+METRIC_DEFINITIONS = {
+    "loss_abs_err": "|loss − loss_ref|, the reference the fp32 eager computation of the "
+    "same inputs, chunked over N",
+    "loss_rel_err": "loss_abs_err / max(|loss_ref|, 1e-6)",
+    "grad_hidden_rel_l2": "‖grad_hidden − grad_hidden_ref‖₂ / ‖grad_hidden_ref‖₂",
+    "grad_weight_rel_l2": "‖grad_weight − grad_weight_ref‖₂ / ‖grad_weight_ref‖₂",
+}
+
+TOLERANCE_BASIS = (
+    "The tolerances are 4× the largest error of `torch_eager` in bfloat16 against the "
+    "fp32 reference (the bf16 arithmetic itself), measured on an RTX 5060 Ti with torch "
+    "2.16.0a0 at (N, H, V) = (4096, 4096, 131072) and (1024, 1024, 32768); "
+    "`loss_abs_err` is recorded, not checked, as it scales with the loss."
+)
 
 
 # --- availability -------------------------------------------------------------
@@ -1127,10 +1173,13 @@ TORCH_EAGER = Implementation(
     setup=setup_eager,
     verify=verify_native,
     info={**CONTRACT, "role": "baseline"},
+    description="PyTorch eager: `F.linear`, then `F.cross_entropy` on the full logits",
 )
 
 
-def _liger(name: str, run: Any, setup: Any, accum_dtype: str | None) -> Implementation:
+def _liger(
+    name: str, run: Any, setup: Any, accum_dtype: str | None, description: str
+) -> Implementation:
     # fwd_bwd only: Liger computes the gradients inside its forward whenever the
     # inputs require grad, so a fwd number would include the backward work.
     return Implementation(
@@ -1143,11 +1192,17 @@ def _liger(name: str, run: Any, setup: Any, accum_dtype: str | None) -> Implemen
         available=liger_available,
         packages=LIGER_PACKAGES,
         info={**CONTRACT, "accum_dtype": accum_dtype, "backend": "liger"},
+        description=description,
     )
 
 
 def _torchtitan(
-    name: str, run: Any, setup: Any, modes: set[str], verify: Any = verify_native
+    name: str,
+    run: Any,
+    setup: Any,
+    modes: set[str],
+    description: str,
+    verify: Any = verify_native,
 ) -> Implementation:
     return Implementation(
         name,
@@ -1163,6 +1218,7 @@ def _torchtitan(
         ),
         packages=TORCHTITAN_PACKAGES,
         info={**CONTRACT, "backend": "torchtitan"},
+        description=description,
     )
 
 
@@ -1171,16 +1227,27 @@ def _torchtitan(
 # would include the backward work.
 TORCHTITAN = [
     _torchtitan(
-        "torchtitan_chunked", run_torchtitan_chunked, setup_torchtitan_chunked, {"fwd_bwd"}
+        "torchtitan_chunked",
+        run_torchtitan_chunked,
+        setup_torchtitan_chunked,
+        {"fwd_bwd"},
+        "torchtitan's chunked loss wrapper, `ChunkedLossWrapper`, eager",
     ),
     _torchtitan(
         "torchtitan_chunked_compiled",
         run_torchtitan_chunked,
         setup_torchtitan_chunked_compiled,
         {"fwd_bwd"},
+        "torchtitan's chunked loss wrapper with its loss compiled, as its trainer compiles it",
         verify=verify_torchtitan_compiled,
     ),
-    _torchtitan("torchtitan_ce", run_torchtitan_ce, setup_torchtitan_ce, BOTH),
+    _torchtitan(
+        "torchtitan_ce",
+        run_torchtitan_ce,
+        setup_torchtitan_ce,
+        BOTH,
+        "torchtitan's cross-entropy loss on the full logits of `F.linear`",
+    ),
     TORCH_EAGER.as_control("torchtitan"),
 ]
 
@@ -1277,6 +1344,7 @@ IMPLEMENTATIONS = [
         verify=verify_native,
         available=compile_available,
         info={**CONTRACT, "compile": "torch.compile(fullgraph=True)"},
+        description="the eager computation under `torch.compile(fullgraph=True)`",
     ),
     Implementation(
         "torch_lce",
@@ -1287,6 +1355,7 @@ IMPLEMENTATIONS = [
         available=lce_override_available,
         packages=DSL_PACKAGES,
         info={**CONTRACT, "options": "LinearCrossEntropyOptions()"},
+        description="PyTorch's `F.linear_cross_entropy` with its CuTeDSL override",
     ),
     Implementation(
         "torch_lce_no_override",
@@ -1297,9 +1366,23 @@ IMPLEMENTATIONS = [
         available=lce_no_override_available,
         packages=DSL_PACKAGES,
         info={**CONTRACT, "options": "LinearCrossEntropyOptions()"},
+        description="PyTorch's `F.linear_cross_entropy` without the override: its eager "
+        "chunked path",
     ),
-    _liger("liger", run_liger, setup_liger, "float32"),
-    _liger("liger_native_accum", run_liger_native_accum, setup_liger_native_accum, None),
+    _liger(
+        "liger",
+        run_liger,
+        setup_liger,
+        "float32",
+        "Liger-Kernel's fused kernel, accumulating in fp32",
+    ),
+    _liger(
+        "liger_native_accum",
+        run_liger_native_accum,
+        setup_liger_native_accum,
+        None,
+        "Liger-Kernel's fused kernel with its default accumulation, `accum_dtype` unset",
+    ),
     TORCH_EAGER.as_control("liger"),
     *TORCHTITAN,
 ]
@@ -1308,10 +1391,19 @@ IMPLEMENTATIONS = [
 LCE = OpSpec(
     name="lce",
     axes=[
-        Axis("N", [1024, 2048, 4096, 8192, 16384]),
-        Axis("H", [1024, 2048, 4096, 8192]),
-        Axis("V", [32768, 65536, 131072, 262144]),
-        Axis("ignore_frac", ["0", "0.1"], kind="str"),
+        Axis(
+            "N",
+            [1024, 2048, 4096, 8192, 16384],
+            description="rows of hidden, the tokens of a batch",
+        ),
+        Axis("H", [1024, 2048, 4096, 8192], description="the hidden size"),
+        Axis("V", [32768, 65536, 131072, 262144], description="the vocabulary size"),
+        Axis(
+            "ignore_frac",
+            ["0", "0.1"],
+            kind="str",
+            description="the fraction of labels set to `ignore_index`",
+        ),
     ],
     defaults={"N": 4096, "H": 4096, "V": 131072, "ignore_frac": "0"},
     dtypes=["bfloat16", "float16", "float32"],
@@ -1340,4 +1432,8 @@ LCE = OpSpec(
     reference_fits=reference_fits,
     parity_notes=PARITY_NOTES,
     notes=NOTES,
+    description=DESCRIPTION,
+    work_units=WORK_UNITS,
+    metric_definitions=METRIC_DEFINITIONS,
+    tolerance_basis=TOLERANCE_BASIS,
 )

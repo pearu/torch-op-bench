@@ -1,3 +1,4 @@
+import dataclasses
 import io
 import os
 import subprocess
@@ -150,6 +151,29 @@ def test_run_sweep_resume_and_force(tmp_path, tests_dir):
     written, _ = sweep(tmp_path, tests_dir, ["plain"], force=True)
     assert [r["status"] for r in written] == ["ok", "ok"]
     assert len(records.merge(records.read(tmp_path))) == 4
+
+
+def test_run_sweep_records_the_modes_work(tmp_path, tests_dir):
+    # Task I1-23 Part C: the record carries work(case, mode) of its own mode; the toy
+    # op counts the same in both, a spec that counts per mode gets each count.
+    written, _ = sweep(tmp_path, tests_dir, ["plain"], modes=("fwd", "fwd_bwd"))
+    assert len(written) == 4 and {r["mode"] for r in written} == {"fwd", "fwd_bwd"}
+    for record in written:
+        case = Case.from_dict(record["case"])
+        assert (
+            record["work"]
+            == SPEC.work(case, record["mode"])
+            == {"flops": 2.0 * 16 * 4 * 4 * case.params["K"] / 4}
+        )
+    per_mode = dataclasses.replace(
+        SPEC, work=lambda case, mode: {"flops": 1.0 if mode == "fwd" else 3.0}
+    )
+    case = Case(SPEC.default_point, "float32", "cpu")
+    for mode, flops in (("fwd", 1.0), ("fwd_bwd", 3.0)):
+        payload = runner.make_payload(
+            per_mode, "toy_op:TOY", case, SPEC.implementation("plain"), mode, FAST, slug="cpu"
+        )
+        assert payload["work"] == {"flops": flops}
 
 
 def test_run_sweep_environments(tmp_path, tests_dir):
