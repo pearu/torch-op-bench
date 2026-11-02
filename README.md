@@ -679,8 +679,11 @@ quotes those numbers, not values read off a figure.
 A benchmark runs on a fresh host that has `ssh`, `git`, `curl`, `rsync`, an NVIDIA
 driver and internet access, from `scripts/remote-run.sh` on your machine. Each of its
 subcommands is one ssh session or one rsync, and all of them work in one scratch
-directory on the host (`--dir`, default `~/torch_op_bench-scratch`), outside which
-nothing is written. The five steps of a run:
+directory on the host (`--dir`, absolute or `~/…`, default
+`~/torch_op_bench-scratch`), outside which nothing is written but temporary files
+(in the session's `TMPDIR`, or `REMOTE_DIR/tmp` when it has none). For a host
+behind agent-sandbox's sandboxed login, see the subsection below. The five steps
+of a run:
 
 ```sh
 scripts/remote-run.sh HOST push        # 1. the tracked files and .git, to HOST
@@ -709,13 +712,26 @@ scripts/remote-run.sh HOST fetch       # 5. results back into results/
   --separate-git-dir`) has that directory copied, objects borrowed through
   `objects/info/alternates` (`git clone --shared`) are copied in, one rsync more
   each, and a linked worktree is refused (push from a clone). The whole repository
-  goes, `.git/config` and hooks included: a remote URL with credentials in it
-  reaches the host too, so push to a shared host from a clone without them.
+  goes, `.git/config`, every ref and the hooks included: a remote URL with
+  credentials in it reaches the host too, so push to a shared host from a clone
+  without them. A tracked file that replaced a directory of the same name, or a
+  directory that replaced a file, replaces it on the host as well (rsync's
+  `--force`, which acts only on the tracked paths: a host's ignored file inside
+  such a directory goes with it). `push --wheelhouse DIR` also copies the wheels
+  in `DIR` to `REMOTE_DIR/wheelhouse`, for a host whose proxy does not reach an
+  index, or to save the downloads: `setup` sets `PIP_FIND_LINKS` to it (pip's
+  `--find-links`, also for the pip step of `mamba env create`), keeping the
+  session's own `PIP_FIND_LINKS` after it.
 - **`bootstrap`** installs Miniforge into the scratch directory when the host has
   neither mamba nor conda. It writes `env.sh`, which puts every cache (Triton,
-  Inductor, CUDA's JIT cache, conda packages, pip) in the scratch directory. The
+  Inductor, CUDA's JIT cache, conda packages, pip) in the scratch directory, sets
+  `TMPDIR` to `REMOTE_DIR/tmp` when the session has none, and hands a proxy's CA
+  (`SSL_CERT_FILE`) to mamba and conda as `MAMBA_SSL_VERIFY` and `CONDA_SSL_VERIFY`
+  (libmamba ignores `SSL_CERT_FILE`) unless the session sets them. The
   installer and `setup` run with `HOME` in the scratch directory, since conda and
-  mamba write `~/.conda` whatever `CONDA_REGISTER_ENVS` says.
+  mamba write `~/.conda` whatever `CONDA_REGISTER_ENVS` says, so `HOME` may be
+  read-only. A download that fails (a proxy's 403) stops `bootstrap` or `setup`
+  with the URL or the environment and step that failed.
 - **`setup`** runs `scripts/setup-env.sh` for the torch environment and each of
   `--envs`. The torch environment is `--torch-env torch-nightly` (default:
   `envs/torch-nightly.yml`, a pinned nightly wheel, which carries the newest CuTeDSL
@@ -724,18 +740,28 @@ scripts/remote-run.sh HOST fetch       # 5. results back into results/
   users have. torch 2.14.1 has `F.linear_cross_entropy` but not its CuTeDSL
   override, so `torch_lce` is `unavailable` there. torch-op-bench
   runs from that environment's interpreter, so it is the `torch` environment and
-  needs no `--env torch=...`.
+  needs no `--env torch=...`. `setup --envs` writes the counterparts' names to
+  `REMOTE_DIR/envs.list`, one per line, and a `run` without `--envs` takes them
+  from there (a `setup` without `--envs`, of the other torch environment, leaves
+  the list as it was). Last, `setup` prints the host's name, `nvidia-smi` and
+  `torch-op-bench list`.
 - **`run`** starts `torch-op-bench run lce --device cuda` with `nohup` and
   `setsid`, writing to `logs/<timestamp>.log` and `results/` in the scratch
   directory, and returns at once. A dropped connection does not end it. Running the
   same `run` again (after a disconnect, or after an error) resumes: the triples
   recorded `ok` are skipped. Arguments after `--` go to `torch-op-bench run`;
-  `--gpu N` sets `CUDA_VISIBLE_DEVICES`; `--op` names another op.
+  `--gpu N` sets `CUDA_VISIBLE_DEVICES`; `--op` names another op. A counterpart
+  environment that `--envs` or `envs.list` names and `setup` did not make stops
+  the run before it starts. The log begins with the host's name,
+  `CUDA_VISIBLE_DEVICES` and `nvidia-smi -L`.
   `--matmul-reduction strict` runs the strict point into `results-strict/` instead
   (`--matmul-reduction strict --results "$D"/results-strict` on the host), e.g.
-  `run --matmul-reduction strict --envs liger,torchtitan -- --case N=4096`. Both
-  choose the results directory, so neither `--results` nor `--matmul-reduction`
-  is accepted after `--`.
+  `run --matmul-reduction strict --envs liger,torchtitan -- --case N=4096`, and
+  `--torch-env torch-stable` runs into `results-stable/` (and
+  `results-stable-strict/`): the resume and merge key holds neither the setting
+  nor the torch build, so a release run in `results/` would be skipped against the
+  nightly's records. Both choose the results directory, so neither `--results`
+  nor `--matmul-reduction` is accepted after `--`.
 
   Per GPU, the run plan is: the default sweeps (the base entries; `run` without
   `--impl` leaves the variants out), the strict point, then the variants (see
@@ -754,16 +780,88 @@ scripts/remote-run.sh HOST fetch       # 5. results back into results/
 
   The variants exist for that comparison, not to tune an entry: they never run
   along a sweep, nor under `--matmul-reduction strict`.
-- **`fetch`** copies the host's `results/`, and `results-strict/` when it has one,
-  into this checkout's `results/` and `results-strict/` without deleting anything
-  on either side (the files are append-only, with new names per run), then prints
-  the start of each fetched slug's report as a check. Commit the new files
-  yourself, one commit per host run:
-  `results/<op>/<slug>/<timestamp>-<host>.jsonl`.
-- **`shell`** opens a shell on the host in the scratch directory, with `env.sh`
-  sourced.
+- **`status`** and **`wait`** say which results directory the run writes;
+  `status` counts the records of each one on the host.
+- **`fetch`** copies each of the host's results directories (`results/`,
+  `results-strict/`, `results-stable/`, `results-stable-strict/`, those it has)
+  into this checkout's of the same name without deleting anything on either side
+  (the files are append-only, with new names per run), then says how many records
+  each slug gained and prints the start of its report as a check. While a run is
+  alive it warns: the last line of a file may be half-written, and `report` fails
+  on it until a fetch after the run. Commit the new files yourself, one commit per
+  host run: `results/<op>/<slug>/<timestamp>-<host>.jsonl`.
+- **`shell`** opens bash on the host in the scratch directory, with `env.sh`
+  sourced, from the rc file `bootstrap` writes (`REMOTE_DIR/shell.rc`): the login
+  shell, whatever it is, only runs `bash --rcfile REMOTE_DIR/shell.rc -i`. On a
+  scratch without it (never bootstrapped, or bootstrapped by an older
+  `remote-run.sh`), `shell` refuses and asks for `bootstrap`, which takes seconds
+  when Miniforge is there.
 
 `--dry-run` prints every command, local and remote, and runs none.
+
+### A host behind agent-sandbox's sandboxed login
+
+A host may serve its benchmark account through an agent-sandbox login: every
+session runs in a sandbox with one writable directory, `/tmp` a private tmpfs,
+egress only through an allowlist proxy, and the cards the policy binds (one,
+seen as GPU 0). There are two kinds:
+
+- **A login made by `asb --setup-remote ALIAS`** (from the project's
+  `[remote:ALIAS]` section, which names the host, the account, the scratch, the
+  cards and the allowed hosts). `asb --setup-remote` writes and prints the ssh
+  alias, the key, the host key and the role's `host-port` line. `HOME` is the
+  scratch (e.g. `/home/tob/tob-ey`), writable, and a session starts in it, so the
+  default `--dir ~/torch_op_bench-scratch` works as on a plain host:
+
+  ```sh
+  scripts/remote-run.sh tob-ey push
+  scripts/remote-run.sh tob-ey bootstrap   # ... as in the steps above
+  ```
+
+- **The older sshd profile**: `HOME` is an empty read-only tmpfs and the one
+  writable place is the policy's directory (e.g. `/home/tob/bench`). Give every
+  subcommand an absolute subdirectory of it, never the directory itself (the
+  policy file lives there, and `push`'s checkout goes under
+  `REMOTE_DIR/torch-op-bench`):
+
+  ```sh
+  scripts/remote-run.sh HOST push --dir /home/tob/bench/tob-scratch
+  ```
+
+Nothing in the script needs a writable `HOME` beyond `--dir` itself, so one script
+serves both. On either:
+
+- The policy must allow the workflow's hosts: `github.com` and
+  `.githubusercontent.com` (the Miniforge installer, the git pins of the
+  counterparts), `conda.anaconda.org`, `pypi.org`, `files.pythonhosted.org`,
+  `download.pytorch.org`, `download-r2.pytorch.org` (where the nightly index
+  redirects its wheels) and `pypi.nvidia.com` (the nightly's NVIDIA wheels). The
+  proxy refuses any other with a 403, which `bootstrap` and `setup` report with
+  the URL or the environment that failed. On a `--setup-remote` login the host's
+  owner adds one with `asb --apply '[remote:ALIAS]' 'allow = HOST'`, then
+  `asb --setup-remote ALIAS`.
+- No `--gpu`: the session sees only the card the policy binds, as GPU 0, and
+  cannot touch another (`CUDA_VISIBLE_DEVICES`, if the policy's `[env]` sets
+  one, passes through). The log's `nvidia-smi -L` shows it.
+- A relaunch of the login (`asb --setup-remote` again) or its `--shutdown` ends
+  every session's processes, a detached `run` included: the host's owner does
+  neither during a set.
+- Before the first `run`, a smoke test of the sandbox, in one session:
+
+  ```sh
+  ssh tob-ey 'hostname; nvidia-smi -L; touch /home/tob/x; touch /tmp/x && ls -l /tmp/x; for u in https://example.com/ https://pypi.org/simple/; do curl -s -o /dev/null -w "%{http_code} $u\n" "$u"; done'
+  ```
+
+  It should print the host's own name (`ey`, not `pasta-…`: the records carry
+  it), one card, `Read-only file system` for a path outside the writable
+  directory (`/home/tob/x`; on the older profile `$HOME/x` too), `/tmp/x` (in
+  the sandbox's private `/tmp`, not the host's), `000 https://example.com/`
+  (curl's `CONNECT tunnel failed, response 403`: a host off the list is refused)
+  and `200 https://pypi.org/simple/`.
+
+On a host without the sandbox, nothing confines a run to the scratch directory
+but the script: check it after a run with `touch MARKER` before it and
+`find ~ -newer MARKER -not -path '*/torch_op_bench-scratch/*'` after (empty).
 
 ## Tests
 

@@ -54,6 +54,11 @@ def test_syntax_and_help():
         (["tob-ex", "run", "extra"], "unexpected argument extra"),
         (["tob-ex", "run", "--matmul-reduction", "loose"], "--matmul-reduction must be"),
         (["tob-ex", "run", "--", "--results", "x"], "--results is remote-run.sh's own option"),
+        (["tob-ex", "setup", "--wheelhouse", "/"], "--wheelhouse is for push only"),
+        (
+            ["tob-ex", "push", "--wheelhouse", "/nowhere"],
+            "--wheelhouse /nowhere is not a directory",
+        ),
         (
             ["tob-ex", "run", "--", "--matmul-reduction=strict"],
             "--matmul-reduction is remote-run.sh's own option",
@@ -82,7 +87,7 @@ def test_push_dry_run(repo):
     assert rf"\&\&\ rm\ -f\ {remote_dir}/.git/objects/info/alternates\ \&\&\ rsync " in rsync
     # Then exactly the tracked files: no exclusion list to keep up to date.
     assert (
-        f"+ git -C {repo} ls-files -z | rsync -a --checksum --from0 --files-from=- "
+        f"+ git -C {repo} ls-files -z | rsync -a --force --checksum --from0 --files-from=- "
         "--ignore-missing-args "
         f"{repo}/ tob-ex:{remote_dir}/"
     ) in lines
@@ -94,7 +99,14 @@ def test_push_dry_run(repo):
         rf"--verify\ HEAD\ \>{old_head}\ " in rsync
     )
     assert "\ngit clean -fd -e /envs/.prefix/ -e /results/\n" in out
-    assert out.index("xargs -0 rm -f --") < out.index("git clean -fd")
+    assert out.index('rm -f -- "$path"') < out.index("git clean -fd")
+    assert "wheelhouse" not in out
+    wheels = repo / "wheels"
+    wheels.mkdir()
+    out = run_script(
+        "tob-ex", "push", "--dry-run", "--wheelhouse", str(wheels), script=script
+    ).stdout
+    assert f"\n+ rsync -a {wheels}/ tob-ex:torch_op_bench-scratch/wheelhouse/\n" in out
 
 
 def test_dir_option(repo):
@@ -123,6 +135,14 @@ def test_bootstrap_dry_run():
     assert "CONDA_REGISTER_ENVS=false" in out  # no ~/.conda/environments.txt
     # The installer's conda made an empty ~/.conda on ex: it gets a home of its own.
     assert 'HOME="$D/cache/home" CONDA_REGISTER_ENVS=false bash "$installer"' in out
+    # A refused download names itself rather than ending in set -e's silence.
+    assert 'curl -fsSL -o "$installer" "$url" ||' in out
+    assert 'echo "bootstrap: could not download the Miniforge installer, $url" >&2' in out
+    # The session's TMPDIR and the proxy's CA, decided when env.sh is sourced.
+    assert 'echo "if [ -z \\"\\${TMPDIR:-}\\" ]; then export TMPDIR=\\"$D/tmp\\"; fi"' in out
+    assert 'export MAMBA_SSL_VERIFY=\\"\\${MAMBA_SSL_VERIFY:-\\$SSL_CERT_FILE}\\"' in out
+    assert 'export CONDA_SSL_VERIFY=\\"\\${CONDA_SSL_VERIFY:-\\$SSL_CERT_FILE}\\"' in out
+    assert "} > shell.rc\n" in out
 
 
 def test_setup_dry_run():
@@ -130,11 +150,17 @@ def test_setup_dry_run():
     assert "for name in torch-nightly liger torchtitan liger-git; do" in out
     # mamba 2 wrote ~/.conda/environments.txt on ex: setup-env.sh gets a home of its own.
     assert 'HOME="$D"/cache/home scripts/setup-env.sh "$name" --prefix "$D"/envs' in out
-    assert "nvidia-smi" in out
+    assert "nvidia-smi" in out and 'echo "hostname: $(hostname)"' in out
     assert '"$D"/envs/torch-nightly/bin/python -m torch_op_bench.cli list lce' in out
+    # R1-15 remark 1: the counterparts, for a run without --envs; written after
+    # every environment was made.
+    assert "\nprintf '%s\\n' liger torchtitan liger-git > \"$D\"/envs.list\n" in out
+    assert out.index("done\nprintf") < out.index("hostname")
+    assert 'export PIP_FIND_LINKS="$D/wheelhouse${PIP_FIND_LINKS:+ $PIP_FIND_LINKS}"' in out
     out = dry("setup", "--torch-env", "torch-stable", "--op", "toy_op:TOY")
     assert "for name in torch-stable; do" in out
     assert "torch-stable/bin/python -m torch_op_bench.cli list toy_op:TOY" in out
+    assert "envs.list" not in out  # another torch environment: the list stays
 
 
 def test_run_dry_run():
@@ -143,10 +169,12 @@ def test_run_dry_run():
         "--case", "N=1024,H=1024,V=32768",
     )  # fmt: skip
     assert "\nexport CUDA_VISIBLE_DEVICES=1\n" in out
+    assert "\nenv_names=(liger-git)\n" in out and "envs.list" not in out
     assert (
-        "\nenv_args+=(--env \"$(awk '/^name:/ {print $2; exit}' "
-        'torch-op-bench/envs/liger-git.yml)=$D/envs/liger-git/bin/python")\n'
+        "\n    env_args+=(--env \"$(awk '/^name:/ {print $2; exit}' "
+        'torch-op-bench/envs/$name.yml)=$D/envs/$name/bin/python")\n'
     ) in out
+    assert "setup --envs $name first" in out  # a missing environment stops the run
     assert (
         'cmd=("$D"/envs/torch-nightly/bin/python -m torch_op_bench.cli run lce --device cuda '
         '--results "$D"/results "${env_args[@]}" --dtype float16 --case N=1024\\,H=1024\\,V=32768)'
@@ -154,8 +182,13 @@ def test_run_dry_run():
     assert "setsid nohup bash -c" in out and "< /dev/null &\n" in out
     assert 'echo $! > "$D"/run.pid' in out and 'log="$D/logs/' in out
     assert "a run is in progress" in out  # no second run on top of the first
-    assert "CUDA_VISIBLE_DEVICES" not in dry("run")
-    assert "--matmul-reduction" not in dry("run")  # the default: nothing passed
+    # The log's header: the host, the cards, then the command.
+    assert 'echo "# host: $(hostname)"' in out and "nvidia-smi -L 2>&1 | sed 's/^/# /'" in out
+    assert "\necho results > run.results\n" in out
+    out = dry("run")
+    assert "export CUDA_VISIBLE_DEVICES" not in out
+    assert "--matmul-reduction" not in out  # the default: nothing passed
+    assert "mapfile -t env_names < <(grep . envs.list)" in out  # no --envs: setup's
 
 
 def test_run_strict_dry_run():
@@ -167,19 +200,46 @@ def test_run_strict_dry_run():
     ) in out
 
 
+@pytest.mark.parametrize("strict", [False, True])
+def test_run_stable_dry_run(strict):
+    """The release's records go apart from the nightly's: the resume and merge key
+    holds no build."""
+    name = "results-stable-strict" if strict else "results-stable"
+    out = dry("run", "--torch-env", "torch-stable", *(["--matmul-reduction", "strict"] * strict))
+    assert f"\nmkdir -p logs {name}\n" in out and f"\necho {name} > run.results\n" in out
+    assert (
+        'cmd=("$D"/envs/torch-stable/bin/python -m torch_op_bench.cli run lce --device cuda '
+        f'--results "$D"/{name}'
+    ) in out
+
+
+RESULTS = ("results", "results-strict", "results-stable", "results-stable-strict")
+
+
 def test_status_wait_fetch_shell_dry_run():
     out = dry("status")
     assert "tail -n 20" in out and "-m torch_op_bench.remote count" in out
+    assert f"\nfor name in {' '.join(RESULTS)}; do\n" in out
+    assert 'echo "running: pid $(cat run.pid), into $into/"' in out
     out = dry("wait")
     assert 'tail -n +1 -f --pid="$pid"' in out and 'exit "$status"' in out
+    assert "(records into $D/$into/)" in out
     out = dry("fetch")
-    assert out == "".join(
+    warning, rsyncs = out.split("\nREMOTE\n")
+    assert "WARNING: a run is in progress" in warning  # R1-15 remark 2
+    assert rsyncs == "".join(
         f"+ rsync -ai --ignore-missing-args tob-ex:torch_op_bench-scratch/{name} {ROOT}/\n"
-        for name in ("results", "results-strict")
+        for name in RESULTS
     )
     assert "--delete" not in out  # never deletes on the remote, nor locally
-    out = dry("shell")
-    assert out.startswith("+ ssh -t tob-ex bash\\ -c\\ ") and "source\\\\\\ env.sh" in out
+    # R1-15 remark 7: three plain words for whatever login shell, bash does the rest,
+    # after a check under bash -s that the rc file is there (R1-53 F1).
+    check, login = dry("shell").split("\nREMOTE\n")
+    assert check.startswith("+ ssh tob-ex bash -s <<'REMOTE'\n")
+    assert "[ -f shell.rc ] || {" in check
+    assert login == "+ ssh -t tob-ex bash --rcfile torch_op_bench-scratch/shell.rc -i\n"
+    out = dry("shell", "--dir", "/home/tob/bench/tob-scratch").split("\nREMOTE\n")[1]
+    assert out == "+ ssh -t tob-ex bash --rcfile /home/tob/bench/tob-scratch/shell.rc -i\n"
 
 
 @pytest.fixture
@@ -573,11 +633,12 @@ def test_remote_side_end_to_end(fake_host, repo, tests_dir):
     # Two records: the toy op's two default dtypes; RUN-ARGS' --device cpu wins.
     assert "2 new records (2 ok)" in out and "the run exited with status 0" in out, out[-700:]
     out = call("status")
-    assert "not running: the last run exited with status 0" in out
-    assert "toy/cpu: 2 records (2 ok)" in out
+    assert "not running: the last run exited with status 0, into results/" in out
+    assert "== records in results/\ntoy/cpu: 2 records (2 ok)" in out
     out = call("fetch", "--op", "toy")
     fetched = list((repo / "results" / "toy" / "cpu").glob("*.jsonl"))
-    assert len(fetched) == 1 and "== results/toy/cpu" in out and "# Report: toy on cpu" in out
+    assert len(fetched) == 1 and "# Report: toy on cpu" in out
+    assert "== results/toy/cpu: 2 new records\n" in out
     assert not (repo / "results-strict").exists()  # none on the host: skipped
     # A rerun of the same run resumes: the recorded ok triples are skipped.
     call("run", "--op", "toy_op:TOY", *run_args)
@@ -589,5 +650,246 @@ def test_remote_side_end_to_end(fake_host, repo, tests_dir):
     assert "2 new records (2 ok)" in out and "results-strict/toy/cpu/" in out, out[-700:]
     out = call("fetch", "--op", "toy")
     (strict,) = (repo / "results-strict" / "toy" / "cpu").glob("*.jsonl")
-    assert "== results-strict/toy/cpu" in out and "== results/toy/cpu" not in out
+    assert "== results-strict/toy/cpu: 2 new records\n" in out and "== results/" not in out
     assert all(r["settings"]["matmul_reduction"] == "strict" for r in records.read(strict))
+
+
+def test_push_a_tracked_file_and_a_directory_trade_places(fake_host, repo):
+    """R1-17's remark: a tracked file that replaces a directory of the same name
+    replaces it on the host, also when the host's directory holds an ignored file;
+    and the other way round."""
+    env, home = fake_host
+    script = repo / "scripts" / "remote-run.sh"
+    checkout = home / "torch_op_bench-scratch" / "torch-op-bench"
+    (repo / "p").mkdir()
+    (repo / "p" / "a.py").write_text("a = 1\n")
+    (repo / "q").write_text("a file\n")
+    (repo / ".gitignore").write_text("__pycache__/\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "p/ a directory, q a file")
+    proc = run_script("fakehost", "push", script=script, env=env)
+    assert proc.returncode == 0, proc.stderr
+    (checkout / "p" / "__pycache__").mkdir()
+    (checkout / "p" / "__pycache__" / "a.pyc").write_text("the host's own\n")
+
+    _git(repo, "rm", "-q", "-r", "p", "q")
+    (repo / "p").write_text("now a file\n")
+    (repo / "q").mkdir()
+    (repo / "q" / "b.py").write_text("b = 1\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "p a file, q/ a directory")
+    proc = run_script("fakehost", "push", script=script, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert (checkout / "p").read_text() == "now a file\n"
+    assert (checkout / "q" / "b.py").read_text() == "b = 1\n"
+    assert _files(checkout) == sorted(_git(repo, "ls-files").split())
+    assert _git(checkout, "status", "--porcelain", "--untracked-files=no") == ""
+
+
+# A conda (and mamba) for setup: `env create|update --file F --prefix P` makes P/bin/python,
+# which stands in pip and runs everything else with this interpreter; a definition
+# named refused.yml fails as a proxy's refusal does. Each call says what it saw.
+STUB_CONDA = """#!/bin/sh
+echo "$(basename "$0") $1 $2 HOME=$HOME PIP_FIND_LINKS=${PIP_FIND_LINKS:-}" >&2
+while [ $# -gt 0 ]; do
+    case "$1" in --prefix) prefix="$2"; shift ;; --file) file="$2"; shift ;; esac
+    shift
+done
+[ -n "${file:-}" ] || exit 0
+case "$file" in
+    */refused.yml)
+        echo "CONNECT tunnel failed, response 403: https://conda.anaconda.org/x" >&2
+        exit 1 ;;
+esac
+mkdir -p "$prefix/bin"
+cat > "$prefix/bin/python" <<PY
+#!/bin/sh
+if [ "\\$1 \\$2" = "-m pip" ]; then
+    echo "pip \\$* PIP_FIND_LINKS=\\${PIP_FIND_LINKS:-}" >&2
+    exit 0
+fi
+exec PYTHON "\\$@"
+PY
+chmod +x "$prefix/bin/python"
+"""
+
+
+@pytest.fixture(params=["sshd-profile", "setup-remote"])
+def profile_host(request, tmp_path, repo, tests_dir):
+    """A fake host behind agent-sandbox's sandboxed login, of either kind: the older
+    sshd profile (HOME read-only, one writable directory elsewhere, an absolute
+    --dir) or a login made by `asb --setup-remote` (HOME the one writable directory,
+    in a read-only parent; the default --dir). Both with a proxy's CA in
+    SSL_CERT_FILE and no TMPDIR (env.sh then makes one). The checkout has
+    setup-env.sh and environment definitions. Returns (environment, the scratch
+    directory, run)."""
+    if request.param == "sshd-profile":
+        home = tmp_path / "remote-home"
+        read_only = home
+        bench = tmp_path / "bench"
+        bench.mkdir()
+        scratch = bench / "tob-scratch"
+        dir_args = ("--dir", str(scratch))
+    else:
+        read_only = tmp_path / "remote-home"
+        home = read_only / "tob-ey"
+        scratch = home / "torch_op_bench-scratch"
+        dir_args = ()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "ssh").write_text(
+        "#!/bin/sh\n"
+        'while [ $# -gt 0 ]; do case "$1" in -l|-p|-e) shift ;; -*) ;; *) break ;; esac; '
+        "shift; done\n"
+        "shift\n"
+        f'export HOME="{home}"\n'
+        'cd "$HOME" && exec /bin/sh -c "$*"\n'
+    )
+    for name in ("conda", "mamba"):
+        (bin_dir / name).write_text(STUB_CONDA.replace("PYTHON", sys.executable))
+    for path in bin_dir.iterdir():
+        path.chmod(0o755)
+    shutil.copy(ROOT / "scripts" / "setup-env.sh", repo / "scripts")
+    (repo / "envs").mkdir()
+    for name, defined in [("torch-nightly", "torch"), ("liger", "liger"), ("refused", "x")]:
+        (repo / "envs" / f"{name}.yml").write_text(
+            f"name: {defined}\ndependencies:\n  - pip:\n      - pkg==1.0\n"
+        )
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "setup")
+    home.mkdir(parents=True)
+    read_only.chmod(0o555)
+    if os.access(read_only, os.W_OK):
+        pytest.skip("a read-only directory is writable here (root)")
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("CONDA", "MAMBA", "PIP_")) and k != "TMPDIR"
+    }
+    env["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
+    env["PYTHON"] = sys.executable
+    env["PYTHONPATH"] = f"{ROOT}:{tests_dir}"
+    env["SSL_CERT_FILE"] = "/the/proxy/ca.pem"
+    script = repo / "scripts" / "remote-run.sh"
+
+    def run(subcommand, *args, check=True, input=None):
+        # --dir before any `--`, after which it would be a RUN-ARG.
+        args = ("fakehost", subcommand, *dir_args, *args)
+        proc = run_script(*args, script=script, env=env, input=input)
+        if check:
+            assert proc.returncode == 0, (args, proc.stdout, proc.stderr)
+        return proc
+
+    yield env, scratch, run
+    read_only.chmod(0o755)
+
+
+def test_profile_host_end_to_end(profile_host, repo, tmp_path, tests_dir):
+    """The whole workflow on either kind of login: nothing needs a writable home
+    but --dir's own expansion; env.sh makes TMPDIR and hands the CA to mamba and conda; setup
+    lists its counterparts in envs.list, and run without --envs passes them; fetch
+    says what each slug gained."""
+    env, scratch, run = profile_host
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    (wheels / "pkg-1.0-py3-none-any.whl").write_text("a wheel\n")
+
+    run("push", "--wheelhouse", str(wheels))
+    assert (scratch / "wheelhouse" / "pkg-1.0-py3-none-any.whl").read_text() == "a wheel\n"
+    run("bootstrap")
+    probe = 'echo "tmp=$TMPDIR mamba=$MAMBA_SSL_VERIFY conda=$CONDA_SSL_VERIFY"; exit\n'
+    proc = run("shell", input=probe)
+    assert f"tmp={scratch}/tmp mamba=/the/proxy/ca.pem conda=/the/proxy/ca.pem" in proc.stdout
+    assert (scratch / "tmp").is_dir()
+
+    proc = run("setup", "--envs", "liger", "--op", "toy_op:TOY")
+    out, err = proc.stdout, proc.stderr
+    # Every environment made with HOME in the scratch and the wheelhouse searched.
+    wheelhouse = f"PIP_FIND_LINKS={scratch}/wheelhouse"
+    for name in ("torch-nightly", "liger"):
+        assert f"creating {scratch}/envs/{name} from" in err
+    assert f"mamba env create HOME={scratch}/cache/home {wheelhouse}\n" in err
+    assert f"pip -m pip install --quiet -e {scratch}/torch-op-bench {wheelhouse}\n" in err
+    assert (scratch / "envs.list").read_text() == "liger\n"
+    assert "envs.list: liger\n" in out and f"hostname: {os.uname().nodename}\n" in out
+    assert "plain" in out  # list toy_op:TOY, from the torch environment
+
+    run_args = [
+        "--", "--device", "cpu", "--pythonpath", str(tests_dir), "--impl", "plain",
+        "--mode", "fwd", "--case", "M=8,K=4,N=4,layout=contiguous", "--warmup", "1",
+        "--repeat", "2",
+    ]  # fmt: skip
+    out = run("run", "--op", "toy_op:TOY", *run_args).stdout
+    assert "the environments of envs.list: liger\n" in out
+    out = run("wait").stdout
+    assert f"(records into {scratch}/results/)" in out
+    assert "2 new records (2 ok)" in out and "the run exited with status 0" in out, out[-700:]
+    (log,) = (scratch / "logs").glob("*.log")
+    header = log.read_text().splitlines()
+    assert header[0] == f"# host: {os.uname().nodename}"
+    assert header[1].startswith("# CUDA_VISIBLE_DEVICES: ")
+    assert f" --env liger={scratch}/envs/liger/bin/python " in log.read_text()
+    out = run("fetch", "--op", "toy").stdout
+    assert "== results/toy/cpu: 2 new records\n" in out
+    out = run("fetch", "--op", "toy").stdout  # nothing new: no report
+    assert "new records" not in out and "# Report" not in out
+
+    # A listed environment that is not there stops the run before it starts.
+    (scratch / "envs.list").write_text("liger\nmissing\n")
+    proc = run("run", "--op", "toy_op:TOY", *run_args, check=False)
+    assert proc.returncode == 1
+    assert f"no environment missing in {scratch}/envs: setup --envs missing first" in proc.stderr
+    assert not (scratch / "run.pid").read_text().strip() == ""  # the first run's, kept
+
+
+def test_profile_host_setup_names_what_failed(profile_host):
+    """A definition whose host the proxy refuses: setup stops there, naming the
+    environment and the step, and lists no counterparts."""
+    env, scratch, run = profile_host
+    run("push")
+    run("bootstrap")
+    proc = run("setup", "--envs", "refused,liger", check=False)
+    assert proc.returncode == 1
+    assert "CONNECT tunnel failed, response 403" in proc.stderr
+    assert "setup-env.sh: refused: failed (status 1): " in proc.stderr
+    assert "setup: the environment refused failed: the step and its error are above" in (
+        proc.stderr
+    )
+    assert "creating" not in proc.stderr.split("refused: failed")[1]  # liger not tried
+    assert not (scratch / "envs.list").exists()
+
+
+def test_fetch_warns_while_a_run_is_alive(fake_host, repo):
+    """R1-15 remark 2: a fetch during a run says so (and still fetches)."""
+    env, home = fake_host
+    scratch = home / "torch_op_bench-scratch"
+    (scratch / "results" / "toy" / "cpu").mkdir(parents=True)
+    (scratch / "results" / "toy" / "cpu" / "r.jsonl").write_text('{"half": ')
+    sleeper = subprocess.Popen(["sleep", "60"])
+    try:
+        (scratch / "run.pid").write_text(f"{sleeper.pid}\n")
+        proc = run_script(
+            "fakehost", "fetch", "--op", "toy", script=repo / "scripts" / "remote-run.sh", env=env
+        )
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+    assert proc.returncode == 0, proc.stderr
+    assert f"WARNING: a run is in progress (pid {sleeper.pid}): the last line" in proc.stderr
+    assert (repo / "results" / "toy" / "cpu" / "r.jsonl").exists()
+
+
+def test_shell_refuses_without_its_rc_file(fake_host, repo):
+    """R1-53 F1: on a scratch without shell.rc (bootstrapped by an older script, or
+    never), shell says to run bootstrap instead of opening a bash without env.sh."""
+    env, home = fake_host
+    scratch = home / "torch_op_bench-scratch"
+    scratch.mkdir()
+    (scratch / "env.sh").write_text("export OLD_ENV_SH=sourced\n")  # an older bootstrap's
+    proc = run_script(
+        "fakehost", "shell", script=repo / "scripts" / "remote-run.sh", env=env,
+        input='echo "pwd=$PWD env=${OLD_ENV_SH:-NOT-SOURCED}"; exit\n',
+    )  # fmt: skip
+    assert proc.returncode == 1
+    assert f"no shell.rc in {scratch}: run bootstrap" in proc.stderr
+    assert "pwd=" not in proc.stdout  # no bash was started
