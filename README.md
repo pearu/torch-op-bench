@@ -682,8 +682,8 @@ subcommands is one ssh session or one rsync, and all of them work in one scratch
 directory on the host (`--dir`, absolute or `~/…`, default
 `~/torch_op_bench-scratch`), outside which nothing is written but temporary files
 (in the session's `TMPDIR`, or `REMOTE_DIR/tmp` when it has none). For a host
-behind agent-sandbox's sshd profile, see the subsection below. The five steps of a
-run:
+behind agent-sandbox's sandboxed login, see the subsection below. The five steps
+of a run:
 
 ```sh
 scripts/remote-run.sh HOST push        # 1. the tracked files and .git, to HOST
@@ -796,53 +796,65 @@ scripts/remote-run.sh HOST fetch       # 5. results back into results/
 
 `--dry-run` prints every command, local and remote, and runs none.
 
-### A host behind agent-sandbox's sshd profile
+### A host behind agent-sandbox's sandboxed login
 
-A host may serve its benchmark account through agent-sandbox's sshd profile: every
-session runs in a sandbox whose one writable path is the policy's directory
-(here `/home/tob/bench`), with `HOME` an empty read-only tmpfs, `/tmp` a private
-tmpfs, egress only through an allowlist proxy, and the cards the policy binds
-(one, seen as GPU 0). The workflow is the same, with an alias and an absolute
-`--dir`:
+A host may serve its benchmark account through an agent-sandbox login: every
+session runs in a sandbox with one writable directory, `/tmp` a private tmpfs,
+egress only through an allowlist proxy, and the cards the policy binds (one,
+seen as GPU 0). There are two kinds:
 
-```
-Host tob-ex                  # in ~/.ssh/config
-    HostName ex              # 127.0.0.1 for the host you are on (the role's
-    Port 2222                #   agent-sandbox policy then needs [net] host-port = 2222)
-    User tob
-    IdentityFile ~/.ssh/tob_bench
-```
+- **A login made by `asb --setup-remote ALIAS`** (from the project's
+  `[remote:ALIAS]` section, which names the host, the account, the scratch, the
+  cards and the allowed hosts). `asb --setup-remote` writes and prints the ssh
+  alias, the key, the host key and the role's `host-port` line. `HOME` is the
+  scratch (e.g. `/home/tob/tob-ey`), writable, and a session starts in it, so the
+  default `--dir ~/torch_op_bench-scratch` works as on a plain host:
 
-```sh
-scripts/remote-run.sh tob-ex push --dir /home/tob/bench/tob-scratch
-scripts/remote-run.sh tob-ex bootstrap --dir /home/tob/bench/tob-scratch
-# ... every subcommand with the same --dir
-```
+  ```sh
+  scripts/remote-run.sh tob-ey push
+  scripts/remote-run.sh tob-ey bootstrap   # ... as in the steps above
+  ```
 
-- `--dir` is a subdirectory of the writable path, never the path itself: the
+- **The older sshd profile**: `HOME` is an empty read-only tmpfs and the one
+  writable place is the policy's directory (e.g. `/home/tob/bench`). Give every
+  subcommand an absolute subdirectory of it, never the directory itself (the
   policy file lives there, and `push`'s checkout goes under
-  `REMOTE_DIR/torch-op-bench`.
-- The policy's `[allow]` must hold the workflow's hosts: `github.com` and
+  `REMOTE_DIR/torch-op-bench`):
+
+  ```sh
+  scripts/remote-run.sh tob-ex push --dir /home/tob/bench/tob-scratch
+  ```
+
+Nothing in the script needs a writable `HOME` beyond `--dir` itself, so one script
+serves both. On either:
+
+- The policy must allow the workflow's hosts: `github.com` and
   `.githubusercontent.com` (the Miniforge installer, the git pins of the
-  counterparts), `conda.anaconda.org`, `pypi.org`, `files.pythonhosted.org` and
-  `download.pytorch.org`. The proxy refuses any other with a 403, which `bootstrap`
-  and `setup` report with the URL or the environment that failed.
+  counterparts), `conda.anaconda.org`, `pypi.org`, `files.pythonhosted.org`,
+  `download.pytorch.org`, `download-r2.pytorch.org` (where the nightly index
+  redirects its wheels) and `pypi.nvidia.com` (the nightly's NVIDIA wheels). The
+  proxy refuses any other with a 403, which `bootstrap` and `setup` report with
+  the URL or the environment that failed. On a `--setup-remote` login the host's
+  owner adds one with `asb --apply '[remote:ALIAS]' 'allow = HOST'`, then
+  `asb --setup-remote ALIAS`.
 - No `--gpu`: the session sees only the card the policy binds, as GPU 0, and
   cannot touch another (`CUDA_VISIBLE_DEVICES`, if the policy's `[env]` sets
   one, passes through). The log's `nvidia-smi -L` shows it.
-- The sandbox's `--shutdown` ends every session's processes, a detached `run`
-  included: the host's owner does not shut it down during a set.
+- A relaunch of the login (`asb --setup-remote` again) or its `--shutdown` ends
+  every session's processes, a detached `run` included: the host's owner does
+  neither during a set.
 - Before the first `run`, a smoke test of the sandbox, in one session:
 
   ```sh
-  ssh tob-ex 'hostname; nvidia-smi -L; touch "$HOME/x"; touch /tmp/x && ls -l /tmp/x; for u in https://example.com/ https://pypi.org/simple/; do curl -s -o /dev/null -w "%{http_code} $u\n" "$u"; done'
+  ssh tob-ey 'hostname; nvidia-smi -L; touch /home/tob/x; touch /tmp/x && ls -l /tmp/x; for u in https://example.com/ https://pypi.org/simple/; do curl -s -o /dev/null -w "%{http_code} $u\n" "$u"; done'
   ```
 
-  It should print the host's own name (`ex`, not `pasta-…`: the records carry
-  it), one card, `Read-only file system` for `$HOME/x`, `/tmp/x` (in the
-  sandbox's private `/tmp`, not the host's), `000 https://example.com/` (curl's
-  `CONNECT tunnel failed, response 403`: a host off the list is refused) and
-  `200 https://pypi.org/simple/`.
+  It should print the host's own name (`ey`, not `pasta-…`: the records carry
+  it), one card, `Read-only file system` for a path outside the writable
+  directory (`/home/tob/x`; on the older profile `$HOME/x` too), `/tmp/x` (in
+  the sandbox's private `/tmp`, not the host's), `000 https://example.com/`
+  (curl's `CONNECT tunnel failed, response 403`: a host off the list is refused)
+  and `200 https://pypi.org/simple/`.
 
 On a host without the sandbox, nothing confines a run to the scratch directory
 but the script: check it after a run with `touch MARKER` before it and

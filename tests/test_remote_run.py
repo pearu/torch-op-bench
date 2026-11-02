@@ -710,15 +710,27 @@ chmod +x "$prefix/bin/python"
 """
 
 
-@pytest.fixture
-def profile_host(tmp_path, repo, tests_dir):
-    """A fake host as agent-sandbox's sshd profile makes one: HOME read-only, one
-    writable directory, a proxy's CA in SSL_CERT_FILE and no TMPDIR (a plain host's
-    session has none; env.sh then makes one). The checkout has setup-env.sh and
-    environment definitions. Returns (environment, the writable directory, run)."""
-    home = tmp_path / "remote-home"
-    bench = tmp_path / "bench"
-    bench.mkdir()
+@pytest.fixture(params=["sshd-profile", "setup-remote"])
+def profile_host(request, tmp_path, repo, tests_dir):
+    """A fake host behind agent-sandbox's sandboxed login, of either kind: the older
+    sshd profile (HOME read-only, one writable directory elsewhere, an absolute
+    --dir) or a login made by `asb --setup-remote` (HOME the one writable directory,
+    in a read-only parent; the default --dir). Both with a proxy's CA in
+    SSL_CERT_FILE and no TMPDIR (env.sh then makes one). The checkout has
+    setup-env.sh and environment definitions. Returns (environment, the scratch
+    directory, run)."""
+    if request.param == "sshd-profile":
+        home = tmp_path / "remote-home"
+        read_only = home
+        bench = tmp_path / "bench"
+        bench.mkdir()
+        scratch = bench / "tob-scratch"
+        dir_args = ("--dir", str(scratch))
+    else:
+        read_only = tmp_path / "remote-home"
+        home = read_only / "tob-ey"
+        scratch = home / "torch_op_bench-scratch"
+        dir_args = ()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "ssh").write_text(
@@ -741,9 +753,9 @@ def profile_host(tmp_path, repo, tests_dir):
         )
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "setup")
-    home.mkdir()
-    home.chmod(0o555)
-    if os.access(home, os.W_OK):
+    home.mkdir(parents=True)
+    read_only.chmod(0o555)
+    if os.access(read_only, os.W_OK):
         pytest.skip("a read-only directory is writable here (root)")
     env = {
         k: v
@@ -754,24 +766,23 @@ def profile_host(tmp_path, repo, tests_dir):
     env["PYTHON"] = sys.executable
     env["PYTHONPATH"] = f"{ROOT}:{tests_dir}"
     env["SSL_CERT_FILE"] = "/the/proxy/ca.pem"
-    scratch = bench / "tob-scratch"
     script = repo / "scripts" / "remote-run.sh"
 
-    def run(subcommand, *args, check=True):
+    def run(subcommand, *args, check=True, input=None):
         # --dir before any `--`, after which it would be a RUN-ARG.
-        args = ("fakehost", subcommand, "--dir", str(scratch), *args)
-        proc = run_script(*args, script=script, env=env)
+        args = ("fakehost", subcommand, *dir_args, *args)
+        proc = run_script(*args, script=script, env=env, input=input)
         if check:
             assert proc.returncode == 0, (args, proc.stdout, proc.stderr)
         return proc
 
     yield env, scratch, run
-    home.chmod(0o755)
+    read_only.chmod(0o755)
 
 
 def test_profile_host_end_to_end(profile_host, repo, tmp_path, tests_dir):
-    """The whole workflow with HOME read-only and an absolute --dir: nothing needs
-    a writable home; env.sh makes TMPDIR and hands the CA to mamba and conda; setup
+    """The whole workflow on either kind of login: nothing needs a writable home
+    but --dir's own expansion; env.sh makes TMPDIR and hands the CA to mamba and conda; setup
     lists its counterparts in envs.list, and run without --envs passes them; fetch
     says what each slug gained."""
     env, scratch, run = profile_host
@@ -783,10 +794,7 @@ def test_profile_host_end_to_end(profile_host, repo, tmp_path, tests_dir):
     assert (scratch / "wheelhouse" / "pkg-1.0-py3-none-any.whl").read_text() == "a wheel\n"
     run("bootstrap")
     probe = 'echo "tmp=$TMPDIR mamba=$MAMBA_SSL_VERIFY conda=$CONDA_SSL_VERIFY"; exit\n'
-    proc = run_script(
-        "fakehost", "shell", "--dir", str(scratch), script=repo / "scripts" / "remote-run.sh",
-        env=env, input=probe,
-    )  # fmt: skip
+    proc = run("shell", input=probe)
     assert f"tmp={scratch}/tmp mamba=/the/proxy/ca.pem conda=/the/proxy/ca.pem" in proc.stdout
     assert (scratch / "tmp").is_dir()
 
