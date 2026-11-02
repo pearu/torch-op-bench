@@ -822,7 +822,7 @@ seen as GPU 0). There are two kinds:
   `REMOTE_DIR/torch-op-bench`):
 
   ```sh
-  scripts/remote-run.sh tob-ex push --dir /home/tob/bench/tob-scratch
+  scripts/remote-run.sh HOST push --dir /home/tob/bench/tob-scratch
   ```
 
 Nothing in the script needs a writable `HOME` beyond `--dir` itself, so one script
