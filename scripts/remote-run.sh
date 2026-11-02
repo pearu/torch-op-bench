@@ -551,6 +551,10 @@ cmd_shell() {
     # stays the terminal. The path is relative to the home for ~/..., where ssh
     # starts.
     local script
+    # bash starts silently without a missing rc file, outside the scratch and with
+    # no env.sh: refuse instead (a scratch bootstrapped before shell.rc, or never).
+    remote '[ -f shell.rc ] || { echo "remote-run.sh: no shell.rc in $D: run bootstrap" \
+    "(again, on a scratch bootstrapped before it wrote shell.rc)" >&2; exit 1; }'
     script="bash --rcfile $(printf '%q' "$rsync_dir/shell.rc") -i"
     printf '+ ssh -t %q %s\n' "$host" "$script"
     if ((!dry_run)); then

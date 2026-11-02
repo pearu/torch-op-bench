@@ -232,9 +232,13 @@ def test_status_wait_fetch_shell_dry_run():
         for name in RESULTS
     )
     assert "--delete" not in out  # never deletes on the remote, nor locally
-    # R1-15 remark 7: three plain words for whatever login shell, bash does the rest.
-    assert dry("shell") == "+ ssh -t tob-ex bash --rcfile torch_op_bench-scratch/shell.rc -i\n"
-    out = dry("shell", "--dir", "/home/tob/bench/tob-scratch")
+    # R1-15 remark 7: three plain words for whatever login shell, bash does the rest,
+    # after a check under bash -s that the rc file is there (R1-53 F1).
+    check, login = dry("shell").split("\nREMOTE\n")
+    assert check.startswith("+ ssh tob-ex bash -s <<'REMOTE'\n")
+    assert "[ -f shell.rc ] || {" in check
+    assert login == "+ ssh -t tob-ex bash --rcfile torch_op_bench-scratch/shell.rc -i\n"
+    out = dry("shell", "--dir", "/home/tob/bench/tob-scratch").split("\nREMOTE\n")[1]
     assert out == "+ ssh -t tob-ex bash --rcfile /home/tob/bench/tob-scratch/shell.rc -i\n"
 
 
@@ -873,3 +877,19 @@ def test_fetch_warns_while_a_run_is_alive(fake_host, repo):
     assert proc.returncode == 0, proc.stderr
     assert f"WARNING: a run is in progress (pid {sleeper.pid}): the last line" in proc.stderr
     assert (repo / "results" / "toy" / "cpu" / "r.jsonl").exists()
+
+
+def test_shell_refuses_without_its_rc_file(fake_host, repo):
+    """R1-53 F1: on a scratch without shell.rc (bootstrapped by an older script, or
+    never), shell says to run bootstrap instead of opening a bash without env.sh."""
+    env, home = fake_host
+    scratch = home / "torch_op_bench-scratch"
+    scratch.mkdir()
+    (scratch / "env.sh").write_text("export OLD_ENV_SH=sourced\n")  # an older bootstrap's
+    proc = run_script(
+        "fakehost", "shell", script=repo / "scripts" / "remote-run.sh", env=env,
+        input='echo "pwd=$PWD env=${OLD_ENV_SH:-NOT-SOURCED}"; exit\n',
+    )  # fmt: skip
+    assert proc.returncode == 1
+    assert f"no shell.rc in {scratch}: run bootstrap" in proc.stderr
+    assert "pwd=" not in proc.stdout  # no bash was started

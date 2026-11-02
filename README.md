@@ -792,7 +792,10 @@ scripts/remote-run.sh HOST fetch       # 5. results back into results/
   host run: `results/<op>/<slug>/<timestamp>-<host>.jsonl`.
 - **`shell`** opens bash on the host in the scratch directory, with `env.sh`
   sourced, from the rc file `bootstrap` writes (`REMOTE_DIR/shell.rc`): the login
-  shell, whatever it is, only runs `bash --rcfile REMOTE_DIR/shell.rc -i`.
+  shell, whatever it is, only runs `bash --rcfile REMOTE_DIR/shell.rc -i`. On a
+  scratch without it (never bootstrapped, or bootstrapped by an older
+  `remote-run.sh`), `shell` refuses and asks for `bootstrap`, which takes seconds
+  when Miniforge is there.
 
 `--dry-run` prints every command, local and remote, and runs none.
 
