@@ -43,11 +43,11 @@ def test_figures_and_backend(synth, tmp_path):
     import matplotlib
 
     assert matplotlib.get_backend().lower() == "agg"
-    # 4 swept axes x 3.8 in wide; 4 metrics x 2.8 in, plus the title, legend and
+    # 4 swept axes x 3.8 in wide; 3 metrics x 2.8 in, plus the title, legend and
     # footer bands (measured: test_gaps_between_bands), high; at 150 dpi.
     width, height = png_size(tmp_path / "out" / "grid-fwd_bwd.png")
     assert width == 4 * 3.8 * 150
-    assert 4 * 2.8 * 150 < height < (4 * 2.8 + 1.2) * 150
+    assert 3 * 2.8 * 150 < height < (3 * 2.8 + 1.2) * 150
     for path in written:
         assert path.with_suffix(".csv").exists()
 
@@ -57,7 +57,10 @@ def test_grid_csv_is_what_was_drawn(synth, tmp_path):
     rows = read_csv(tmp_path / "grid-fwd_bwd.csv")
     metrics = list(dict.fromkeys(r["metric"] for r in rows))
     # The synthetic op has no grad_hidden metric: its first parity metric is drawn.
-    assert metrics == ["median_ms", "tokens_per_s", "peak_above_baseline", "parity_grad_rel"]
+    # tokens/s is not drawn by default although the rows have it (Task I1-28): at a
+    # point every implementation has the same tokens, so it is the time inverted.
+    assert any(r.get("tokens_per_s") for r in analysis.to_rows(load_quiet(synth)))
+    assert metrics == ["median_ms", "peak_above_baseline", "parity_grad_rel"]
     medians = [r for r in rows if r["metric"] == "median_ms"]
     for r in medians:
         params = {**S.DEFAULT, r["axis"]: type(S.DEFAULT[r["axis"]])(r["x"])}
@@ -486,6 +489,29 @@ def test_cli(synth, tmp_path, capsys, monkeypatch):
     with pytest.raises(SystemExit):
         cli.main(argv)
     assert "install torch-op-bench[plot]" in capsys.readouterr().err
+
+
+def test_tokens_per_s_when_named(synth, tmp_path, monkeypatch):
+    # Task I1-28: tokens/s left the default grid, and --metric still draws it, with
+    # its label, in the row it is named in.
+    import matplotlib.pyplot as plt
+
+    close = plt.close
+    closed = []
+    monkeypatch.setattr(plt, "close", closed.append)
+    argv = ["plot", str(synth), "--out", str(tmp_path), "--baseline", "base"]
+    argv += ["--dtype", "float32", "--mode", "fwd", "--sweep", "M"]
+    with pytest.warns(UserWarning):
+        assert cli.main([*argv, "--metric", "median_ms", "--metric", "tokens_per_s"]) == 0
+    monkeypatch.undo()
+    rows = read_csv(tmp_path / "grid-fwd.csv")
+    assert list(dict.fromkeys(r["metric"] for r in rows)) == ["median_ms", "tokens_per_s"]
+    assert all(float(r["y"]) > 0 for r in rows if r["metric"] == "tokens_per_s")
+    grid = closed[0]
+    labels = [ax.yaxis.label.get_text() for ax in grid.axes if ax.get_ylabel()]
+    for fig in closed:
+        close(fig)
+    assert len(labels) == 2 and labels[1].startswith("tokens/s"), labels
 
 
 def test_no_sweep(synth, tmp_path):

@@ -168,17 +168,14 @@ def known_metrics(rows: Sequence[Row]) -> list[str]:
 
 
 def default_metrics(rows: Sequence[Row], mode: str) -> list[str]:
-    """median, tokens/s when present, peak above baseline, and one parity metric: the
-    op's ``grad_hidden`` (fwd_bwd) or ``loss`` (fwd) error when it has one, else its
-    first parity metric."""
+    """median, peak above baseline, and one parity metric: the op's ``grad_hidden``
+    (fwd_bwd) or ``loss`` (fwd) error when it has one, else its first parity metric.
 
-    def present(name: str) -> bool:
-        return any(row.get(name) is not None for row in rows)
+    No throughput: at a point every implementation does the same work, so its rate is
+    the median time inverted. ``tokens_per_s`` and the other metrics are drawn when
+    named (``--metric``)."""
 
-    metrics = ["median_ms"]
-    if present("tokens_per_s"):
-        metrics.append("tokens_per_s")
-    metrics.append("peak_above_baseline")
+    metrics = ["median_ms", "peak_above_baseline"]
     parity = [m for m in known_metrics(rows) if m.startswith(analysis.PARITY_PREFIX)]
     preferred = DEFAULT_PARITY[mode]
     if preferred in parity:

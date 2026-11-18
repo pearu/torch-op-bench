@@ -618,9 +618,10 @@ baseline's controls (section 4) still compare time and peak separately.
 is needed) writes PNGs at 150 dpi, per mode (and per dtype, as `-<dtype>`, when the
 results hold several):
 
-- `grid-<mode>.png`: rows are metrics (by default median time, tokens/s, peak above
-  baseline and one parity error, the op's `grad_hidden` or `loss` error when it has
-  one), columns are the swept axes (int axes on a log scale);
+- `grid-<mode>.png`: rows are metrics (by default median time, peak above baseline
+  and one parity error, the op's `grad_hidden` or `loss` error when it has one; other
+  metrics, such as `tokens_per_s` and `tflops`, are drawn with `--metric`), columns
+  are the swept axes (int axes on a log scale);
 - `ratio-<mode>.png`: speedup (baseline time / time), memory ratio and time × peak
   ratio (`time_x_peak_ratio`, impl / baseline) against the baseline, with the
   baseline as the line at 1. A throughput ratio is drawn only
