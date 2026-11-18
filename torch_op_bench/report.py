@@ -33,12 +33,13 @@ SOURCES = {
 INFO_WIDTH = 40
 # The widest a table may be (R1-30 F6): wider, a reader loses the row.
 MAX_COLUMNS = 16
-# The environment check: a control within these of its original is the same build.
+# The baseline's controls: a control within these of its original, in time and peak,
+# is flagged by neither.
 TIME_RATIO_RANGE = (0.95, 1.05)
 PEAK_DIFF_LIMIT = 64 * MIB
-# ... and its parity metrics within these of its original's: another build can move
-# the error of the same code (R1-12 R1), which a parity comparison must not credit
-# to the counterpart. The reduction-setting section uses the same band.
+# A control's parity is compared with its original's for bit-identity; this band only
+# grades a mismatch (within it, or outside): another build can move the error of the
+# same code (R1-12 R1). The reduction-setting section decides with the same band.
 PARITY_RATIO_RANGE = analysis.PARITY_RATIO_RANGE
 
 
@@ -191,9 +192,9 @@ DEFINITIONS = [
     (
         "implementation",
         "an entry: one way of computing the op, as the op declares it (the Summary "
-        "describes each). `<name> (control of <original>)` is a control: the original's "
-        "code run in another environment, so that what the environment does can be told "
-        "from what the counterpart does. `<name>[<parameter>=<value>]` is a variant: the "
+        "describes each). A control is the baseline's code run in a counterpart's "
+        'environment: no table compares it; "The baseline\'s controls" does, against the '
+        "baseline. `<name>[<parameter>=<value>]` is a variant: the "
         "entry with another value of one of its own parameters, measured at the default "
         'point for "Time at equal peak" only.',
     ),
@@ -284,13 +285,20 @@ DEFINITIONS = [
         "the torch LCE path records.",
     ),
     (
-        "environment check",
-        "each control against its original at the same point: the time ratio (control / "
-        "original), the peak difference (control − original, MiB) and each parity "
-        "metric's ratio (`<metric> ratio`). The bands: a time ratio within [{time_low}, "
-        "{time_high}], a peak difference within {peak_limit} MiB, a parity ratio within "
-        "[{parity_low}, {parity_high}]; outside one, the `flag` column names it: there "
-        "the environment, not the counterpart, makes a difference.",
+        "the baseline's controls",
+        "each control against its original, per mode, over the points where both have a "
+        "record. The same operation: `control (env)`, the control and its environment; "
+        "`torch`, the control's build and the original's (one when the same); `points`; "
+        "`parity identical`, `k of n`, the points with parity whose parity metrics are all "
+        "equal as floats (`m without parity`: neither side has them); `status differs`, "
+        "the points where exactly one side is `ok` or the parity statuses differ; "
+        "`largest parity ratio`, the metric ratio (control / original) furthest from 1. "
+        "Time and memory, where both are `ok`: the `time ratio` (control / original), "
+        "`peak diff MiB` and `baseline_bytes diff MiB` (control − original) as min / "
+        "median / max. The `flag`: `differs` when some parity is not identical or some "
+        "status differs (graded against the parity band [{parity_low}, {parity_high}] "
+        "below the tables); `time` for a time ratio outside [{time_low}, {time_high}]; "
+        "`peak` for a peak difference beyond {peak_limit} MiB.",
     ),
     (
         "not measured",
@@ -330,7 +338,11 @@ HEADER_TERMS = [
         r"|op_decisions|.+ default, strict|.+ default / strict",
         "reduction setting",
     ),
-    (r"control|original|time ratio|peak diff MiB|flag|.+ ratio", "environment check"),
+    (
+        r"control \(env\)|points|parity identical|status differs|largest parity ratio"
+        r"|time ratio|peak diff MiB|baseline_bytes diff MiB|flag",
+        "the baseline's controls",
+    ),
     (r"torch|CUDA|Python|packages|torch-op-bench|matmul", "provenance"),
 ]
 
@@ -544,8 +556,10 @@ def render_compared(
     dtypes: Sequence[str],
     modes: Sequence[str],
     strict: tuple[str, int] | None,
+    controls: Sequence[Row] = (),
 ) -> list[str]:
-    """What was compared: the op, the entries, the modes, the sweep and the variants."""
+    """What was compared: the op, the entries, the modes, the sweep and the variants;
+    the ``controls`` in one sentence after the entries, as they are not compared."""
     op = recs[0].get("op")
     lines = ["### What was compared", ""]
     if spec is not None and spec.description:
@@ -561,6 +575,17 @@ def render_compared(
         runs = [m for m in modes if m in _modes_of(spec, name, rows)]
         only = f", {' and '.join(f'`{m}`' for m in runs)} only" if runs != list(modes) else ""
         lines.append(f"- `{name}` ({role}in `{row.get('env_name')}`{only}): {what}.")
+    if controls:
+        names = analysis.implementations(controls)
+        envs = list(dict.fromkeys(r.get("env_name") for r in controls))
+        originals = list(dict.fromkeys(r.get("control_of") for r in controls))
+        several = len(names) > 1
+        lines += [
+            "",
+            f"The control{'s' if several else ''} {_names(names)} ({_names(originals)} run "
+            f"inside the {_names(envs)} environment{'s' if len(envs) > 1 else ''}) "
+            f'{"are" if several else "is"} not compared here; see "The baseline\'s controls".',
+        ]
     words = " and ".join(f"{MODE_WORDS.get(m, m)} (`{m}`)" for m in modes)
     lines += ["", f"Modes: {words}; dtype {', '.join(dtypes)}."]
     swept = {
@@ -702,9 +727,12 @@ def default_sentences(
     dtype: str,
     mode: str,
     several_dtypes: bool,
+    controls: Sequence[Row] = (),
+    groups: Sequence[Mapping[str, Any]] = (),
 ) -> list[str]:
     """Findings 1: per entry at the default point, against the baseline; the
-    controls in one sentence."""
+    controls of this mode and dtype in one sentence, from their ``groups``
+    (``control_groups``): they match the baseline, or which do not."""
     here = [r for r in analysis.at(rows, dtype=dtype, mode=mode) if _at_point(r, point)]
     if not here:
         return []
@@ -722,13 +750,9 @@ def default_sentences(
     else:
         head += f" The baseline `{baseline}` has no `ok` record here: no ratios."
     lines = [head, ""]
-    controls = []
     for name in analysis.implementations(here, baseline):
         row = by_name[name]
         if name == baseline:
-            continue
-        if row.get("role") == "control":
-            controls.append(row)
             continue
         label = f"`{name}`"
         if name not in mentioned and _description(spec, name):
@@ -752,23 +776,27 @@ def default_sentences(
             f"baseline; time × peak {_x(product)} the baseline's; "
             f"{parity_words(row, notes, axes)}."
         )
-    if controls:
-        checks = [
-            c
-            for c in environment_check(here, axes)
-            if c["control"] in {r["implementation"] for r in controls}
-        ]
-        flagged = [c for c in checks if c["flags"]]
+    here_controls = analysis.at(controls, dtype=dtype, mode=mode)
+    mine = [g for g in groups if g["dtype"] == dtype and g["mode"] == mode]
+    if here_controls:
+        names = analysis.implementations(here_controls)
+        envs = list(dict.fromkeys(r.get("env_name") for r in here_controls))
+        originals = list(dict.fromkeys(r.get("control_of") for r in here_controls))
         what = (
-            f"The controls ({_names([r['implementation'] for r in controls])}: "
-            f"`{baseline}` run inside the {_names([r.get('env_name') for r in controls])} "
-            f"environment{'s' if len(controls) > 1 else ''})"
+            f"The controls ({_names(names)}: {_names(originals)} run inside the "
+            f"{_names(envs)} environment{'s' if len(envs) > 1 else ''})"
         )
-        if not flagged:
-            lines.append(f"- {what} are within the environment check's bands here.")
+        see = '(see "The baseline\'s controls")'
+        flagged = [g for g in mine if g["same"] or g["time_memory"]]
+        if not mine:
+            lines.append(f"- {what} have no record where their original has one {see}.")
+        elif not flagged:
+            lines.append(f"- {what} match the baseline {see}.")
         else:
-            named = "; ".join(f"`{c['control']}`: {', '.join(c['flags'])}" for c in flagged)
-            lines.append(f"- {what}: outside the environment check's bands here, {named}.")
+            named = "; ".join(
+                f"`{g['control']}`: {', '.join(g['same'] + g['time_memory'])}" for g in flagged
+            )
+            lines.append(f"- {what} do not match the baseline: {named} {see}.")
     return lines + [""]
 
 
@@ -920,17 +948,18 @@ def sweep_sentences(
     return lines
 
 
-def repeat_sentences(rows: Sequence[Row], axes: Sequence[str], has_notes: bool) -> list[str]:
-    """Findings 4: how closely the same code repeats across environments."""
-    pairs = [c for c in environment_check(rows, axes) if c["measured"] == "both"]
+def repeat_sentences(control_pairs: Sequence[Mapping[str, Any]], has_notes: bool) -> list[str]:
+    """Findings 4: how closely the same code repeats across environments, from the
+    pairs of "The baseline's controls"."""
+    pairs = [c for c in control_pairs if c["measured"] == "both"]
     times = [c["time_ratio"] for c in pairs if c["time_ratio"] is not None]
     peaks = [c["peak_diff"] for c in pairs if c["peak_diff"] is not None]
     if not times:
         return []
     spread = max(abs(t - 1) for t in times)
     line = (
-        f"**Repeatability.** The same code in different environments (the environment "
-        f"check, {len(pairs)} pairs) repeats to within {spread:.1%} in time (ratios from "
+        f"**Repeatability.** The same code in different environments (the baseline's "
+        f"controls, {len(pairs)} pairs) repeats to within {spread:.1%} in time (ratios from "
         f"{sig3(min(times))} to {sig3(max(times))})".replace("%", " %")
     )
     if peaks:
@@ -1063,7 +1092,7 @@ def caveats(
             lines.append(f"  - {who} on {metrics}, {verdict}")
     low, high = TIME_RATIO_RANGE
     lines.append(
-        f"- A time ratio within the environment check's band [{low}, {high}] can be "
+        f'- A time ratio within the band of "The baseline\'s controls", [{low}, {high}], can be '
         "run-to-run variation, not a difference" + (" (see Notes)." if has_notes else ".")
     )
     if unread is not None:
@@ -1111,16 +1140,29 @@ def render_summary(
     has_notes: bool,
     unread: str | None,
     findings: tuple[str, str] | None,
+    controls: Sequence[Row] = (),
+    control_pairs: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """The section "Summary": what was compared, on what, the findings (generated,
     or the author's ``findings``, ``(file name, text)``) with the headline table, and
-    the caveats."""
+    the caveats. ``rows`` hold no control: ``controls`` are their rows, and
+    ``control_pairs`` their ``environment_check``, for one sentence per mode and
+    Repeatability."""
     axes = list(point)
     scope = [r for r in rows if r["dtype"] in dtypes and r["mode"] in modes]
     scope_all = scope + [r for r in variant_rows if r["dtype"] in dtypes and r["mode"] in modes]
     lines = [SUMMARY_TITLE, ""]
     lines += render_compared(
-        recs, scope, variant_rows, point, baseline, spec, dtypes=dtypes, modes=modes, strict=strict
+        recs,
+        scope,
+        variant_rows,
+        point,
+        baseline,
+        spec,
+        dtypes=dtypes,
+        modes=modes,
+        strict=strict,
+        controls=controls,
     )
     lines += render_on_what(recs, sets)
     if findings is not None:
@@ -1148,6 +1190,8 @@ def render_summary(
             dtypes=dtypes,
             modes=modes,
             has_notes=has_notes,
+            controls=controls,
+            control_pairs=control_pairs,
         )
     lines += headline_table(
         scope, variant_rows, point, baseline, defaults, dtypes=dtypes, modes=modes
@@ -1168,6 +1212,8 @@ def generated_findings(
     dtypes: Sequence[str],
     modes: Sequence[str],
     has_notes: bool,
+    controls: Sequence[Row] = (),
+    control_pairs: Sequence[Mapping[str, Any]] = (),
 ) -> list[str]:
     """The mechanical findings: the default point, time at equal peak, the sweeps,
     repeatability; fixed templates, every sentence a number against the baseline or
@@ -1176,6 +1222,7 @@ def generated_findings(
     several = len(dtypes) > 1
     lines: list[str] = []
     mentioned: set[str] = set()
+    groups = control_groups(control_pairs)
     for d in dtypes:
         for m in modes:
             lines += default_sentences(
@@ -1189,6 +1236,8 @@ def generated_findings(
                 dtype=d,
                 mode=m,
                 several_dtypes=several,
+                controls=controls,
+                groups=groups,
             )
     if variant_rows:
         lines += equal_peak_sentences(
@@ -1204,7 +1253,7 @@ def generated_findings(
     for d in dtypes:
         for m in modes:
             lines += sweep_sentences(rows, point, baseline, dtype=d, mode=m, several_dtypes=several)
-    lines += repeat_sentences(rows, axes, has_notes)
+    lines += repeat_sentences(control_pairs, has_notes)
     return lines
 
 
@@ -1873,7 +1922,7 @@ def render_reduction_section(
         f"The default run against the strict one (`{strict_dir}`: no reduced-precision "
         f"reduction in bf16 and fp16 GEMMs) at the default point: the time ratio "
         f"(strict / default) and, per parity metric, the ratio default / strict. A parity "
-        f"ratio outside [{low}, {high}] (the environment check's band) means the "
+        f"ratio outside [{low}, {high}] (the parity band) means the "
         f"setting moves that entry's parity.",
         "",
     ]
@@ -1891,7 +1940,15 @@ def render_reduction_section(
     return "\n".join(lines) + "\n"
 
 
-# --- 6. the environment check ------------------------------------------------------------
+# --- 1a. the baseline's controls (Task I1-27 Part B) ----------------------------------------
+
+CONTROLS_TITLE = "## The baseline's controls"
+NO_CONTROLS = "No control in these records: the baseline was run in its own environment only."
+NO_PAIRS = "No control has a record at a point where its original has one."
+ALL_MATCH = (
+    "Every control matches the baseline: identical parity at every point with parity, "
+    "time and peak within the bands."
+)
 
 
 def _parity_metrics(row: Row) -> dict[str, Any]:
@@ -1920,13 +1977,25 @@ def parity_ratios(control: Row, original: Row) -> dict[str, dict[str, Any]]:
     return found
 
 
-def environment_check(rows: Sequence[Row], axes: Sequence[str]) -> list[dict[str, Any]]:
-    """For every control, against its original, at every point and mode both have a
-    record: when both are ok, the time ratio (control / original), the peak
-    difference (control − original) and the ratio of each parity metric (control /
-    original); when only one is ok (``measured`` is "one"), the flag ``status``: the
-    environment makes that difference (R1-30 F2); when neither is ("neither"), the
-    pair only."""
+def _within_parity_band(parity: Mapping[str, Mapping[str, Any]]) -> bool:
+    """Whether every metric of a pair has a ratio within ``PARITY_RATIO_RANGE``: a
+    metric on one side only, or zero against nonzero, is not."""
+    low, high = PARITY_RATIO_RANGE
+    return all(v["ratio"] is not None and low <= v["ratio"] <= high for v in parity.values())
+
+
+def environment_check(
+    rows: Sequence[Row], axes: Sequence[str], controls: set[str] | None = None
+) -> list[dict[str, Any]]:
+    """For every control (of ``controls``, when given), against its original, at
+    every point and mode both have a record: the pair, the statuses and torch builds
+    of both; ``status_differs`` when exactly one side is ``ok`` or their parity
+    statuses differ (R1-30 F2); ``with_parity`` when either side has parity metrics
+    (and the statuses do not differ), and then ``identical`` when both have the same
+    metrics, equal as floats; when both are ``ok``, the time ratio (control /
+    original), the peak difference and the ``baseline_bytes`` difference (control −
+    original) and each parity metric's ratio. ``flags``: ``differs`` (a status
+    differs, or the parity is not identical), ``time``, ``peak`` (outside the bands)."""
     by_key = {
         (row["implementation"], row["mode"], analysis.case_of(row, axes)): row for row in rows
     }
@@ -1934,9 +2003,13 @@ def environment_check(rows: Sequence[Row], axes: Sequence[str]) -> list[dict[str
     for row in rows:
         if row.get("role") != "control":
             continue
+        if controls is not None and row["implementation"] not in controls:
+            continue
         original = by_key.get((row.get("control_of"), row["mode"], analysis.case_of(row, axes)))
         if original is None:
             continue
+        both = [r.get("status") == "ok" for r in (row, original)]
+        parity_status = (row.get("parity_status"), original.get("parity_status"))
         check = {
             "control": row["implementation"],
             "original": row["control_of"],
@@ -1945,137 +2018,314 @@ def environment_check(rows: Sequence[Row], axes: Sequence[str]) -> list[dict[str
             "dtype": row.get("dtype"),
             "case": case_text(row, axes),
             "status": (row.get("status"), original.get("status")),
-            "measured": "both",
+            "parity_status": parity_status,
+            "torch": (row.get("torch_version"), original.get("torch_version")),
+            "measured": "both" if all(both) else "one" if any(both) else "neither",
+            "status_differs": both[0] != both[1] or parity_status[0] != parity_status[1],
+            "with_parity": False,
+            "identical": None,
             "time_ratio": None,
             "peak_diff": None,
+            "baseline_bytes_diff": None,
             "parity": {},
             "flags": [],
         }
         found.append(check)
-        both = [r.get("status") == "ok" for r in (row, original)]
         if not all(both):
-            check["measured"] = "one" if any(both) else "neither"
-            check["flags"] = ["status"] if any(both) else []
             check["reason"] = (row if not both[0] else original).get("reason")
+            if check["status_differs"]:
+                check["flags"].append("differs")
             continue
-        time_ratio = ratio(row.get("median_ms"), original.get("median_ms"))
-        peak_a, peak_b = row.get("peak_above_baseline"), original.get("peak_above_baseline")
-        peak_diff = None if peak_a is None or peak_b is None else peak_a - peak_b
         parity = parity_ratios(row, original)
-        flags = []
+        check["parity"] = parity
+        if parity and not check["status_differs"]:
+            check["with_parity"] = True
+            check["identical"] = _parity_metrics(row) == _parity_metrics(original)
+        if check["status_differs"] or check["identical"] is False:
+            check["flags"].append("differs")
+        time_ratio = ratio(row.get("median_ms"), original.get("median_ms"))
+        check["time_ratio"] = time_ratio
+        for key, field in (
+            ("peak_diff", "peak_above_baseline"),
+            ("baseline_bytes_diff", "baseline_bytes"),
+        ):
+            a, b = row.get(field), original.get(field)
+            check[key] = None if a is None or b is None else a - b
         low, high = TIME_RATIO_RANGE
         if time_ratio is not None and not low <= time_ratio <= high:
-            flags.append("time")
-        if peak_diff is not None and abs(peak_diff) > PEAK_DIFF_LIMIT:
-            flags.append("peak")
-        low, high = PARITY_RATIO_RANGE
-        for name, value in parity.items():
-            if value["ratio"] is not None and not low <= value["ratio"] <= high:
-                flags.append(name)
-            elif value["ratio"] is None and value["side"] is None:  # 0 against nonzero
-                flags.append(name)
-        check.update(time_ratio=time_ratio, peak_diff=peak_diff, parity=parity, flags=flags)
+            check["flags"].append("time")
+        if check["peak_diff"] is not None and abs(check["peak_diff"]) > PEAK_DIFF_LIMIT:
+            check["flags"].append("peak")
     return found
 
 
-def _parity_cell(value: Mapping[str, Any] | None) -> str:
+def _spread(values: Sequence[float]) -> tuple[float, float, float] | None:
+    """min, median, max; ``None`` for no values."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    n = len(ordered)
+    median = ordered[n // 2] if n % 2 else (ordered[n // 2 - 1] + ordered[n // 2]) / 2
+    return ordered[0], median, ordered[-1]
+
+
+def control_groups(pairs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The pairs of ``environment_check`` per control, mode and dtype, in their order:
+    the counts of the "same operation" table (``points``, ``identical`` of
+    ``with_parity``, ``without_parity``, ``status_differs``), the largest parity
+    ratio, the spreads of the time ratio, the peak difference and the
+    ``baseline_bytes`` difference, and the flags of each table: ``same`` (``differs``)
+    and ``time_memory`` (``time``, ``peak``)."""
+    groups: dict[tuple, list[Mapping[str, Any]]] = {}
+    for c in pairs:
+        groups.setdefault((c["control"], c["mode"], c["dtype"]), []).append(c)
+    found = []
+    for (control, mode, dtype), group in groups.items():
+        with_parity = [c for c in group if c["with_parity"]]
+        # The largest |ratio − 1| of a metric; zero against nonzero (no ratio, both
+        # values) outranks every ratio.
+        largest = None
+        for c in with_parity:
+            for value in c["parity"].values():
+                if value["side"]:
+                    continue
+                if value["ratio"] is None:
+                    largest = value
+                    break
+                if largest is not None and largest["ratio"] is None:
+                    continue
+                if value["ratio"] != 1.0 and (
+                    largest is None or abs(value["ratio"] - 1) > abs(largest["ratio"] - 1)
+                ):
+                    largest = value
+        torches = [c["torch"] for c in group if c["torch"][0] or c["torch"][1]]
+        both = [c for c in group if c["measured"] == "both"]
+        found.append(
+            {
+                "control": control,
+                "original": group[0]["original"],
+                "env_name": group[0]["env_name"],
+                "mode": mode,
+                "dtype": dtype,
+                "torch": torches[0] if torches else (None, None),
+                "points": len(group),
+                "with_parity": len(with_parity),
+                "identical": sum(bool(c["identical"]) for c in with_parity),
+                "without_parity": sum(
+                    not c["with_parity"] and not c["status_differs"] for c in group
+                ),
+                "status_differs": sum(c["status_differs"] for c in group),
+                "largest": largest,
+                "time": _spread([c["time_ratio"] for c in both if c["time_ratio"] is not None]),
+                "peak": _spread([c["peak_diff"] for c in both if c["peak_diff"] is not None]),
+                "baseline_bytes": _spread(
+                    [c["baseline_bytes_diff"] for c in both if c["baseline_bytes_diff"] is not None]
+                ),
+                "same": ["differs"] if any("differs" in c["flags"] for c in group) else [],
+                "time_memory": [
+                    flag for flag in ("time", "peak") if any(flag in c["flags"] for c in group)
+                ],
+                "pairs": group,
+            }
+        )
+    return found
+
+
+def _torch_cell(versions: tuple[Any, Any]) -> str:
+    control, original = versions
+    if control == original:
+        return text(control)
+    return f"{text(control)} / {text(original)}"
+
+
+def _identical_cell(group: Mapping[str, Any]) -> str:
+    cell = f"{group['identical']} of {group['with_parity']}"
+    if group["without_parity"]:
+        cell += f" ({group['without_parity']} without parity)"
+    return cell
+
+
+def _largest_cell(value: Mapping[str, Any] | None) -> str:
     if value is None:
         return MISSING
-    if value["side"]:
-        return value["side"]
     if value["ratio"] is None:  # zero against nonzero: no ratio, both values
         return f"{sig3(value['control'])} / {sig3(value['original'])}"
     return sig3(value["ratio"])
 
 
-def render_environment_check(rows: Sequence[Row], axes: Sequence[str]) -> str:
-    pairs = environment_check(rows, axes)
-    checks = [c for c in pairs if c["measured"] != "neither"]
-    lines = ["## Environment check", ""]
+def _spread_cell(spread: tuple[float, float, float] | None, show: Any, one: bool = False) -> str:
+    """min / median / max; one value when ``one`` and they are equal."""
+    if spread is None:
+        return MISSING
+    if one and spread[0] == spread[2]:
+        return show(spread[0])
+    return " / ".join(show(v) for v in spread)
+
+
+def _signed_mib(value: float) -> str:
+    return ("+" if value > 0 else "") + mib(value)
+
+
+def _values(c: Any, o: Any) -> str:
+    """Both values, as many digits as tell them apart (one ulp needs 17)."""
+    a, b = sig3(c), sig3(o)
+    if a == b and c != o:
+        a, b = f"{c:.17g}", f"{o:.17g}"
+    return f"{a} against {b}"
+
+
+def pair_text(c: Mapping[str, Any]) -> str:
+    """One bullet of the flagged pairs: the point, the mode, what differs, both values,
+    and why it is flagged."""
+    what = []
+    if c["measured"] != "both":
+        control, original = (
+            f"`{status}`" + ("" if status == "ok" else f" ({cause(status, c['reason'])[0]})")
+            for status in c["status"]
+        )
+        what.append(f"control {control}, original {original}")
+    elif c["status_differs"]:
+        control, original = (f"`{s}`" for s in c["parity_status"])
+        what.append(f"parity status {control} against {original}")
+    if c["identical"] is False:
+        differing = []
+        for name, value in c["parity"].items():
+            if value["side"]:
+                differing.append(f"{name} on the {value['side'].removesuffix(' only')} only")
+            elif value["control"] != value["original"]:
+                shown = _values(value["control"], value["original"])
+                ratio_ = f" (ratio {sig3(value['ratio'])})" if value["ratio"] is not None else ""
+                differing.append(f"{name} {shown}{ratio_}")
+        low, high = PARITY_RATIO_RANGE
+        band = (
+            f"within the parity band [{low}, {high}]"
+            if _within_parity_band(c["parity"])
+            else "outside the parity band"
+        )
+        what.append(f"{' and '.join(differing)}: differs, {band}")
+    if "time" in c["flags"]:
+        low, high = TIME_RATIO_RANGE
+        what.append(f"time ratio {sig3(c['time_ratio'])} outside [{low}, {high}]")
+    if "peak" in c["flags"]:
+        what.append(
+            f"peak difference {_signed_mib(c['peak_diff'])} MiB beyond {PEAK_DIFF_LIMIT // MIB} MiB"
+        )
+    return (
+        f"- **{c['control']}** (`{c['env_name']}`) against {c['original']}, {c['mode']} "
+        f"{c['dtype']} at {c['case']}: {'; '.join(what)}."
+    )
+
+
+def render_controls(
+    rows: Sequence[Row],
+    control_rows: Sequence[Row],
+    axes: Sequence[str],
+    *,
+    several_dtypes: bool = False,
+) -> str:
+    """The section "The baseline's controls": each control against its original, on
+    the same operation first (torch builds, identical parity), then on time and
+    memory; then the flagged pairs. ``rows`` hold the originals."""
+    lines = [CONTROLS_TITLE, ""]
+    if not control_rows:
+        lines.append(NO_CONTROLS)
+        return "\n".join(lines) + "\n"
+    names = analysis.implementations(control_rows)
+    originals = list(dict.fromkeys(r.get("control_of") for r in control_rows))
+    lines += [
+        f"The controls are the baseline's code ({_names(originals)}) run in each "
+        f"counterpart's environment. They are there as a reference: they show that the "
+        f"baseline the tables use computes the same as the baseline would in that "
+        f"environment, so every table compares with the baseline alone.",
+        "",
+    ]
+    pairs = environment_check([*rows, *control_rows], axes, controls=set(names))
     if not pairs:
-        lines.append("No control has a record at a point where its original has one.")
+        lines.append(NO_PAIRS)
         return "\n".join(lines) + "\n"
-    low, high = TIME_RATIO_RANGE
-    p_low, p_high = PARITY_RATIO_RANGE
+    unpaired = [n for n in names if not any(c["control"] == n for c in pairs)]
+    if unpaired:
+        lines += [f"No record of {_names(unpaired)} is at a point where its original has one.", ""]
+    groups = control_groups(pairs)
+    dtype = ["dtype"] if several_dtypes else []
+
+    def head(g: Mapping[str, Any]) -> list[str]:
+        return [
+            f"{g['control']} ({g['env_name']})",
+            g["mode"],
+            *([text(g["dtype"])] if dtype else []),
+        ]
+
     lines += [
-        f"Each control against its original at the same point: the time ratio "
-        f"(control / original), the peak difference (control − original) and the "
-        f"ratio of each parity metric (control / original). A time ratio outside "
-        f"[{low}, {high}], a peak difference beyond {PEAK_DIFF_LIMIT // MIB} MiB or a "
-        f"parity ratio outside [{p_low}, {p_high}] means the environment, not the "
-        f"counterpart, makes a difference there, and a counterpart must be compared "
-        f"with the control of its own environment; so does a pair where only one side "
-        f"is `ok` (flag `status`, its statuses, control / original, in the time ratio's "
-        f"place).",
+        "### The same operation",
+        "",
+        "Per control and mode: its torch build and the original's (`control / original`, "
+        "one when they are the same), the points where both have a record, how many of "
+        "those with parity have bit-identical parity metrics (every metric equal as a "
+        "float, and the same metrics), how many differ in status (exactly one side `ok`, "
+        "or another parity status) and the parity ratio (control / original) furthest "
+        "from 1. The flag `differs`: some parity is not identical, or some status differs.",
         "",
     ]
-    count = {kind: sum(c["measured"] == kind for c in pairs) for kind in ("both", "one", "neither")}
-    lines += [
-        f"{count['both']} pair{'' if count['both'] == 1 else 's'} compared; "
-        f"{count['one']} with one side not measured"
-        f"{' (flagged below)' if count['one'] else ''}; {count['neither']} with neither "
-        f"side measured.",
-        "",
-    ]
-    if not checks:
-        return "\n".join(lines) + "\n"
-    metrics = sorted({name for c in checks for name in c["parity"]})
     body = [
         [
-            f"{c['control']} ({c['env_name']})",
-            c["original"],
-            c["mode"],
-            text(c["dtype"]),
-            c["case"],
-            sig3(c["time_ratio"]) if c["measured"] == "both" else " / ".join(c["status"]),
-            mib(c["peak_diff"]),
-            *(_parity_cell(c["parity"].get(name)) for name in metrics),
-            ", ".join(c["flags"]) or "",
+            *head(g),
+            _torch_cell(g["torch"]),
+            str(g["points"]),
+            _identical_cell(g),
+            str(g["status_differs"]),
+            _largest_cell(g["largest"]),
+            ", ".join(g["same"]),
         ]
-        for c in checks
+        for g in groups
     ]
-    header = ["control", "original", "mode", "dtype", "case", "time ratio", "peak diff MiB"]
-    header += [f"{name} ratio" for name in metrics] + ["flag"]
-    lines.append(table(header, body, [False] * 5 + [True] * (2 + len(metrics)) + [False]))
-    lines.append("")
-    noted = [c for c in checks if c["flags"] or any(v["side"] for v in c["parity"].values())]
-    if not noted:
-        lines.append("Every control is within the limits: the environments do not differ here.")
-    for c in noted:
-        if c["measured"] == "one":
-            control, original = (
-                f"`{status}`" + ("" if status == "ok" else f" ({cause(status, c['reason'])[0]})")
-                for status in c["status"]
-            )
-            lines.append(
-                f"- **{c['control']}** (`{c['env_name']}`) against {c['original']}, "
-                f"{c['mode']} {c['dtype']} at {c['case']}: control {control}, original "
-                f"{original}: the environment makes a difference there."
-            )
-            continue
-        what = []
-        if "time" in c["flags"]:
-            what.append(f"time ratio {sig3(c['time_ratio'])} outside [{low}, {high}]")
-        if "peak" in c["flags"]:
-            what.append(f"peak difference {mib(c['peak_diff'])} MiB")
-        for name, value in c["parity"].items():
-            if name in c["flags"]:
-                what.append(
-                    f"{name} {sig3(value['control'])} against {sig3(value['original'])} "
-                    f"(ratio {sig3(value['ratio'])}) outside [{p_low}, {p_high}]"
-                )
-            elif value["side"]:
-                what.append(f"{name} on the {value['side'].removesuffix(' only')} only")
-        sentence = (
-            f"- **{c['control']}** against {c['original']}, {c['mode']} {c['dtype']} at "
-            f"{c['case']}: {' and '.join(what)}."
-        )
-        if c["flags"]:
-            sentence += (
-                f" Here the environment `{c['env_name']}` differs from the baseline's, "
-                f"not only the counterpart."
-            )
-        lines.append(sentence)
+    header = ["control (env)", "mode", *dtype, "torch", "points", "parity identical"]
+    header += ["status differs", "largest parity ratio", "flag"]
+    numeric = [False, False, *[False] * len(dtype), False, True, True, True, True, False]
+    lines += [table(header, body, numeric), ""]
+    t_low, t_high = TIME_RATIO_RANGE
+    lines += [
+        "### Time and memory",
+        "",
+        f"Per control and mode, over the points where both are `ok`: the time ratio "
+        f"(control / original), the difference of the peak above baseline and of "
+        f"`baseline_bytes` (control − original), each as min / median / max. The flag "
+        f"`time`: a ratio outside [{t_low}, {t_high}]; `peak`: a difference beyond "
+        f"{PEAK_DIFF_LIMIT // MIB} MiB.",
+        "",
+    ]
+    body = [
+        [
+            *head(g),
+            _spread_cell(g["time"], sig3),
+            _spread_cell(g["peak"], _signed_mib),
+            _spread_cell(g["baseline_bytes"], _signed_mib, one=True),
+            ", ".join(g["time_memory"]),
+        ]
+        for g in groups
+    ]
+    header = ["control (env)", "mode", *dtype, "time ratio", "peak diff MiB"]
+    header += ["baseline_bytes diff MiB", "flag"]
+    numeric = [False, False, *[False] * len(dtype), True, True, True, False]
+    lines += [
+        table(header, body, numeric),
+        "",
+        "`baseline_bytes` (what was allocated when the op started: the inputs, and the "
+        "workspaces the build holds) is not flagged: its difference does not enter the "
+        "peak above baseline.",
+        "",
+    ]
+    flagged = [c for g in groups for c in g["pairs"] if c["flags"]]
+    if not flagged:
+        lines.append(ALL_MATCH)
+        return "\n".join(lines) + "\n"
+    lines += [
+        "The flagged pairs: there the environment, not only the counterpart, makes a "
+        "difference, and a counterpart in that environment is read against its "
+        "control's numbers here.",
+        "",
+    ]
+    lines += [pair_text(c) for c in flagged]
     return "\n".join(lines) + "\n"
 
 
@@ -2265,7 +2515,12 @@ def report(
         recs_strict = [] if strict is None else analysis.load(strict, op=op_name, device_slug=slug)
         all_strict = recs_strict
         recs_strict = analysis.split_variants(recs_strict)[0]
-    rows = analysis.to_rows(base_recs)
+    # The controls are in "The baseline's controls" only, the summary's sentence on
+    # them, and Provenance (Task I1-27): every other section reads the entries
+    # compared with the baseline.
+    compared_recs = analysis.split_controls(base_recs, baseline)[0]
+    recs_strict = analysis.split_controls(recs_strict, baseline)[0]
+    rows, control_rows = analysis.split_controls(analysis.to_rows(base_recs), baseline)
     variant_rows = analysis.to_rows(variant_recs)
     axes = analysis.axes_of(recs)
     notes = analysis.parity_notes(recs)
@@ -2289,6 +2544,11 @@ def report(
     if strict is not None:
         sets[str(strict)] = all_strict
     unread = None if spec else recs[0].get("op_ref") or recs[0]["op"]
+    control_scope = [r for r in control_rows if r["dtype"] in dtypes and r["mode"] in modes]
+    scope = [row for row in rows if row["dtype"] in dtypes and row["mode"] in modes]
+    pairs = environment_check(
+        [*scope, *control_scope], axes, controls={r["implementation"] for r in control_scope}
+    )
     defaults = analysis.default_params(base_recs, variant_recs)
     op_notes = analysis.op_notes(recs)
     lines.append(
@@ -2308,11 +2568,14 @@ def report(
             has_notes=bool(op_notes),
             unread=unread,
             findings=written,
+            controls=control_scope,
+            control_pairs=pairs,
         )
     )
     work_keys = sorted({k for r in recs for k in (r.get("work") or {})})
     lines.append(render_definitions(recs, baseline, spec, unread or op_name, work_keys))
     lines.append(render_provenance(recs, rows, sets))
+    lines.append(render_controls(scope, control_scope, axes, several_dtypes=len(dtypes) > 1))
     source = SOURCES.get(point["source"], point["source"])
     lines += ["## At the default point", "", f"The default point is {source}.", ""]
     lines += axes_line(spec, point["params"])
@@ -2364,7 +2627,7 @@ def report(
     if strict is not None:
         lines.append(
             render_reduction_section(
-                base_recs,
+                compared_recs,
                 recs_strict,
                 point["params"],
                 baseline,
@@ -2373,10 +2636,8 @@ def report(
                 strict_dir=strict,
             )
         )
-    scope = [row for row in rows if row["dtype"] in dtypes and row["mode"] in modes]
     scope_all = scope + [r for r in variant_rows if r["dtype"] in dtypes and r["mode"] in modes]
     lines.append(render_parity_failures(scope_all, axes, notes, unread=unread))
-    lines.append(render_environment_check(scope, axes))
     lines.append(render_not_measured(scope_all, axes))
     lines.append(render_notes(op_name, op_notes))
     return "\n".join(lines).rstrip() + "\n"

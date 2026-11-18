@@ -73,10 +73,11 @@ OVERLAY_LINESTYLE = ("-", "--")
 # one, their points lie within COINCIDENT_MARKER_FRACTION of the marker size of each
 # other, in display points, after the layout (P1, I1-14 round 2): the upper marker
 # would cover the lower. A control and its original never do: the control has its own
-# style by design; nor do two controls of one original (R1-34 R1), which the
-# environment check compares each with the original. Series that coincide, directly
-# or through another, form a stack: each is drawn a level above those drawn before it
-# (the baseline is drawn first).
+# style by design; nor do two controls of one original (R1-34 R1), which the report's
+# section "The baseline's controls" compares each with the original. A control is drawn
+# only when --impl names it (Task I1-27). Series that coincide, directly or through
+# another, form a stack: each is drawn a level above those drawn before it (the
+# baseline is drawn first).
 # Levels above the bottom are dashed, at COINCIDENT_SCALE of their line width and
 # marker size; from level 2 on each is also shifted sideways, alternately left and
 # right, by COINCIDENT_DODGE of the bottom's marker size per step, so the small markers
@@ -1482,6 +1483,20 @@ def plot(
         keep = set(impls) | {baseline}
         rows = [r for r in rows if r["implementation"] in keep]
         rows_b = [r for r in rows_b if r["implementation"] in keep]
+    # The controls are drawn only when --impl names them, as the variants are: every
+    # figure compares with the baseline alone, and the report's "The baseline's
+    # controls" compares the controls (Task I1-27). After the palette and the markers,
+    # so no colour changes with them.
+    drawn = set(impls or ())
+
+    def shown(item: Mapping[str, Any]) -> bool:
+        return not analysis.is_control(item, baseline) or item["implementation"] in drawn
+
+    rows = [r for r in rows if shown(r)]
+    rows_b = [r for r in rows_b if shown(r)]
+    base_rows = [r for r in base_rows if shown(r)]
+    base_recs = [r for r in base_recs if shown(r)]
+    recs_strict = [r for r in recs_strict if shown(r)]
     dtypes = [dtype] if dtype else list(dict.fromkeys(row["dtype"] for row in rows))
     modes = [mode] if mode else [m for m in MODES if any(row["mode"] == m for row in rows)]
     _check(metrics, known_metrics(rows), "metric")

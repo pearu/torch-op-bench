@@ -313,6 +313,25 @@ def split_variants(
     return bases, [r for r in recs if variant_of(r) is not None]
 
 
+def is_control(item: Mapping[str, Any], baseline: str | None = None) -> bool:
+    """Whether a record (its ``info.role``) or a row (its ``role``) is of a control,
+    other than ``baseline``: a control that ``--baseline`` names is the baseline."""
+    role = item.get("role") if "role" in item else (item.get("info") or {}).get("role")
+    return role == "control" and item.get("implementation") != baseline
+
+
+def split_controls(
+    items: Sequence[Mapping[str, Any]], baseline: str | None = None
+) -> tuple[list[Any], list[Any]]:
+    """The records or rows of the entries compared with the baseline, and those of the
+    controls: every table and figure reads the first; "The baseline's controls" the
+    second, against its originals (Task I1-27)."""
+    return (
+        [r for r in items if not is_control(r, baseline)],
+        [r for r in items if is_control(r, baseline)],
+    )
+
+
 def default_params(
     recs: Sequence[Mapping[str, Any]], variants: Sequence[Mapping[str, Any]]
 ) -> dict[str, str]:
@@ -683,7 +702,7 @@ REDUCTION_FLAGS = (
     "allow_fp16_reduced_precision_reduction",
 )
 # A parity metric "moves" between the two settings outside this band of ratios: the
-# environment check's band for a parity metric (report.PARITY_RATIO_RANGE).
+# parity band of "The baseline's controls" (report.PARITY_RATIO_RANGE).
 PARITY_RATIO_RANGE = (0.9, 1.1)
 
 

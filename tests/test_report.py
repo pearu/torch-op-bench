@@ -1,4 +1,5 @@
 import json
+import math
 import re
 import warnings
 
@@ -97,7 +98,7 @@ def test_default_point(synth):
     assert "The default point is the op's defaults." in text
     part = section(text, "### fwd_bwd, float32", "\n### ")
     names = [cells(row)[0] for row in tables(part)[0][2:]]
-    assert names == ["base", "base_other (control of base)", "compiled", "chunked"]
+    assert names == ["base", "compiled", "chunked"]  # no control (Task I1-27)
     header = cells(tables(part)[0][0])
     by_name = {cells(row)[0]: cells(row) for row in tables(part)[0][2:]}
     col = header.index("time / baseline")
@@ -107,7 +108,6 @@ def test_default_point(synth):
         )
         assert by_name[name][col] == report.sig3(expected)
     assert by_name["chunked"][col] == "2.00" and by_name["compiled"][col] == "0.500"
-    assert by_name["base_other (control of base)"][col] == "1.10"
     # The peak above the inputs, not the absolute peak (R1-12 F2), so labelled.
     assert "peak MiB" not in header and "peak / baseline" not in header
     peak = header.index("peak above baseline, MiB")
@@ -122,7 +122,6 @@ def test_default_point(synth):
     assert header[product + 1] == "time × peak / baseline's"
     assert by_name["chunked"][product + 1] == "0.500"  # 2x the time, 1/4 of the peak
     assert by_name["compiled"][product + 1] == "0.500"
-    assert by_name["base_other (control of base)"][product + 1] == "1.10"
     assert by_name["base"][product + 1] == "1.00"
     assert header[2] == "median ms (IQR)" and "status" not in header
     assert by_name["chunked"][2] == "256 (25.6)"
@@ -243,7 +242,7 @@ def test_tables_within_max_columns(synth, synth_strict, tmp_path):
     part = section(text, "### fwd_bwd, float32", "\n### ")
     default, details = tables(part)
     assert len(cells(default[0])) == report.MAX_COLUMNS  # 4 parity metrics
-    assert len(default) == 2 + 11
+    assert len(default) == 2 + 10  # 11 entries, no control (Task I1-27)
     by_name = {cells(row)[0]: cells(row)[1] for row in details[2:]}
     assert by_name["compiled"].startswith("a00=0<br>a01=1<br>") and "b00" not in by_name["compiled"]
     assert by_name["chunked"].startswith("api.name=v2<br>b00=<br>b01=x<br>")
@@ -253,21 +252,22 @@ def test_tables_within_max_columns(synth, synth_strict, tmp_path):
 def test_sweeps(synth):
     text = make(synth, dtype="float32", mode="fwd_bwd")
     part = section(text, "#### fwd_bwd, float32: parity against M", "\n####")
-    assert "| 256 | ok | ok | ok | fail: grad_rel |" in part
+    assert cells(table_rows(part)[0]) == ["M", "base", "compiled", "chunked"]  # no control
+    assert "| 256 | ok | ok | fail: grad_rel |" in part
     part = section(text, "#### fwd_bwd, float32: median ms against N", "\n####")
-    assert "| 8 | 64.0 | 64.0 | — | 128 |" in part  # compiled has no record at N=8
+    assert "| 8 | 64.0 | — | 128 |" in part  # compiled has no record at N=8
     part = section(text, "#### fwd_bwd, float32: median ms against K", "\n####")
-    assert "| 16 | 64.0 | 64.0 | 32.0 | unavailable |" in part
+    assert "| 16 | 64.0 | 32.0 | unavailable |" in part
     part = section(
         text, "#### fwd_bwd, float32: time × peak, ms·MiB (/ baseline's) against M", "\n####"
     )
     base = S.median_ms("base", "fwd_bwd", "float32", S.DEFAULT) * S.peak_above("base", S.DEFAULT)
     base /= S.MIB
-    assert f"| 128 | {report.sig3(base)} (1.00) | " in part
-    assert f"(1.10) | {report.sig3(base / 2)} (0.500) | {report.sig3(base / 2)} (0.500) |" in part
+    half = f"{report.sig3(base / 2)} (0.500)"
+    assert f"| 128 | {report.sig3(base)} (1.00) | {half} | {half} |" in part
     part = section(text, "#### fwd_bwd, float32: median ms against layout", "\n####")
     assert "| :--- |" in part.splitlines()[3]  # a str axis is not right-aligned
-    assert "### fwd, " not in text and "bfloat16" not in text.split("## Environment check")[0]
+    assert "### fwd, " not in text and "bfloat16" not in text
 
 
 def test_parity_notes(synth):
@@ -276,14 +276,14 @@ def test_parity_notes(synth):
     text = make(synth, mode="fwd_bwd")
     footnote = f"¹ `chunked`, grad_rel: {synth_op.NOTE.text}"
     part = section(text, "#### fwd_bwd, bfloat16: parity against M", "\n####")
-    assert "| 256 | ok | ok | ok | fail: grad_rel¹ |" in part
+    assert "| 256 | ok | ok | fail: grad_rel¹ |" in part
     assert footnote in part.splitlines()
     part = section(text, "#### fwd_bwd, float32: parity against M", "\n####")
-    assert "| 256 | ok | ok | ok | fail: grad_rel |" in part and "¹" not in part
+    assert "| 256 | ok | ok | fail: grad_rel |" in part and "¹" not in part
     # Only the parity table of the failure carries it.
     assert text.count(footnote) == 1 and synth_op.NEVER.text not in text
     part = section(text, "## Parity failures")
-    assert text.index("## Parity failures") < text.index("## Environment check")
+    assert text.index("## The baseline's controls") < text.index("## Parity failures")
     lines = part.splitlines()
     i = lines.index(f"- `chunked`, explained: {synth_op.NOTE.text}")
     assert lines[i + 1 : i + 6] == [
@@ -308,7 +308,7 @@ def test_parity_notes_without_the_op(synth, monkeypatch):
     monkeypatch.setattr("torch_op_bench.spec.resolve_op", unresolvable)
     text = make(synth, mode="fwd_bwd")
     part = section(text, "#### fwd_bwd, bfloat16: parity against M", "\n####")
-    assert "| 256 | ok | ok | ok | fail: grad_rel |" in part
+    assert "| 256 | ok | ok | fail: grad_rel |" in part
     assert "¹" not in text and synth_op.NOTE.text not in text
     part = section(text, "## Parity failures")
     assert part.rstrip().splitlines()[-2:] == [
@@ -558,34 +558,314 @@ def test_entry_details_one_field_per_line():
     assert body["torch_eager"][1] == "—"
 
 
-def test_environment_check(synth):
-    text = section(make(synth), "## Environment check")
+def edit_records(root, change):
+    """Rewrite every record under ``root`` through ``change(record)``, which returns
+    the record to keep or ``None`` to drop it."""
+    for path in root.rglob("*.jsonl"):
+        kept = []
+        for line in path.read_text().splitlines():
+            record = change(json.loads(line))
+            if record is not None:
+                kept.append(json.dumps(record))
+        path.write_text("".join(f"{line}\n" for line in kept))
+
+
+def outside_controls(text):
+    """``text`` without "The baseline's controls" and "Provenance"."""
+    for title in (report.CONTROLS_TITLE, "## Provenance"):
+        text = text.replace(section(text, title), "")
+    return text
+
+
+def test_controls_leave_every_table(synth, synth_strict):
+    # Task I1-27 Part A: no table, list or sentence outside the controls' section and
+    # Provenance names a control, with the control failing parity at one point and
+    # unavailable at another (those go to the section, not to "Parity failures", "Not
+    # measured" or the caveats).
+    S.write_variants(synth)
+
+    def change(record):
+        if record["implementation"] == "base_other" and record["mode"] == "fwd_bwd":
+            params = record["case"]["params"]
+            if params == {**S.DEFAULT, "M": 64} and record["case"]["dtype"] == "float32":
+                record["parity"]["status"] = "fail"
+                record["parity"]["failed"] = ["grad_rel"]
+            if params == {**S.DEFAULT, "K": 16} and record["case"]["dtype"] == "float32":
+                record.update(status="unavailable", reason="needs another GPU", times_ms=None)
+                record.update(memory=None, parity=None)
+        return record
+
+    edit_records(synth, change)
+    text = make(synth, strict=synth_strict)
+    rest = outside_controls(text)
+    # The two places the summary names it: the sentence after the entries, and one
+    # sentence per mode in the findings, both pointing to the section.
+    named = [line for line in rest.splitlines() if "base_other" in line]
+    assert named[0] == (
+        "The control `base_other` (`base` run inside the `other` environment) is not "
+        'compared here; see "The baseline\'s controls".'
+    )
+    assert len(named) == 1 + 4 and all(
+        line.startswith("- The controls (`base_other`: ")
+        and line.endswith('(see "The baseline\'s controls").')
+        for line in named[1:]
+    )
+    for title in ("## Parity failures", "## Not measured", "### Caveats"):
+        assert "base_other" not in section(text, title, "\n#"), title
+    assert "needs another GPU" not in rest
+    # Provenance keeps every environment; the section has the control's failures.
+    assert "| other | 2.14.1+cu130 |" in section(text, "## Provenance")
+    part = section(text, report.CONTROLS_TITLE)
+    assert (
+        "- **base_other** (`other`) against base, fwd_bwd float32 at M=64, K=32, N=16, "
+        "layout=a: parity status `fail` against `ok`."
+    ) in part
+    assert (
+        "- **base_other** (`other`) against base, fwd_bwd float32 at M=128, K=16, N=16, "
+        "layout=a: control `unavailable` (needs another GPU), original `ok`."
+    ) in part
+    # The section sits after Provenance, before the default point.
+    order = ["## Provenance", report.CONTROLS_TITLE, "## At the default point"]
+    assert [text.index(t) for t in order] == sorted(text.index(t) for t in order)
+    assert "## Environment check" not in text
+
+
+def test_controls_section(synth):
+    # Part B on the synthetic set's planted control: 10 % slower at the default point,
+    # 100 MiB more at M=256, grad_rel 25 % larger at N=8 in fwd_bwd.
+    text = section(make(synth), report.CONTROLS_TITLE)
+    assert text.startswith(
+        f"{report.CONTROLS_TITLE}\n\nThe controls are the baseline's code (`base`) run in "
+        "each counterpart's environment."
+    )
+    same = tables(section(text, "### The same operation", "\n### "))[0]
+    assert cells(same[0]) == [
+        "control (env)",
+        "mode",
+        "dtype",
+        "torch",
+        "points",
+        "parity identical",
+        "status differs",
+        "largest parity ratio",
+        "flag",
+    ]
+    rows = [cells(r) for r in same[2:]]
+    versions = "2.14.1+cu130 / 2.16.0a0+gitabc"
+    assert rows == [
+        ["base_other (other)", "fwd", "float32", versions, "6", "6 of 6", "0", "—", ""],
+        ["base_other (other)", "fwd", "bfloat16", versions, "6", "6 of 6", "0", "—", ""],
+        [
+            "base_other (other)",
+            "fwd_bwd",
+            "float32",
+            versions,
+            "6",
+            "5 of 6",
+            "0",
+            "1.25",
+            "differs",
+        ],
+        [
+            "base_other (other)",
+            "fwd_bwd",
+            "bfloat16",
+            versions,
+            "6",
+            "5 of 6",
+            "0",
+            "1.25",
+            "differs",
+        ],
+    ]
+    timing = tables(section(text, "### Time and memory", "\n### "))[0]
+    assert cells(timing[0]) == [
+        "control (env)",
+        "mode",
+        "dtype",
+        "time ratio",
+        "peak diff MiB",
+        "baseline_bytes diff MiB",
+        "flag",
+    ]
+    for row in timing[2:]:
+        assert cells(row)[3:] == ["1.00 / 1.00 / 1.10", "0.0 / 0.0 / +100.0", "0.0", "time, peak"]
+    assert "`baseline_bytes` (what was allocated when the op started" in text
+    assert "is not flagged: its difference does not enter the peak above baseline." in text
     flagged = [line for line in text.splitlines() if line.startswith("- **base_other**")]
     # time and peak in both modes and dtypes; grad_rel in fwd_bwd, both dtypes
     assert len(flagged) == 2 * 2 * 2 + 2
-    assert any(
-        "fwd_bwd float32 at M=128, K=32, N=16, layout=a: time ratio 1.10 outside [0.95, 1.05]"
-        in line
-        for line in flagged
-    )
-    assert any(
-        "at M=256, K=32, N=16, layout=a: peak difference 100.0 MiB" in line for line in flagged
-    )
+    assert (
+        "- **base_other** (`other`) against base, fwd_bwd float32 at M=128, K=32, N=16, "
+        "layout=a: time ratio 1.10 outside [0.95, 1.05]."
+    ) in flagged
+    assert (
+        "- **base_other** (`other`) against base, fwd float32 at M=256, K=32, N=16, "
+        "layout=a: peak difference +100.0 MiB beyond 64 MiB."
+    ) in flagged
     # The parity of the same code moved by the environment (R1-12 R1).
-    assert any(
-        "fwd_bwd float32 at M=128, K=32, N=8, layout=a: grad_rel 0.00250 against 0.00200 "
-        "(ratio 1.25) outside [0.9, 1.1]" in line
-        for line in flagged
+    assert (
+        "- **base_other** (`other`) against base, fwd_bwd float32 at M=128, K=32, N=8, "
+        "layout=a: grad_rel 0.00250 against 0.00200 (ratio 1.25): differs, outside the "
+        "parity band."
+    ) in flagged
+    assert report.ALL_MATCH not in text
+    # One dtype: no dtype column.
+    text = section(make(synth, dtype="float32"), report.CONTROLS_TITLE)
+    assert cells(table_rows(text)[0])[:3] == ["control (env)", "mode", "torch"]
+
+
+def pair(original=None, control=None, *, n=1, env="x"):
+    """A control ``c`` (in ``env``) and its original ``a`` at ``N=n``, fwd, bf16: both
+    ok, equal, with one parity metric; ``original`` and ``control`` change each."""
+
+    def row(name, more):
+        found = {
+            "implementation": name,
+            "mode": "fwd",
+            "dtype": "bf16",
+            "N": n,
+            "status": "ok",
+            "median_ms": 1.0,
+            "peak_above_baseline": 0,
+            "baseline_bytes": 0,
+            "parity_status": "ok",
+            "parity_m": 1e-3,
+            "torch_version": "2.16",
+            "env_name": "torch",
+        }
+        return {**found, **more}
+
+    control_info = {"role": "control", "control_of": "a", "env_name": env}
+    return row("a", original or {}), row("c", {**control_info, **(control or {})})
+
+
+def controls_text(*pairs_):
+    rows = [p[0] for p in pairs_]
+    control_rows = [p[1] for p in pairs_]
+    return report.render_controls(rows, control_rows, ["N"])
+
+
+def same_row(text):
+    return cells(tables(section(text, "### The same operation", "\n### "))[0][2])
+
+
+def timing_row(text):
+    return cells(tables(section(text, "### Time and memory", "\n### "))[0][2])
+
+
+def test_controls_identical():
+    text = controls_text(pair(n=1), pair(n=2))
+    assert same_row(text) == ["c (x)", "fwd", "2.16", "2", "2 of 2", "0", "—", ""]
+    assert timing_row(text) == ["c (x)", "fwd", "1.00 / 1.00 / 1.00", "0.0 / 0.0 / 0.0", "0.0", ""]
+    assert text.rstrip().endswith(report.ALL_MATCH)
+
+
+def test_controls_one_ulp_differs_within_the_band():
+    value = math.nextafter(1e-3, 1)
+    text = controls_text(pair(n=1), pair(control={"parity_m": value}, n=2))
+    row = same_row(text)
+    assert row[4:] == ["1 of 2", "0", "1.00", "differs"]
+    assert (
+        f"- **c** (`x`) against a, fwd bf16 at N=2: m {value:.17g} against {1e-3:.17g} "
+        "(ratio 1.00): differs, within the parity band [0.9, 1.1]."
+    ) in text
+    assert report.ALL_MATCH not in text
+
+
+def test_controls_ratio_outside_the_band():
+    text = controls_text(pair(control={"parity_m": 1.2e-3}))
+    assert same_row(text)[4:] == ["0 of 1", "0", "1.20", "differs"]
+    assert "m 0.00120 against 0.00100 (ratio 1.20): differs, outside the parity band." in text
+
+
+def test_controls_without_parity():
+    # "reference does not fit" on both sides: counted apart, no parity claimed.
+    skipped = {"parity_status": "skipped", "parity_m": None}
+    text = controls_text(pair(n=1), pair(skipped, skipped, n=2))
+    assert same_row(text)[3:] == ["2", "1 of 1 (1 without parity)", "0", "—", ""]
+    assert text.rstrip().endswith(report.ALL_MATCH)
+
+
+def test_controls_status_mismatch():
+    # R1-30 F2: a control out of memory, or unavailable, where its original is ok is
+    # the environment's difference, not a pair to leave out.
+    oom = OOM.format(tried="4.00", free="2.22")
+    lost = {"median_ms": None, "peak_above_baseline": None, "parity_m": None}
+    lost["parity_status"] = None
+    text = controls_text(
+        pair(n=1),
+        pair(control={"status": "unavailable", "reason": "needs 2 GPUs", **lost}, n=2),
+        pair(control={"status": "error", "reason": oom, **lost}, n=3),
+        pair({"status": "error", "reason": "RuntimeError: boom", **lost}, n=4),
+        # Neither side ok: a pair, without parity, no status difference.
+        pair({"status": "error", "reason": "x", **lost}, {"status": "error", **lost}, n=5),
     )
-    header = cells(table_rows(text)[0])
-    assert header[-3:] == ["grad_rel ratio", "loss_rel_err ratio", "flag"]
-    rows = [cells(r) for r in table_rows(text)[2:]]
-    assert len(rows) == 6 * 2 * 2  # every point both have, both modes, both dtypes
-    assert sum(r[-1] == "" for r in rows) == len(rows) - 10
-    at_n8 = [r for r in rows if r[1] == "base" and "N=8" in r[4] and r[2] == "fwd_bwd"]
-    assert [r[-3:] for r in at_n8] == [["1.25", "1.00", "grad_rel"]] * 2
-    fwd = [r for r in rows if r[2] == "fwd"]
-    assert {r[-3] for r in fwd} == {"—"}  # no grad_rel in fwd: neither side has it
+    assert same_row(text)[3:] == ["5", "1 of 1 (1 without parity)", "3", "—", "differs"]
+    assert timing_row(text)[2:] == ["1.00 / 1.00 / 1.00", "0.0 / 0.0 / 0.0", "0.0", ""]
+    assert (
+        "- **c** (`x`) against a, fwd bf16 at N=2: control `unavailable` (needs 2 GPUs), "
+        "original `ok`."
+    ) in text
+    assert (
+        "- **c** (`x`) against a, fwd bf16 at N=3: control `error` (OutOfMemoryError: CUDA out "
+        "of memory.), original `ok`."
+    ) in text
+    assert "N=4: control `ok`, original `error` (RuntimeError: boom)." in text
+    assert "N=5" not in text and report.ALL_MATCH not in text
+
+
+def test_controls_torch_versions():
+    assert same_row(controls_text(pair()))[2] == "2.16"
+    other = controls_text(pair(control={"torch_version": "2.14.1"}))
+    assert same_row(other)[2] == "2.14.1 / 2.16"
+
+
+def test_controls_spreads():
+    # min / median / max of the time ratio and of the peak difference; a constant
+    # baseline_bytes difference as one value, a varying one as three.
+    mib = report.MIB
+    found = [
+        pair(
+            control={"median_ms": t, "peak_above_baseline": p * mib, "baseline_bytes": 64 * mib},
+            n=i,
+        )
+        for i, (t, p) in enumerate([(0.998, -32), (1.0, 0), (1.02, 0)])
+    ]
+    row = timing_row(controls_text(*found))
+    assert row[2:] == ["0.998 / 1.00 / 1.02", "-32.0 / 0.0 / 0.0", "+64.0", ""]
+    found[0][1]["baseline_bytes"] = 32 * mib
+    assert timing_row(controls_text(*found))[4] == "+32.0 / +64.0 / +64.0"
+    # Outside the bands: the flags.
+    found[0][1].update(median_ms=1.1, peak_above_baseline=65 * mib)
+    text = controls_text(*found)
+    assert timing_row(text)[-1] == "time, peak"
+    assert "time ratio 1.10 outside [0.95, 1.05]; peak difference +65.0 MiB beyond 64 MiB." in text
+
+
+def test_controls_none(synth):
+    assert report.render_controls([pair()[0]], [], ["N"]) == (
+        f"{report.CONTROLS_TITLE}\n\n{report.NO_CONTROLS}\n"
+    )
+    edit_records(synth, lambda r: None if r["implementation"] == "base_other" else r)
+    text = make(synth)
+    assert section(text, report.CONTROLS_TITLE).strip() == (
+        f"{report.CONTROLS_TITLE}\n\n{report.NO_CONTROLS}"
+    )
+    assert "The control" not in section(text, "## Summary")
+    # A control without its original anywhere: the sentence of no pairs.
+    lone = pair(n=1)[1]
+    text = report.render_controls([pair(n=2)[0]], [lone], ["N"])
+    assert report.NO_PAIRS in text and "| control (env) |" not in text
+
+
+def test_controls_baseline_named(synth):
+    # --baseline naming a control: it is the baseline, in every table.
+    text = report.report(synth, baseline="base_other")
+    part = section(text, "### fwd_bwd, float32", "\n### ")
+    names = [cells(row)[0] for row in tables(part)[0][2:]]
+    assert names == ["base_other (control of base)", "base", "compiled", "chunked"]
+    assert report.NO_CONTROLS in section(text, report.CONTROLS_TITLE)
 
 
 def test_parity_ratios():
@@ -598,111 +878,23 @@ def test_parity_ratios():
         "d": {"control": None, "original": 4.0, "ratio": None, "side": "original only"},
         "z": {"control": 0.0, "original": 0.0, "ratio": 1.0, "side": None},
     }
-    base = {"implementation": "e", "mode": "fwd", "status": "ok", "median_ms": 1.0}
-    rows = [
-        {**base, **original},
-        {
-            **base,
-            **control,
-            "implementation": "c",
-            "role": "control",
-            "control_of": "e",
-            "env_name": "x",
-        },
-    ]
-    text = report.render_environment_check(rows, [])
-    assert "a 2.00 against 1.00 (ratio 2.00) outside [0.9, 1.1]" in text
-    assert "c on the control only" in text and "d on the original only" in text
-    assert "| control only | original only |" in text
-    # Only one side: reported, not flagged as the environment's difference.
-    one_sided = [
-        {**base, "parity_d": 1.0},
-        {**rows[1], "parity_a": None, "parity_b": None, "parity_c": 1.0, "parity_z": None},
-    ]
-    text = report.render_environment_check(one_sided, [])
-    assert "c on the control only and d on the original only." in text
-    assert "differs from the baseline's" not in text
-    # Zero against nonzero: no ratio, both values shown, flagged.
-    zero = [
-        {**base, "parity_a": 0.0},
-        {**rows[1], "parity_a": 1.0, "parity_b": None, "parity_c": None, "parity_z": None},
-    ]
-    checks = report.environment_check(zero, [])
-    assert checks[0]["flags"] == ["a"]
-    assert "| 1.00 / 0 |" in report.render_environment_check(zero, [])
-
-
-def test_environment_check_without_controls():
-    rows = [{"implementation": "a", "mode": "fwd", "status": "ok", "role": None}]
-    assert "No control has a record" in report.render_environment_check(rows, [])
-    control = {
-        "implementation": "c",
-        "mode": "fwd",
-        "status": "ok",
-        "role": "control",
-        "control_of": "a",
-        "median_ms": 1.0,
-        "peak_above_baseline": 0,
-    }
-    original = {
-        "implementation": "a",
-        "mode": "fwd",
-        "status": "ok",
-        "median_ms": 1.01,
-        "peak_above_baseline": 0,
-    }
-    text = report.render_environment_check([original, control], [])
-    assert "Every control is within the limits" in text
-
-
-def test_environment_check_status_mismatch():
-    # R1-30 F2: a control out of memory where its original fits is the environment's
-    # difference, not a pair to leave out.
-    def row(name, n, status, **more):
-        found = {"implementation": name, "mode": "fwd_bwd", "dtype": "bf16", "N": n}
-        found.update(status=status, median_ms=1.0, peak_above_baseline=0, **more)
-        if status != "ok":
-            found.update(median_ms=None, peak_above_baseline=None)
-        return found
-
-    control = {"role": "control", "control_of": "a", "env_name": "x"}
-    rows = [
-        row("a", 1, "ok"),
-        row("c", 1, "ok", **control),
-        row("a", 2, "ok"),
-        row("c", 2, "error", reason=OOM.format(tried="4.00", free="2.22"), **control),
-        row("a", 3, "error", reason="RuntimeError: boom"),
-        row("c", 3, "ok", **control),
-        row("a", 4, "unavailable", reason="needs 2 GPUs"),
-        row("c", 4, "error", reason="RuntimeError: boom", **control),
-    ]
-    checks = report.environment_check(rows, ["N"])
-    assert [(c["measured"], c["flags"]) for c in checks] == [
-        ("both", []),
-        ("one", ["status"]),
-        ("one", ["status"]),
-        ("neither", []),
-    ]
-    text = report.render_environment_check(rows, ["N"])
-    assert "1 pair compared; 2 with one side not measured (flagged below); 1 with neither" in text
-    body = [cells(r) for r in table_rows(text)[2:]]
-    assert [r[4] for r in body] == ["N=1", "N=2", "N=3"]  # neither side: no row
-    assert body[1][5:] == ["error / ok", "—", "status"]
-    assert body[2][5:] == ["ok / error", "—", "status"]
+    blank = {"parity_m": None}
+    text = controls_text(pair({**blank, **original}, {**blank, **control}))
     assert (
-        "- **c** (`x`) against a, fwd_bwd bf16 at N=2: control `error` (OutOfMemoryError: "
-        "CUDA out of memory.), original `ok`: the environment makes a difference there."
+        "a 2.00 against 1.00 (ratio 2.00) and c on the control only and d on the original "
+        "only: differs, outside the parity band."
     ) in text
-    assert "control `ok`, original `error` (RuntimeError: boom)" in text
-    assert "Every control is within the limits" not in text
-    # Only the pair of both ok: within the limits.
-    text = report.render_environment_check(rows[:2], ["N"])
-    assert "1 pair compared; 0 with one side not measured; 0 with neither" in text
-    assert "Every control is within the limits" in text
-    # Neither side measured anywhere: counted, no table.
-    text = report.render_environment_check(rows[6:], ["N"])
-    assert "0 pairs compared; 0 with one side not measured; 1 with neither" in text
-    assert "| control |" not in text and "Every control" not in text
+    assert same_row(text)[-2:] == ["2.00", "differs"]
+    # A metric on one side only is not identical, and is outside the band.
+    one_sided = pair({**blank, "parity_d": 1.0}, {**blank, "parity_c": 1.0})
+    text = controls_text(one_sided)
+    assert "c on the control only and d on the original only: differs, outside" in text
+    assert same_row(text)[-2:] == ["—", "differs"]
+    # Zero against nonzero: no ratio, both values shown, and it is the largest.
+    zero = pair(
+        {**blank, "parity_a": 0.0, "parity_b": 1.0}, {**blank, "parity_a": 1.0, "parity_b": 2.0}
+    )
+    assert same_row(controls_text(zero))[-2:] == ["1.00 / 0", "differs"]
 
 
 def test_not_measured(synth):
@@ -1013,14 +1205,12 @@ def test_reduction_section(synth, synth_strict):
     header, _, *body = table_rows(bwd)
     header = cells(header)
     rows = {cells(line)[0]: dict(zip(header, cells(line), strict=True)) for line in body}
-    assert list(rows) == ["base", "base_other (control of base)", "compiled", "chunked"]
+    assert list(rows) == ["base", "compiled", "chunked"]  # no control (Task I1-27)
     base = rows["base"]
     assert base["time strict / default"] == "1.20"
     assert base["grad_rel default, strict"] == "0.00200, 0.00100"
     assert base["grad_rel default / strict"] == "2.00"
     assert base["parity moves"] == "yes: grad_rel, loss_rel_err"
-    other = rows["base_other (control of base)"]
-    assert other["grad_rel default / strict"] == "0.952" and other["parity moves"] == "no"
     assert rows["chunked"]["parity moves"] == "no"
     # An entry in one directory only, or unavailable in one: "not measured".
     assert rows["compiled"]["median ms default"] == "not measured (default: ok, strict: absent)"
@@ -1028,15 +1218,16 @@ def test_reduction_section(synth, synth_strict):
     assert base["op_decisions"] == "—"
     # The reading, computed.
     assert (
-        "Under the defaults, `base_other`, `chunked` have the strict parity (fp32 "
+        "Under the defaults, `chunked` have the strict parity (fp32 "
         "accumulation or no small-M GEMMs); `base` do not. Not compared (not measured in "
         "both, or no parity): `compiled`."
     ) in bwd
     assert "torch LCE: `chunked`'s default parity equals its strict parity." in bwd
     fwd = section(part, "### fwd, float32", "\n### ")
-    impl, mode, dtype = S.STRICT_UNAVAILABLE
-    assert "not measured (default: ok, strict: unavailable)" in fwd
-    assert "`base_other`, `compiled`." in fwd and "op_decisions" not in fwd
+    # The control unavailable in the strict fwd float32 is not in the section.
+    assert S.STRICT_UNAVAILABLE[0] == "base_other" and "base_other" not in part
+    assert "Not compared (not measured in both, or no parity): `compiled`." in fwd
+    assert "op_decisions" not in fwd
     assert "torch LCE" not in fwd  # no entry with op_decisions in fwd
 
 
@@ -1176,7 +1367,7 @@ def test_variants_change_nothing_else(synth, synth_strict):
         "## At the default point",
         "## Sweeps",
         "## Reduction setting",
-        "## Environment check",
+        report.CONTROLS_TITLE,
     ):
         assert section(after, title) == section(before, title), title
     assert "[" not in section(after, "## At the default point")
@@ -1355,12 +1546,16 @@ def test_summary_generated(synth):
     summary = section(text, "## Summary")
     lines = summary.splitlines()
     assert "The op `synth`: a synthetic product, never run." in lines
-    assert [line for line in lines if line.startswith("- `")][:4] == [
+    assert [line for line in lines if line.startswith("- `")][:3] == [
         "- `base` (the baseline, in `torch`): the plain product.",
-        "- `base_other` (a control, in `other`): not described.",
         "- `compiled` (in `torch`): not described.",
         "- `chunked` (in `other`): the product in chunks.",
     ]
+    # The control: one sentence after the entries, not a bullet (Task I1-27).
+    assert (
+        "The control `base_other` (`base` run inside the `other` environment) is not "
+        'compared here; see "The baseline\'s controls".'
+    ) in lines
     assert (
         "Modes: forward only (`fwd`) and forward and backward (`fwd_bwd`); dtype float32, bfloat16."
         in lines
@@ -1391,11 +1586,14 @@ def test_summary_generated(synth):
         "- `chunked` (the product in chunks) takes 2.00× the baseline's time and 0.250× its "
         "memory above baseline; time × peak 0.500× the baseline's; parity ok."
     ) in findings
-    # The planted control: 10 % slower at the default point, outside the time band.
+    # The planted control: 10 % slower at the default point, 100 MiB more at M=256,
+    # grad_rel 25 % larger at N=8 in fwd_bwd: the flags of its section's rows.
+    see = '(see "The baseline\'s controls")'
     assert (
-        "- The controls (`base_other`: `base` run inside the `other` environment): outside "
-        "the environment check's bands here, `base_other`: time."
+        "- The controls (`base_other`: `base` run inside the `other` environment) do not "
+        f"match the baseline: `base_other`: differs, time, peak {see}."
     ) in findings
+    assert f"do not match the baseline: `base_other`: time, peak {see}." in findings  # fwd
     assert "**Over M (`fwd_bwd`, float32).** The baseline's median goes from " in findings
     assert (
         "- `compiled`: time / baseline within ±10 % of its 0.500× at the default point" in findings
@@ -1421,6 +1619,35 @@ def test_summary_generated(synth):
     assert "### Findings (written" not in text
 
 
+def test_summary_controls_match(synth):
+    # The controls' sentence follows the section's flags: with the control a copy of
+    # its original (time, memory, parity), "match".
+    with pytest.warns(UserWarning, match=MERGE_WARNING):
+        recs = analysis.load(synth)
+
+    def key(record):
+        return (record["mode"], record["case"]["dtype"], json.dumps(record["case"]["params"]))
+
+    base = {key(r): r for r in recs if r["implementation"] == "base"}
+
+    def change(record):
+        if record["implementation"] == "base_other":
+            for name in ("times_ms", "memory", "parity"):
+                record[name] = base[key(record)][name]
+        return record
+
+    edit_records(synth, change)
+    text = make(synth)
+    findings = section(text, "### Findings", "\n### ")
+    sentence = (
+        "- The controls (`base_other`: `base` run inside the `other` environment) match the "
+        'baseline (see "The baseline\'s controls").'
+    )
+    assert findings.count(sentence) == 4  # each mode and dtype
+    assert "do not match" not in findings
+    assert section(text, report.CONTROLS_TITLE).rstrip().endswith(report.ALL_MATCH)
+
+
 def test_summary_failure_sentences(synth):
     # At M=256 chunked fails parity: explained in bfloat16, not in float32.
     text = make(synth, point={"M": "256"}, mode="fwd_bwd")
@@ -1431,8 +1658,8 @@ def test_summary_failure_sentences(synth):
         "grad_rel, unexplained (see Parity failures)."
     ) in findings
     assert "parity fails on grad_rel, explained (see Parity failures)." in findings
-    # The planted control's 100 MiB at M=256.
-    assert "outside the environment check's bands here, `base_other`: peak." in findings
+    # The controls' sentence is the section's, over the mode, at any point.
+    assert "do not match the baseline: `base_other`: differs, time, peak" in findings
 
 
 def test_summary_forbidden_words(synth, synth_strict):
@@ -1534,7 +1761,7 @@ def test_headline_table_equals_the_default_point(synth):
         "≤ 1× budget: median ms",
     ]
     rows = [cells(r) for r in head[2:]]
-    assert len(rows) == 2 * (3 + 4)  # fwd: base, control, compiled; fwd_bwd: + chunked
+    assert len(rows) == 2 * (2 + 3)  # fwd: base, compiled; fwd_bwd: + chunked; no control
     for name, mode, dtype, *ratios, cell in rows:
         part = section(text, f"### {mode}, {dtype}\n\nAt M=128", "\n### ")
         default = {cells(r)[0]: cells(r) for r in tables(part)[0][2:]}[name]

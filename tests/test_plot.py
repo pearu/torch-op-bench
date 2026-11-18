@@ -63,9 +63,9 @@ def test_grid_csv_is_what_was_drawn(synth, tmp_path):
         params = {**S.DEFAULT, r["axis"]: type(S.DEFAULT[r["axis"]])(r["x"])}
         expected = S.median_ms(r["implementation"], "fwd_bwd", "float32", params)
         assert float(r["y"]) == pytest.approx(expected), r
-    # 4 implementations x (3 + 2 + 2 + 2) points, the default point in each axis' panel;
-    # less the unavailable and the missing point.
-    assert len(medians) == 4 * 9 - 2
+    # 3 implementations (no control) x (3 + 2 + 2 + 2) points, the default point in
+    # each axis' panel; less the unavailable and the missing point.
+    assert len(medians) == 3 * 9 - 2
     peaks = [r for r in rows if r["metric"] == "peak_above_baseline"]
     for r in peaks:
         params = {**S.DEFAULT, r["axis"]: type(S.DEFAULT[r["axis"]])(r["x"])}
@@ -74,12 +74,7 @@ def test_grid_csv_is_what_was_drawn(synth, tmp_path):
     assert {(r["implementation"], r["axis"], r["x"]) for r in fails} == {("chunked", "M", "256")}
     assert {r["parity_status"] for r in fails} == {"fail"}
     roles = {r["implementation"]: r["role"] for r in rows}
-    assert roles == {
-        "base": "baseline",
-        "compiled": "counterpart",
-        "chunked": "counterpart",
-        "base_other": "control",
-    }
+    assert roles == {"base": "baseline", "compiled": "counterpart", "chunked": "counterpart"}
 
 
 def test_hollow_marker_per_parity_metric(synth, tmp_path, monkeypatch):
@@ -148,15 +143,12 @@ def test_ratio_csv(synth, tmp_path):
     }
     assert speedup[("compiled", "M", "64")] == pytest.approx(2.0)
     assert speedup[("chunked", "K", "32")] == pytest.approx(0.5)
-    assert speedup[("base_other", "M", "128")] == pytest.approx(1 / S.DEVIATION)
     memory = {
         (r["implementation"], r["axis"], r["x"]): float(r["y"])
         for r in rows
         if r["metric"] == "memory_ratio"
     }
     assert memory[("chunked", "M", "64")] == pytest.approx(0.25)
-    expected = 1 + S.PEAK_DEVIATION / S.peak_above("base", {**S.DEFAULT, "M": 256})
-    assert memory[("base_other", "M", "256")] == pytest.approx(expected)
     product = {
         (r["implementation"], r["axis"], r["x"]): float(r["y"])
         for r in rows
@@ -165,8 +157,16 @@ def test_ratio_csv(synth, tmp_path):
     # chunked: twice the time at a quarter of the peak; compiled: half the time.
     assert product[("chunked", "N", "8")] == pytest.approx(2.0 * 0.25)
     assert product[("compiled", "M", "64")] == pytest.approx(0.5)
-    assert product[("base_other", "M", "128")] == pytest.approx(S.DEVIATION)
-    assert product[("base_other", "M", "256")] == pytest.approx(expected)
+    # The control, drawn when --impl names it (Task I1-27).
+    draw(synth, tmp_path / "control", dtype="float32", mode="fwd_bwd", impls=["base_other"])
+    rows = read_csv(tmp_path / "control" / "ratio-fwd_bwd.csv")
+    assert {r["implementation"] for r in rows} == {"base_other"}
+    ratios = {(r["metric"], r["axis"], r["x"]): float(r["y"]) for r in rows}
+    assert ratios[("speedup", "M", "128")] == pytest.approx(1 / S.DEVIATION)
+    expected = 1 + S.PEAK_DEVIATION / S.peak_above("base", {**S.DEFAULT, "M": 256})
+    assert ratios[("memory_ratio", "M", "256")] == pytest.approx(expected)
+    assert ratios[("time_x_peak_ratio", "M", "128")] == pytest.approx(S.DEVIATION)
+    assert ratios[("time_x_peak_ratio", "M", "256")] == pytest.approx(expected)
 
 
 def test_dtypes_suffix_and_overlay(synth, tmp_path):
@@ -562,8 +562,89 @@ def test_controls_drawn_with_their_markers(synth, tmp_path, monkeypatch):
         return real(ax, sets, metric, axis, point, names, palette, markers, *rest)
 
     monkeypatch.setattr(plot, "_draw_panel", spy)
-    draw(synth, tmp_path, dtype="float32", mode="fwd", metrics=["median_ms"], sweep=["M"])
+    kwargs = dict(dtype="float32", mode="fwd", metrics=["median_ms"], sweep=["M"])
+    draw(synth, tmp_path, impls=["base_other"], **kwargs)
     assert seen == {"base_other": "s"}
+
+
+def test_controls_only_when_named(synth, synth_strict, tmp_path, monkeypatch):
+    # Task I1-27: by default no figure and no CSV sidecar has a control, and no legend
+    # names one; --impl naming a control draws it, in the control style; the other
+    # entries' colours are the same with and without controls in the records.
+    import matplotlib.pyplot as plt
+
+    S.write_variants(synth)
+    second = tmp_path / "second"
+    S.write(second)
+    closed, palettes, close = [], [], plt.close
+    real = plot._draw_panel
+
+    def spy(ax, sets, metric, axis, point, names, palette, *rest):
+        palettes.append(dict(palette))
+        return real(ax, sets, metric, axis, point, names, palette, *rest)
+
+    monkeypatch.setattr(plt, "close", closed.append)
+    monkeypatch.setattr(plot, "_draw_panel", spy)
+    with pytest.warns(UserWarning):
+        written = plot.plot(
+            synth, tmp_path / "out", baseline="base", overlay=second, strict=synth_strict
+        )
+    kinds = ("grid-", "ratio-", "overlay-", "equal-peak-", "reduction-")
+    assert all(any(p.name.startswith(k) for p in written) for k in kinds)
+    for path in written:
+        rows = read_csv(path.with_suffix(".csv"))
+        assert rows and not [r for r in rows if r["implementation"] == "base_other"], path
+        assert "control" not in {r.get("role") for r in rows}, path
+    for fig in closed:
+        for legend in fig.legends:
+            assert not [t for t in legend.get_texts() if "base_other" in t.get_text()]
+    default_palette = palettes[0]
+    for fig in closed:
+        close(fig)
+    closed.clear()
+    # Named: drawn, dotted, with its environment's marker, in the legend.
+    with pytest.warns(UserWarning):
+        written = plot.plot(
+            synth,
+            tmp_path / "named",
+            baseline="base",
+            impls=["base_other"],
+            dtype="float32",
+            mode="fwd",
+            metrics=["median_ms"],
+            sweep=["M"],
+        )
+    monkeypatch.undo()
+    rows = read_csv(tmp_path / "named" / "grid-fwd.csv")
+    assert {r["role"] for r in rows if r["implementation"] == "base_other"} == {"control"}
+    fig = closed[0]
+    handles = {
+        t.get_text(): h
+        for t, h in zip(fig.legends[0].get_texts(), fig.legends[0].legend_handles, strict=True)
+    }
+    (label,) = [t for t in handles if t.startswith("base_other")]
+    assert handles[label].get_linestyle() == plot.STYLE["control"]["linestyle"]
+    assert handles[label].get_marker() == plot.STYLE["control"]["marker"]
+    for f in closed:
+        plt.close(f)
+    # Without the control's records: every other entry keeps its colour.
+    edit = tmp_path / "no-control"
+    from torch_op_bench import records
+
+    for r in load_quiet(synth):
+        if r["implementation"] != "base_other":
+            r = {k: v for k, v in r.items() if k != analysis.SOURCE}
+            records.append(edit / "synth" / S.SLUG / "x-host.jsonl", r)
+    palettes.clear()
+    monkeypatch.setattr(plot, "_draw_panel", spy)
+    monkeypatch.setattr(plt, "close", lambda fig: None)
+    with pytest.warns(UserWarning):
+        plot.plot(edit, tmp_path / "plain", baseline="base", dtype="float32", mode="fwd_bwd")
+    monkeypatch.undo()
+    plt.close("all")
+    without = palettes[0]
+    assert "base_other" not in without
+    assert {k: v for k, v in default_palette.items() if k != "base_other"} == without
 
 
 def test_throughput_ratio_when_work_differs(synth, tmp_path):
@@ -657,12 +738,19 @@ def test_markers_independent_of_impl(synth, tmp_path, monkeypatch):
 
     monkeypatch.setattr(plot, "_draw_panel", spy)
     kwargs = dict(baseline="base", dtype="float32", mode="fwd", metrics=["median_ms"], sweep=["M"])
-    with pytest.warns(UserWarning):
-        plot.plot(both, tmp_path / "all", **kwargs)
-    with pytest.warns(UserWarning):
-        plot.plot(both, tmp_path / "one", impls=["base_other"], **kwargs)
-    assert seen[0] == {"base_alpha": "s", "base_other": "^"}  # all drawn
-    assert seen[-1] == {"base_other": "^"}  # alone, the same marker
+    runs = []
+    for out, impls in (
+        ("none", None),
+        ("all", ["base_alpha", "base_other"]),
+        ("one", ["base_other"]),
+    ):
+        seen.clear()
+        with pytest.warns(UserWarning):
+            plot.plot(both, tmp_path / out, impls=impls, **kwargs)
+        runs.append({k: v for found in seen for k, v in found.items()})
+    assert runs[0] == {}  # by default no control is drawn (Task I1-27)
+    assert runs[1] == {"base_alpha": "s", "base_other": "^"}  # both named
+    assert runs[2] == {"base_other": "^"}  # alone, the same marker
 
 
 def test_long_title_wraps_in_one_column(synth, tmp_path, monkeypatch):
@@ -1202,7 +1290,7 @@ def test_reduction_figure(synth, synth_strict, tmp_path, monkeypatch):
     bars = {(r["metric"], r["implementation"], r["set"]): float(r["y"]) for r in rows}
     # Per entry a pair of bars, time and the mode's parity metric; compiled is absent
     # from the strict set: no bars, not a failure.
-    assert {k[1] for k in bars} == {"base", "base_other", "chunked"}
+    assert {k[1] for k in bars} == {"base", "chunked"}  # no control (Task I1-27)
     t = S.median_ms("base", "fwd_bwd", "float32", S.DEFAULT)
     assert bars[("median_ms", "base", "default")] == pytest.approx(t)
     assert bars[("median_ms", "base", "strict")] == pytest.approx(S.STRICT_TIME * t)
@@ -1211,7 +1299,7 @@ def test_reduction_figure(synth, synth_strict, tmp_path, monkeypatch):
     assert {r["metric"] for r in rows} == {"median_ms", "parity_grad_rel"}
     assert {r["figure"] for r in rows} == {"reduction-fwd_bwd"}
     roles = {r["implementation"]: r["role"] for r in rows}
-    assert roles == {"base": "baseline", "base_other": "control", "chunked": "counterpart"}
+    assert roles == {"base": "baseline", "chunked": "counterpart"}
     assert {r["point"] for r in rows} == {"M=128, K=32, N=16, layout=a"}
     # R1-26 F1: both panels linear from zero, so each bar is as long as its value.
     fig = figures["reduction-fwd_bwd.png"]
@@ -1244,7 +1332,7 @@ def test_reduction_figure_draws_a_zero(synth, synth_strict, tmp_path, monkeypatc
     zeros = {
         r["implementation"] for r in rows if r["set"] == "strict" and r["metric"] != "median_ms"
     }
-    assert zeros == {"base", "base_other", "chunked"}
+    assert zeros == {"base", "chunked"}
     assert all(
         float(r["y"]) == 0 for r in rows if r["set"] == "strict" and r["metric"] != "median_ms"
     )

@@ -74,9 +74,13 @@ for `envs/liger.yml` and carries the pinned commit for `envs/liger-git.yml`.
 wheel in `liger` is not the torch of the `torch` environment. So the baseline also
 runs in each counterpart's environment, as `torch_eager_<env>`
 (`Implementation.as_control(env)`), with `info.role: "control"` and
-`info.control_of: "torch_eager"`. Compare a counterpart with the control of its own
-environment; `torch_eager` against `torch_eager_<env>` is the difference the
-environment makes.
+`info.control_of: "torch_eager"`. `run` runs the controls by default. The report's
+tables and the figures compare every entry with `torch_eager` alone, and no control
+appears in them: that is valid because the report's section "The baseline's
+controls" shows each control computes the same as `torch_eager` (bit-identical
+parity, time and peak within bands), so `torch_eager` against `torch_eager_<env>` is
+the difference the environment makes. A control flagged there means a counterpart in
+that environment must be read against that control's numbers in the section.
 
 ## Run the toy example
 
@@ -230,17 +234,17 @@ counterpart:
 
 | implementation | what |
 |---|---|
-| `torch_eager` | `F.cross_entropy(F.linear(hidden, weight), labels)`; the baseline and the control |
+| `torch_eager` | `F.cross_entropy(F.linear(hidden, weight), labels)`; the baseline (its controls `torch_eager_<env>` below) |
 | `torch_compiled` | the same under `torch.compile(fullgraph=True)` |
 | `torch_lce` | `F.linear_cross_entropy(..., options=LinearCrossEntropyOptions())`, with the `torch._native` (CuTeDSL) override where eligible; `unavailable` on a torch without the override (`torch/_native/ops/linear_cross_entropy`): every release up to 2.14.1, the newest on 2026-10-17; nightlies only |
 | `torch_lce_no_override` | the same with the override ops disabled: the eager accumulator; available wherever `F.linear_cross_entropy` is (2.13 on), and `info.override_present` says whether there was an override to disable |
 | `liger` (env `liger`) | Liger-Kernel's `liger_fused_linear_cross_entropy(hidden, weight, labels, ignore_index=-100, reduction="mean", accum_dtype=torch.float32)`, `fwd_bwd` only |
 | `liger_native_accum` (env `liger`) | the same with `accum_dtype=None`, Liger's default: the weight gradient accumulated in the parameter dtype; `fwd_bwd` only |
-| `torch_eager_liger` (env `liger`) | `torch_eager` in the `liger` environment, the control |
+| `torch_eager_liger` (env `liger`) | `torch_eager` in the `liger` environment, the control; reported in "The baseline's controls" only |
 | `torchtitan_chunked` (env `torchtitan`) | torchtitan's `ChunkedLossWrapper` (8 chunks) with its default inner `CrossEntropyLoss`, over an lm_head computing `F.linear(x, weight)`; eager; `fwd_bwd` only |
 | `torchtitan_chunked_compiled` (env `torchtitan`) | the same with the inner loss under `torch.compile`, the lm_head not compiled, as torchtitan does it; `fwd_bwd` only |
 | `torchtitan_ce` (env `torchtitan`) | torchtitan's default loss, `CrossEntropyLoss`, on the full logits `F.linear(hidden, weight)`; eager |
-| `torch_eager_torchtitan` (env `torchtitan`) | `torch_eager` in the `torchtitan` environment, the control |
+| `torch_eager_torchtitan` (env `torchtitan`) | `torch_eager` in the `torchtitan` environment, the control; reported in "The baseline's controls" only |
 
 Six of these entries chunk with a parameter of their own, and each has two
 **variants** (`Implementation.with_params`): the same entry with another value of
@@ -375,7 +379,7 @@ What the records say:
   records cannot show by themselves are the op's `notes` (`lce.NOTES`, printed in
   the report's "Notes"): the rise of `grad_hidden_rel_l2` at N=8192 under the
   default matmul setting, and that a "Reduction setting" time ratio within the
-  environment check's band is run-to-run variation.
+  time band of "The baseline's controls" is run-to-run variation.
 - `info`: the contract's constants, `compiled`, and for `torch_lce*` the resolved
   `options` and `lce_source_md5`. That is an md5 of torch's LCE source files, which
   the build hash misses when an editable install's Python files are edited.
@@ -451,18 +455,20 @@ torch-op-bench commits). Its sections:
 1. **Summary**, for a reader who is not an engineer: *What was compared* (the op's
    `description`, each entry in the op's order with its `description`, the
    baseline, the modes in words, the sweep's axes with their descriptions and
-   values, the number of points and records, the strict run and the variants);
+   values, the number of points and records, the strict run and the variants; the
+   controls in one sentence after the entries, as not compared there);
    *On what* (the GPU and its memory, the hosts, the torch build of each
    environment, the counterparts' versions, the dates); *Findings*; a *Headline
    table* (at the default point, every entry and mode in the op's order: time,
    peak and time × peak against the baseline's, and the equal-peak cell at the 1×
-   budget, the same numbers as sections 4 and 6); and *Caveats* (what was not
+   budget, the same numbers as sections 5 and 7); and *Caveats* (what was not
    measured, by cause, in plain words; where parity was not checked, by reason;
    the parity failures and their notes, "N parity failures, M explained"; the
    run-to-run band). The findings are generated by default, from fixed templates
    in one place (`report.py`): per entry and mode at the default point, its time,
-   memory and time × peak against the baseline's and its parity; the controls
-   against the environment check's bands; per chunked entry, the point within
+   memory and time × peak against the baseline's and its parity; per mode, one
+   sentence saying whether the controls match the baseline (the flags of section 4),
+   naming those that do not; per chunked entry, the point within
    each memory budget; per axis, the baseline's median over it and each entry's
    ratios, within ±10 % of their default-point value or their range; and the
    repeatability across environments. Every sentence is a value, or a ratio to
@@ -490,10 +496,37 @@ torch-op-bench commits). Its sections:
    12 characters of the commit of a git install), the torch-op-bench commit, and
    the matmul settings. It says so when the commits differ, or when one environment
    holds several builds.
-4. **At the default point** (see above; under it, each axis' value with its
+4. **The baseline's controls**, after Provenance because it qualifies every
+   comparison after it: every counterpart outside the `torch` environment runs on
+   another torch build. The controls are the baseline's code run in each
+   counterpart's environment, there as a reference: they show the baseline the
+   tables use computes the same as it would in that environment. Two tables, one
+   row per control and mode (and dtype, when there are several). *The same
+   operation*: the control's torch build beside the baseline's (one when the same);
+   the points where both have a record; `parity identical`, `k of n`, the points
+   with parity whose parity metrics are bit-identical (every metric equal as a
+   float, and the same metrics), with `(m without parity)` for points where
+   neither side has parity (both skipped: "reference does not fit"), counted apart
+   and never claimed identical; `status differs`, the points where exactly one
+   side is `ok` (a control out of memory where its original fits) or the parity
+   statuses differ; the parity ratio (control / original) furthest from 1; and the
+   flag `differs` for any of these. Another torch build can move the error of the
+   same code (by 23 % in `grad_hidden` at one shape between torch 2.14 and 2.16),
+   so the band [0.9, 1.1] only grades a mismatch: "within the parity band" or
+   "outside" it. *Time and memory*, over the points where both are `ok`: the time
+   ratio (control / original), the difference of the peak above baseline and of
+   `baseline_bytes` (control − original), each as min / median / max
+   (`baseline_bytes` as one value when constant); the flag `time` for a ratio
+   outside [0.95, 1.05], `peak` for a difference beyond 64 MiB. `baseline_bytes` is
+   not flagged: it does not enter the peak above baseline. Then one bullet per
+   flagged pair (the point, the mode, what differs, both values, why), or "Every
+   control matches the baseline: …". Without controls in the records, one sentence
+   says so. A control that fails parity or is not measured is reported here, not in
+   "Parity failures" or "Not measured". With `--baseline` naming a control, that
+   control is the baseline, in every table.
+5. **At the default point** (see above; under it, each axis' value with its
    description), per mode and dtype, two tables. The first has
-   one row per implementation, the baseline first and each control right after its
-   original, with its environment, median and IQR (in one cell, "median (IQR)"; the
+   one row per implementation, the baseline first (no control: section 4), with its environment, median and IQR (in one cell, "median (IQR)"; the
    status instead when it is not `ok`), time against the baseline, the throughput
    in each of the op's units (`work_units`: LCE's tokens/s and TFLOP/s; when the op
    does not import, `<key>/s` for each key of the records' `work`, unscaled),
@@ -512,14 +545,14 @@ torch-op-bench commits). Its sections:
    between records (e.g. `torchtitan_api`, `compile`, `op_decisions.is_cuda`), one
    per line, keys sorted, those the entry lacks left out, so a difference cannot hide in `info`. No
    table of the report is wider than 16 columns.
-5. **Sweeps**: for each axis varied around the default point, four tables (median,
+6. **Sweeps**: for each axis varied around the default point, four tables (median,
    peak, time × peak with its ratio to the baseline's in parentheses, parity with
    the failing metrics) with one column per implementation. A cell is `—` when there
    is no record, or the status when it is not `ok`. For a mode and dtype in which no
    axis varies around the point (one case, or cases that differ in two axes at
    once), the default-point table is repeated at every case present instead, one
    table per case, as `plot` says when it draws nothing for that mode and dtype.
-6. **Time at equal peak**, only when the results hold variants: per mode and dtype,
+7. **Time at equal peak**, only when the results hold variants: per mode and dtype,
    at the default point, one row per entry with variants and one column per peak
    budget, the baseline's peak above baseline there at 1×, 0.75× and 0.5× (in MiB
    in the header), the same budgets for every entry, so the table reads the same on
@@ -536,7 +569,7 @@ torch-op-bench commits). Its sections:
    the same point"): none of the entry's points lies between the smallest budget and
    the largest, so the budgets do not separate them there. Variants are in no other table but "Parity
    failures" (a note of an entry covers its variants) and "Not measured".
-7. **Reduction setting**, only with `--strict RESULTS_STRICT` (the results of a
+8. **Reduction setting**, only with `--strict RESULTS_STRICT` (the results of a
    `run --matmul-reduction strict`): first a check that every record of `RESULTS`
    has the default setting and every record of `RESULTS_STRICT` the strict one
    (read from `env.torch.matmul`; a record the runner wrote has none and is not
@@ -544,7 +577,7 @@ torch-op-bench commits). Its sections:
    renders. Then per mode and dtype, at the default point, one row per entry: the
    median of each and the time ratio strict / default; for each parity metric both
    values (in one cell, "default, strict") and the ratio default / strict; "parity moves", yes with the metrics
-   named when a ratio is outside [0.9, 1.1] (the environment check's band); and,
+   named when a ratio is outside [0.9, 1.1] (the parity band); and,
    for the torch LCE entries, `info.op_decisions`, the values in one cell. An entry
    absent from one directory, or not `ok` in one, says "not measured" and why.
    Below each table a computed reading: "Under the defaults, `<entries>` have the
@@ -552,29 +585,13 @@ torch-op-bench commits). Its sections:
    and, for each torch LCE entry, whether its default parity equals its strict
    parity: the check that, once PR pytorch#195707 lands as reviewed, torch LCE
    accumulates in fp32 under the defaults while Liger and torchtitan do not.
-8. **Parity failures**: every record whose parity is `fail`, grouped by entry, then
+9. **Parity failures**: every record whose parity is `fail`, grouped by entry, then
    by "explained: <note>" (the note's text once per entry) when one of the op's
    `parity_notes` applies there, else "**unexplained**", then by metric, with the
    records under each; then "N parity failures, M explained", a record counting
    as explained when every metric it fails is. When the op cannot be imported,
    there are no notes and every failure is unexplained, and a last sentence says so
    ("The op `<op_ref>` does not import here: …").
-9. **Environment check**: each control (`torch_eager_<env>`) against its original at
-   every point both have, as the time ratio (control / original), the peak
-   difference, and the ratio of each parity metric. A time ratio outside [0.95,
-   1.05], a difference beyond 64 MiB or a parity ratio outside [0.9, 1.1] is named
-   in a sentence: there the environment, not the counterpart, makes a difference,
-   and the counterpart must be compared with its own environment's control. Another
-   torch build can move the error of the same code (by 23 % in `grad_hidden` at one
-   shape between torch 2.14 and 2.16), so a parity comparison across environments
-   needs this too. A parity metric on one side only is reported as such. A pair
-   where only one side is `ok` (a control out of memory where its original fits) is
-   a row too, flagged `status`, with the statuses (control / original) in the time
-   ratio's place and a sentence naming the cause: the environment makes that
-   difference. A pair where neither is `ok` has no row; the paragraph above the
-   table counts the pairs compared, those with one side and those with neither side
-   measured, and "Every control is within the limits" is said only when no row is
-   flagged.
 10. **Not measured**: every `error` and `unavailable` record, grouped by cause, with
    the number of records: for an `error`, the message up to its first number (a
    token of its own, such as `4.00`, `cuda:0` or `4096x1024`; digits inside a word,
@@ -593,8 +610,8 @@ Numbers have 3 significant digits and memory is in MiB with one decimal.
 Time × peak is there because the comparison that matters for a fused kernel is
 elapsed time *and* memory together: a counterpart that is faster by holding more,
 or smaller by taking longer, does not win on it unless the product drops (the
-user's comparison; the other one is the time at equal peak memory, section 6). The
-environment check still compares time and peak separately.
+user's comparison; the other one is the time at equal peak memory, section 7). The
+baseline's controls (section 4) still compare time and peak separately.
 
 `plot` (`pip install -e .[plot]`; matplotlib, with the Agg backend, so no display
 is needed) writes PNGs at 150 dpi, per mode (and per dtype, as `-<dtype>`, when the
@@ -637,8 +654,11 @@ When no axis varies around the point, `plot` draws nothing and says so on stderr
 once per mode and dtype, and exits 0; the report's per-case tables are then the
 result.
 
-Every figure draws the baseline black, dashed and thick, and a control dotted and
-thin in its original's colour, with one marker per environment, so two controls of
+No figure, CSV sidecar or legend has a control unless `--impl` names it, as with
+the variants: the figures compare with the baseline alone, and the report's "The
+baseline's controls" compares the controls with it. Every figure draws the baseline
+black, dashed and thick, and a control `--impl` names dotted and thin in its
+original's colour, with one marker per environment, so two controls of
 one original stay apart (`plot.STYLE`, `plot.COLORS`, `plot.CONTROL_MARKERS`).
 Colours follow the op's implementation order (sorted names when the op cannot be
 imported), so an implementation has the same colour in every figure and every
@@ -650,8 +670,8 @@ failures with how many of them the op's parity notes explain ("Parity failures: 
 (4 explained), drawn hollow."); a failure stays hollow when explained. Two series of a
 panel coincide when, at every point, they lie within half a marker of each other as
 drawn (a control and its own original excepted, and two controls of one original:
-a control is styled apart, and the environment check compares each with the
-original). Series
+a control is styled apart, and the report's "The baseline's controls" compares each
+with the original). Series
 that coincide, directly or through another, are stacked in drawing order: each one
 above the first is drawn on top, dashed, at half its line width and marker size, and
 from the third on also shifted sideways, alternately left and right, by half a
