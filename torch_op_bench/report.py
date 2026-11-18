@@ -782,21 +782,39 @@ def default_sentences(
         names = analysis.implementations(here_controls)
         envs = list(dict.fromkeys(r.get("env_name") for r in here_controls))
         originals = list(dict.fromkeys(r.get("control_of") for r in here_controls))
+        several = len(names) > 1
         what = (
-            f"The controls ({_names(names)}: {_names(originals)} run inside the "
-            f"{_names(envs)} environment{'s' if len(envs) > 1 else ''})"
+            f"The control{'s' if several else ''} ({_names(names)}: {_names(originals)} run "
+            f"inside the {_names(envs)} environment{'s' if len(envs) > 1 else ''})"
         )
         see = '(see "The baseline\'s controls")'
         flagged = [g for g in mine if g["same"] or g["time_memory"]]
+        paired = {g["control"] for g in mine}
+        unpaired = [n for n in names if n not in paired]
+        # A control without a pair in this mode was never compared: named apart, not
+        # said to match (R1-56 F2).
+        apart = ""
+        if unpaired and paired:
+            apart = (
+                f"; {_names(unpaired)} {'has' if len(unpaired) == 1 else 'have'} no record "
+                f"where {'its' if len(unpaired) == 1 else 'their'} original has one"
+            )
         if not mine:
-            lines.append(f"- {what} have no record where their original has one {see}.")
+            verb = "have" if several else "has"
+            whose = "their" if several else "its"
+            lines.append(f"- {what} {verb} no record where {whose} original has one {see}.")
+        elif not flagged and apart:
+            who = [n for n in names if n in paired]
+            verb = "match" if len(who) > 1 else "matches"
+            lines.append(f"- {what}: {_names(who)} {verb} the baseline{apart} {see}.")
         elif not flagged:
-            lines.append(f"- {what} match the baseline {see}.")
+            lines.append(f"- {what} {'match' if several else 'matches'} the baseline {see}.")
         else:
             named = "; ".join(
                 f"`{g['control']}`: {', '.join(g['same'] + g['time_memory'])}" for g in flagged
             )
-            lines.append(f"- {what} do not match the baseline: {named} {see}.")
+            verb = "do" if several else "does"
+            lines.append(f"- {what} {verb} not match the baseline: {named}{apart} {see}.")
     return lines + [""]
 
 
@@ -2084,20 +2102,16 @@ def control_groups(pairs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         with_parity = [c for c in group if c["with_parity"]]
         # The largest |ratio − 1| of a metric; zero against nonzero (no ratio, both
         # values) outranks every ratio.
-        largest = None
-        for c in with_parity:
-            for value in c["parity"].values():
-                if value["side"]:
-                    continue
-                if value["ratio"] is None:
-                    largest = value
-                    break
-                if largest is not None and largest["ratio"] is None:
-                    continue
-                if value["ratio"] != 1.0 and (
-                    largest is None or abs(value["ratio"] - 1) > abs(largest["ratio"] - 1)
-                ):
-                    largest = value
+        # The metric furthest from its original's: one on one side only outranks
+        # zero against nonzero (no ratio, both values), which outranks every ratio
+        # (R1-56 F1); an equal one is not a candidate.
+        differing = [
+            value
+            for c in with_parity
+            for value in c["parity"].values()
+            if value["side"] or value["ratio"] != 1.0
+        ]
+        largest = max(differing, key=_distance, default=None)
         torches = [c["torch"] for c in group if c["torch"][0] or c["torch"][1]]
         both = [c for c in group if c["measured"] == "both"]
         found.append(
@@ -2145,9 +2159,20 @@ def _identical_cell(group: Mapping[str, Any]) -> str:
     return cell
 
 
+def _distance(value: Mapping[str, Any]) -> tuple[int, float]:
+    """How far a parity metric of a pair is from its original's, for ``max``."""
+    if value["side"]:
+        return (2, 0.0)
+    if value["ratio"] is None:
+        return (1, 0.0)
+    return (0, abs(value["ratio"] - 1))
+
+
 def _largest_cell(value: Mapping[str, Any] | None) -> str:
     if value is None:
         return MISSING
+    if value["side"]:  # one side only: no ratio, which side has it
+        return value["side"]
     if value["ratio"] is None:  # zero against nonzero: no ratio, both values
         return f"{sig3(value['control'])} / {sig3(value['original'])}"
     return sig3(value["ratio"])
@@ -2316,8 +2341,16 @@ def render_controls(
         "",
     ]
     flagged = [c for g in groups for c in g["pairs"] if c["flags"]]
-    if not flagged:
+    if not flagged and not unpaired:
         lines.append(ALL_MATCH)
+        return "\n".join(lines) + "\n"
+    if not flagged:
+        # A control without a pair was never compared: it does not "match" (R1-56 F2).
+        lines.append(
+            f"Every control with a pair matches the baseline: identical parity at every "
+            f"point with parity, time and peak within the bands. {_names(unpaired)} "
+            f"{'is' if len(unpaired) == 1 else 'are'} not compared (above)."
+        )
         return "\n".join(lines) + "\n"
     lines += [
         "The flagged pairs: there the environment, not only the counterpart, makes a "

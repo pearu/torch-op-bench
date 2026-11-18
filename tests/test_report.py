@@ -606,7 +606,7 @@ def test_controls_leave_every_table(synth, synth_strict):
         'compared here; see "The baseline\'s controls".'
     )
     assert len(named) == 1 + 4 and all(
-        line.startswith("- The controls (`base_other`: ")
+        line.startswith("- The control (`base_other`: ")
         and line.endswith('(see "The baseline\'s controls").')
         for line in named[1:]
     )
@@ -884,12 +884,15 @@ def test_parity_ratios():
         "a 2.00 against 1.00 (ratio 2.00) and c on the control only and d on the original "
         "only: differs, outside the parity band."
     ) in text
-    assert same_row(text)[-2:] == ["2.00", "differs"]
+    # A metric on one side only outranks every ratio (R1-56 F1).
+    assert same_row(text)[-2:] == ["control only", "differs"]
     # A metric on one side only is not identical, and is outside the band.
     one_sided = pair({**blank, "parity_d": 1.0}, {**blank, "parity_c": 1.0})
     text = controls_text(one_sided)
     assert "c on the control only and d on the original only: differs, outside" in text
-    assert same_row(text)[-2:] == ["—", "differs"]
+    assert same_row(text)[-2:] == ["control only", "differs"]
+    text = controls_text(pair({**blank, "parity_d": 1.0}, blank))
+    assert same_row(text)[-2:] == ["original only", "differs"]
     # Zero against nonzero: no ratio, both values shown, and it is the largest.
     zero = pair(
         {**blank, "parity_a": 0.0, "parity_b": 1.0}, {**blank, "parity_a": 1.0, "parity_b": 2.0}
@@ -1590,10 +1593,10 @@ def test_summary_generated(synth):
     # grad_rel 25 % larger at N=8 in fwd_bwd: the flags of its section's rows.
     see = '(see "The baseline\'s controls")'
     assert (
-        "- The controls (`base_other`: `base` run inside the `other` environment) do not "
+        "- The control (`base_other`: `base` run inside the `other` environment) does not "
         f"match the baseline: `base_other`: differs, time, peak {see}."
     ) in findings
-    assert f"do not match the baseline: `base_other`: time, peak {see}." in findings  # fwd
+    assert f"does not match the baseline: `base_other`: time, peak {see}." in findings  # fwd
     assert "**Over M (`fwd_bwd`, float32).** The baseline's median goes from " in findings
     assert (
         "- `compiled`: time / baseline within ±10 % of its 0.500× at the default point" in findings
@@ -1640,12 +1643,56 @@ def test_summary_controls_match(synth):
     text = make(synth)
     findings = section(text, "### Findings", "\n### ")
     sentence = (
-        "- The controls (`base_other`: `base` run inside the `other` environment) match the "
+        "- The control (`base_other`: `base` run inside the `other` environment) matches the "
         'baseline (see "The baseline\'s controls").'
     )
     assert findings.count(sentence) == 4  # each mode and dtype
-    assert "do not match" not in findings
+    assert "not match" not in findings
     assert section(text, report.CONTROLS_TITLE).rstrip().endswith(report.ALL_MATCH)
+
+
+def test_controls_without_a_pair_do_not_match(synth):
+    # R1-56 F2: a control with no record where its original has one was never
+    # compared: neither the section nor the summary says it matches.
+    with pytest.warns(UserWarning, match=MERGE_WARNING):
+        recs = analysis.load(synth)
+
+    def key(record):
+        return (record["mode"], record["case"]["dtype"], json.dumps(record["case"]["params"]))
+
+    base = {key(r): r for r in recs if r["implementation"] == "base"}
+    lone = []
+
+    def change(record):
+        if record["implementation"] == "base_other":
+            for name in ("times_ms", "memory", "parity"):
+                record[name] = base[key(record)][name]
+            other = json.loads(json.dumps(record))
+            other.update(implementation="base_lone", env_name="lone")
+            other["info"]["control_of"] = "ghost"  # no record anywhere
+            lone.append(other)
+        return record
+
+    edit_records(synth, change)
+    path = next(synth.rglob("*.jsonl"))
+    with path.open("a") as f:
+        f.writelines(json.dumps(r) + "\n" for r in lone)
+    text = make(synth)
+    part = section(text, report.CONTROLS_TITLE)
+    assert "No record of `base_lone` is at a point where its original has one." in part
+    assert report.ALL_MATCH not in part
+    assert part.rstrip().endswith(
+        "Every control with a pair matches the baseline: identical parity at every point "
+        "with parity, time and peak within the bands. `base_lone` is not compared (above)."
+    )
+    findings = section(text, "### Findings", "\n### ")
+    sentence = (
+        "- The controls (`base_lone` and `base_other`: `ghost` and `base` run inside the "
+        "`lone` and `other` environments): `base_other` matches the baseline; `base_lone` "
+        'has no record where its original has one (see "The baseline\'s controls").'
+    )
+    assert findings.count(sentence) == 4, findings
+    assert " match the baseline (see" not in findings
 
 
 def test_summary_failure_sentences(synth):
@@ -1659,7 +1706,7 @@ def test_summary_failure_sentences(synth):
     ) in findings
     assert "parity fails on grad_rel, explained (see Parity failures)." in findings
     # The controls' sentence is the section's, over the mode, at any point.
-    assert "do not match the baseline: `base_other`: differs, time, peak" in findings
+    assert "does not match the baseline: `base_other`: differs, time, peak" in findings
 
 
 def test_summary_forbidden_words(synth, synth_strict):

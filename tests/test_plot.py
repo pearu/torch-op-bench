@@ -354,7 +354,7 @@ def test_coincident_pairs():
         assert plot.coincident_pairs(pair) == {}
         assert plot.coincident_levels(pair) == {0: (0, 1, 0), 1: (0, 1, 1)}
     # Nor are two controls of one original, each in its own environment (R1-34 R1):
-    # styled alike by design; their agreement is the environment check's.
+    # styled alike by design; their agreement is the report's "The baseline's controls".
     a_other = series([100.0, 200.0, None], name="a_other", control_of="a")
     assert plot.coincident_pairs([drawn[8], a_other]) == {}
     # ... while a control on another implementation's control is still coincident.

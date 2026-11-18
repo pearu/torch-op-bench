@@ -525,9 +525,10 @@ torch-op-bench commits). Its sections:
    "Parity failures" or "Not measured". With `--baseline` naming a control, that
    control is the baseline, in every table.
 5. **At the default point** (see above; under it, each axis' value with its
-   description), per mode and dtype, two tables. The first has
-   one row per implementation, the baseline first (no control: section 4), with its environment, median and IQR (in one cell, "median (IQR)"; the
-   status instead when it is not `ok`), time against the baseline, the throughput
+   description), per mode and dtype, two tables. The first has one row per
+   implementation, the baseline first (no control: section 4), with its
+   environment, median and IQR (in one cell, "median (IQR)"; the status instead
+   when it is not `ok`), time against the baseline, the throughput
    in each of the op's units (`work_units`: LCE's tokens/s and TFLOP/s; when the op
    does not import, `<key>/s` for each key of the records' `work`, unscaled),
    peak memory above baseline and against the baseline's, **time × peak** (median ms ×
